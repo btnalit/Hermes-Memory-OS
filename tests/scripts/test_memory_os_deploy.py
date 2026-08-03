@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from scripts.deploy_memory_os import (
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    _classification_failures,
     _classify_boundary_runtime_probe,
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
@@ -1409,3 +1411,114 @@ def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
     assert {"code": "postcheck_failed"} in classify_deploy_report(report)["fail"]
     assert "postcheck_fail_codes=cognitive_loop_timer_inactive" in rendered
     assert "postcheck_cognitive_loop_timer=inactive/disabled" in rendered
+
+
+# ── preflight: a gate that never answered is not a malformed answer ───
+
+
+def test_timed_out_compat_gate_is_not_reported_as_invalid_json():
+    """Counterfactual: `_classification_failures` keyed only on "is the parsed
+    payload a dict", so a timeout produced `compat_json_invalid` and sent the
+    operator hunting for malformed JSON. Observed on 3.200: the compat gate
+    needs ~63s, the default budget was 60s, so `--phase preflight` failed on
+    default arguments and blamed the wrong cause.
+    """
+    timed_out = {
+        "exit_code": 124,
+        "stdout": "",
+        "stderr": "\ncommand timed out after 60s",
+        "json": None,
+    }
+
+    fail = _classification_failures(timed_out)
+
+    assert [item["code"] for item in fail] == ["compat_timed_out"]
+    assert fail[0]["exit_code"] == 124
+    assert "--timeout" in fail[0]["hint"]
+
+
+def test_failed_compat_command_is_distinguished_from_bad_json():
+    """A crashed gate and a gate that emitted garbage are different faults."""
+    crashed = {"exit_code": 3, "stdout": "", "stderr": "Traceback ...", "json": None}
+
+    fail = _classification_failures(crashed)
+
+    assert [item["code"] for item in fail] == ["compat_command_failed"]
+    assert fail[0]["exit_code"] == 3
+
+
+def test_successful_command_with_unparseable_output_is_still_json_invalid():
+    """The original code stays reachable for the fault it actually names."""
+    garbage = {"exit_code": 0, "stdout": "not json", "stderr": "", "json": None}
+
+    assert [item["code"] for item in _classification_failures(garbage)] == ["compat_json_invalid"]
+
+
+def test_healthy_compat_payload_reports_its_own_failures_unchanged():
+    """Distinguishing transport faults must not swallow the gate's real verdict."""
+    result = {
+        "exit_code": 0,
+        "stdout": "{}",
+        "json": {"classification": {"fail": [{"code": "shell_doctor_command_failed"}]}},
+    }
+
+    assert [item["code"] for item in _classification_failures(result)] == ["shell_doctor_command_failed"]
+
+
+def test_default_command_timeout_exceeds_the_measured_compat_gate_cost():
+    """Regression guard for the actual production symptom.
+
+    The compat gate measured ~63s on 3.200 and low-spec hosts are slower, so a
+    default at or near 60s makes `--phase preflight` fail before it starts.
+    """
+    assert DEFAULT_COMMAND_TIMEOUT_SECONDS >= 240
+
+    report = deploy_memory_os(
+        repo_root=Path(__file__).resolve().parents[2],
+        hermes_home="/tmp/hermes-home",
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="plan",
+        profile="upgrade",
+    )
+    compat = report["commands"]["compat"]
+    assert int(compat[compat.index("--timeout") + 1]) >= 240
+
+
+@pytest.mark.parametrize(
+    "classifier, prefix",
+    [
+        (_classify_llm_judge_probe, "llm_judge_probe"),
+        (_classify_cron_adapter_probe, "cron_adapter_probe"),
+        (_classify_boundary_runtime_probe, "boundary_runtime_probe"),
+    ],
+)
+def test_timed_out_probes_are_not_reported_as_invalid_json(classifier, prefix):
+    """Section W rule 5: the compat gate's defect was not unique to it.
+
+    All three probe classifiers keyed only on payload shape, so a timeout was
+    reported as `..._json_invalid` -- pointing the operator at the probe's
+    output instead of at the budget that cut it off.
+    """
+    timed_out = {"exit_code": 124, "stdout": "", "stderr": "timed out", "json": None}
+
+    report = classifier(timed_out)
+
+    assert report["reason"] == f"{prefix}_timed_out"
+    assert report["exit_code"] == 124
+    assert "--timeout" in report["hint"]
+
+
+@pytest.mark.parametrize(
+    "classifier, prefix",
+    [
+        (_classify_llm_judge_probe, "llm_judge_probe"),
+        (_classify_cron_adapter_probe, "cron_adapter_probe"),
+        (_classify_boundary_runtime_probe, "boundary_runtime_probe"),
+    ],
+)
+def test_probe_classifiers_still_report_bad_output_as_json_invalid(classifier, prefix):
+    """A completed probe emitting garbage keeps its original, accurate verdict."""
+    garbage = {"exit_code": 0, "stdout": "not json", "json": None}
+
+    assert classifier(garbage)["reason"] == f"{prefix}_json_invalid"

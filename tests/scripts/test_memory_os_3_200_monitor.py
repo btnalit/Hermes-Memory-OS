@@ -7175,3 +7175,90 @@ def test_monitor_error_observability_reports_component_coverage_gap():
     assert "memory_os.permanent_promotion" in coverage["unaggregated_components"]
     assert coverage["unaggregated_component_count"] == len(coverage["unaggregated_components"])
     assert coverage["unaggregated_component_count"] > 0
+
+
+def _disable_audit_summary(tmp_path, disable_payload, *, job_enabled=True):
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True, exist_ok=True)
+    if disable_payload is not None:
+        (system / "cron_lane_disabled.json").write_text(
+            json.dumps(disable_payload), encoding="utf-8"
+        )
+    namespace["_hermes_home"] = str(tmp_path)
+    specs_by_lane = {
+        "expression_feedback_request": {
+            "key": "expression_feedback_request",
+            "name": "memory-os-expression-feedback-request",
+            "lane_id": "expression_feedback_request",
+            "due_interval_minutes": 10080,
+        }
+    }
+    jobs_by_name = {
+        "memory-os-expression-feedback-request": {
+            "name": "memory-os-expression-feedback-request",
+            "enabled": job_enabled,
+            "schedule": "0 5 * * 0",
+        }
+    }
+    return namespace["_execution_gate_helper_completion_summary"](specs_by_lane, jobs_by_name)
+
+
+def test_documented_lane_disable_carries_its_reason_into_the_summary(tmp_path):
+    """A disabled lane with a recorded reason is explainable, not drift."""
+    summary = _disable_audit_summary(
+        tmp_path,
+        {
+            "schema_version": "memory-os.cron_lane_disabled.v1",
+            "lanes": {
+                "expression_feedback_request": {
+                    "reason": "retired with the right-brain expression lanes",
+                    "actor": "owner",
+                    "disabled_at": "2026-08-02T00:00:00Z",
+                }
+            },
+        },
+    )
+
+    assert summary["helper_completion_disabled_count"] == 1
+    record = summary["helper_completion_disabled_records"]["expression_feedback_request"]
+    assert record["source"] == "lane_disable_file"
+    assert record["reason"] == "retired with the right-brain expression lanes"
+    assert record["actor"] == "owner"
+    assert summary["helper_completion_disabled_undocumented_count"] == 0
+
+
+def test_hermes_job_level_disable_without_a_reason_is_reported_as_undocumented(tmp_path):
+    """This is the observed production state: the job is disabled in Hermes and
+    cron_lane_disabled.json does not exist, so nothing on the host records why.
+    The state may be correct, but unexplained is indistinguishable from drift.
+    """
+    summary = _disable_audit_summary(tmp_path, None, job_enabled=False)
+
+    assert summary["helper_completion_disabled_count"] == 1
+    record = summary["helper_completion_disabled_records"]["expression_feedback_request"]
+    assert record["source"] == "hermes_job"
+    assert record["reason"] == ""
+    assert summary["helper_completion_disabled_undocumented_count"] == 1
+    assert summary["helper_completion_disabled_undocumented_lanes"] == ["expression_feedback_request"]
+
+
+def test_execution_gate_helper_completion_warn_codes_are_clean_host_classified():
+    """Counterfactual: an unregistered WARN code makes the clean-host monitor
+    emit `clean_host_warn_unclassified`, which is a FAIL. None of this family
+    was registered, so any clean host with a disabled/stale/not-yet-run lane
+    went red for a state that is normal there.
+    """
+    table = monitor.CLEAN_HOST_WARN_CLASSIFICATIONS
+
+    for code in (
+        "execution_gate_memory_os_cron_helper_completion_missing",
+        "execution_gate_memory_os_cron_helper_completion_stale",
+        "execution_gate_memory_os_cron_helper_completion_disabled",
+        "execution_gate_memory_os_cron_helper_completion_disabled_without_audit_record",
+        "execution_gate_memory_os_cron_helper_boundary_unobserved",
+    ):
+        assert code in table, f"{code} would fail the clean-host monitor as unclassified"
+        # Registering must not escalate today's production WARNs into FAILs.
+        assert table[code]["production_behavior"] == "warn_if_production"

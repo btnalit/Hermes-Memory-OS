@@ -1,12 +1,16 @@
 import json
 
 from plugins.memory.memory_os.cron_registry import (
+    LANE_DISABLE_STATE_SCHEMA_VERSION,
     LEGACY_PER_LANE_CRON_JOB_NAMES,
+    build_lane_disable_state,
     cron_registry_snapshot,
     groups_from_snapshot,
     memory_os_cron_groups,
     memory_os_cron_spec_by_key,
     memory_os_cron_specs,
+    read_disabled_lane_keys,
+    read_lane_disable_records,
     specs_from_snapshot,
     write_cron_registry_snapshot,
 )
@@ -289,3 +293,72 @@ def test_every_tick_fires_at_least_as_often_as_its_fastest_installed_lane():
             f"{group.name} fires every {tick_interval}min but its fastest "
             f"installed member needs every {fastest}min"
         )
+
+
+# ── per-lane disable: audit trail ─────────────────────────────────────
+
+
+def _write_disable_file(home, payload):
+    path = home / "memory-os" / "system" / "cron_lane_disabled.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) if not isinstance(payload, str) else payload, encoding="utf-8")
+    return path
+
+
+def test_lane_disable_reads_all_three_on_disk_shapes(tmp_path):
+    """Adding audit fields must not orphan hosts already carrying the older
+    shapes -- both pre-audit forms keep disabling their lanes, they simply
+    report no reason."""
+    bare = tmp_path / "bare"
+    _write_disable_file(bare, ["alpha"])
+    wrapper = tmp_path / "wrapper"
+    _write_disable_file(wrapper, {"disabled_lane_keys": ["alpha"]})
+    audited = tmp_path / "audited"
+    _write_disable_file(
+        audited,
+        {
+            "schema_version": LANE_DISABLE_STATE_SCHEMA_VERSION,
+            "lanes": {"alpha": {"reason": "retired", "actor": "owner", "disabled_at": "2026-08-02T00:00:00Z"}},
+        },
+    )
+
+    assert read_disabled_lane_keys(bare) == frozenset({"alpha"})
+    assert read_disabled_lane_keys(wrapper) == frozenset({"alpha"})
+    assert read_disabled_lane_keys(audited) == frozenset({"alpha"})
+
+    assert read_lane_disable_records(bare)["alpha"]["reason"] == ""
+    assert read_lane_disable_records(wrapper)["alpha"]["reason"] == ""
+    audited_record = read_lane_disable_records(audited)["alpha"]
+    assert audited_record["reason"] == "retired"
+    assert audited_record["actor"] == "owner"
+    assert audited_record["disabled_at"] == "2026-08-02T00:00:00Z"
+
+
+def test_corrupt_disable_file_disables_nothing(tmp_path):
+    """Load-bearing failure direction: a corrupt file must never silently stop
+    governed lanes."""
+    home = tmp_path / "home"
+    _write_disable_file(home, "{ not json at all")
+
+    assert read_disabled_lane_keys(home) == frozenset()
+    assert read_lane_disable_records(home) == {}
+
+
+def test_missing_disable_file_disables_nothing(tmp_path):
+    assert read_disabled_lane_keys(tmp_path / "absent") == frozenset()
+    assert read_lane_disable_records(tmp_path / "absent") == {}
+
+
+def test_build_lane_disable_state_round_trips(tmp_path):
+    """An operator writing this file by hand should produce exactly what the
+    runtime and monitor already parse."""
+    home = tmp_path / "home"
+    document = build_lane_disable_state(
+        {"expression_feedback_request": {"reason": "retired with右脑表达 lanes", "actor": "owner", "disabled_at": "2026-08-02T00:00:00Z"}}
+    )
+    _write_disable_file(home, document)
+
+    assert document["schema_version"] == LANE_DISABLE_STATE_SCHEMA_VERSION
+    records = read_lane_disable_records(home)
+    assert records["expression_feedback_request"]["reason"] == "retired with右脑表达 lanes"
+    assert read_disabled_lane_keys(home) == frozenset({"expression_feedback_request"})

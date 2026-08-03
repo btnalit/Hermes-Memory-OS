@@ -206,6 +206,8 @@ ACTION_TYPES = {
     "apply_proposal",
     "allow_speak_once",
     "approve_session_mirror_apply",
+    "reject_session_mirror_apply",
+    "defer_session_mirror_apply",
     *HINDSIGHT_CURATION_ACTION_TYPES,
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
     "approve_edge",
@@ -235,7 +237,11 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
-    "session_mirror_apply": {"approve_session_mirror_apply"},
+    "session_mirror_apply": {
+        "approve_session_mirror_apply",
+        "reject_session_mirror_apply",
+        "defer_session_mirror_apply",
+    },
     "hindsight_curation": HINDSIGHT_CURATION_ACTION_TYPES,
     "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
     "provisional_crystallized_record": {
@@ -245,6 +251,12 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "edge": {"approve_edge", "reject_edge"},
     "permanent_memory_promotion": PERMANENT_PROMOTION_ACTION_TYPES,
 }
+
+# Terminal actions that close a target only until `deferred_until` passes.
+# `_closed_targets` must re-open the target once a defer expires, so every
+# defer action type has to be listed here -- a missing entry closes the target
+# permanently and silently retires the review item.
+DEFER_ACTION_TYPES = frozenset({"defer_candidate_cluster", "defer_session_mirror_apply"})
 
 
 def owner_actions_path(roots: MemoryOSRoots) -> Path:
@@ -1680,12 +1692,19 @@ def owner_review_delivery_status_report(store: MemoryOSStore) -> dict[str, Any]:
 
 
 def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
-    closed = _closed_targets(read_owner_action_records(store.roots))
+    owner_action_records = read_owner_action_records(store.roots)
+    closed = _closed_targets(owner_action_records)
     items = _candidate_cluster_review_items(store, closed)
     items.extend(_candidate_review_items(store, closed))
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
-    items.extend(_session_mirror_apply_review_items(store, closed))
+    items.extend(
+        _session_mirror_apply_review_items(
+            store,
+            closed,
+            lane_deferred=_session_mirror_lane_deferred(owner_action_records),
+        )
+    )
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
     items.extend(_provisional_crystallized_review_items(store, closed))
@@ -2762,7 +2781,8 @@ def owner_review_queue_report(
     limit: int = 20,
     permanent_promotion_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    closed = _closed_targets(read_owner_action_records(store.roots))
+    owner_action_records = read_owner_action_records(store.roots)
+    closed = _closed_targets(owner_action_records)
     items: list[dict[str, Any]] = []
     cluster_items = _candidate_cluster_review_items(store, closed)
     collapsed_candidate_ids = {
@@ -2778,7 +2798,13 @@ def owner_review_queue_report(
     )
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
-    items.extend(_session_mirror_apply_review_items(store, closed))
+    items.extend(
+        _session_mirror_apply_review_items(
+            store,
+            closed,
+            lane_deferred=_session_mirror_lane_deferred(owner_action_records),
+        )
+    )
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
     items.extend(_provisional_crystallized_review_items(store, closed))
@@ -3014,7 +3040,7 @@ def apply_owner_action(
         action_type=idempotency_action_type,
     )
     existing = _find_idempotent_action(store.roots, idempotency_key)
-    if existing and action_type == "defer_candidate_cluster" and not _defer_action_is_active(existing):
+    if existing and action_type in DEFER_ACTION_TYPES and not _defer_action_is_active(existing):
         existing = None
     if existing:
         duplicate = _duplicate_record(existing, idempotency_key, action_type, target_type, target_id, owner_id, channel)
@@ -3056,7 +3082,7 @@ def apply_owner_action(
         note=note,
         rating=rating,
     )
-    if action_type == "defer_candidate_cluster":
+    if action_type in DEFER_ACTION_TYPES:
         record["deferred_until"] = _normalized_defer_until(deferred_until)
     _attach_owner_reply_context(record, reply_context or {})
     if original_target_id != target_id:
@@ -3830,6 +3856,33 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "actual_identity_write": False,
             "actual_unapproved_crystallized_approval": False,
         }
+    if action_type in {"reject_session_mirror_apply", "defer_session_mirror_apply"}:
+        context = record.pop("action_context", {})
+        approval = (
+            context.get("session_mirror_approval")
+            if isinstance(context.get("session_mirror_approval"), dict)
+            else {}
+        )
+        fingerprint = str(approval.get("selected_pending_session_fingerprint") or "")
+        if action_type == "reject_session_mirror_apply":
+            # SessionMirror.scan() reads this fingerprint back out of the owner
+            # action ledger to drop the session from its candidate list. Losing
+            # it here would leave the rejection cosmetic: the session stays at
+            # the head of the queue and is re-offered on the next digest.
+            record["owner_effect"]["owner_rejected_session_mirror_apply"] = True
+        else:
+            record["owner_effect"]["owner_deferred_session_mirror_apply"] = True
+        return {
+            "approval_scope": "session_mirror_production_bounded_apply",
+            "stable_scope_id": str(approval.get("stable_scope_id") or ""),
+            "digest_item_id": str(approval.get("digest_item_id") or ""),
+            "selected_pending_session_fingerprint": fingerprint,
+            "boundary_contract_version": str(approval.get("boundary_contract_version") or ""),
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        }
     if action_type in HINDSIGHT_CURATION_ACTION_TYPES:
         decision = _append_hindsight_curation_decision(store, record, note=note)
         record["owner_effect"]["owner_recorded_hindsight_curation_decision"] = True
@@ -4021,7 +4074,11 @@ def _validate_action_target(
             return "speak_payload_transcript_marker"
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type != "expression":
         return "invalid_expression_target"
-    if action_type == "approve_session_mirror_apply":
+    if action_type in {
+        "approve_session_mirror_apply",
+        "reject_session_mirror_apply",
+        "defer_session_mirror_apply",
+    }:
         if target_type != "session_mirror_apply":
             return "invalid_session_mirror_apply_target"
         if not target_id.startswith("production_bounded:"):
@@ -4878,7 +4935,42 @@ def _proposal_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list
     return items
 
 
-def _session_mirror_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+def _session_mirror_lane_deferred(
+    actions: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True while an Owner defer on the SessionMirror lane is still in force.
+
+    The review item's ``target_id`` is derived from the pending session's
+    fingerprint, so it changes as soon as a different session reaches the head
+    of the queue. A per-target close therefore cannot express "stop asking me
+    about this lane" -- the next session simply produces a new target. Defer is
+    evaluated lane-wide instead, and expires on its own like every other defer.
+    """
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("action_type") or "") != "defer_session_mirror_apply":
+            continue
+        if action.get("result") not in {"applied", "duplicate_ignored"}:
+            continue
+        if _defer_action_is_active(action, now=now):
+            return True
+    return False
+
+
+def _session_mirror_apply_review_items(
+    store: MemoryOSStore,
+    closed: set[str],
+    *,
+    lane_deferred: bool,
+) -> list[dict[str, Any]]:
+    # `lane_deferred` is deliberately required: this function has two callers
+    # (digest assembly and the aging report) and a default would let one of them
+    # keep surfacing an item the Owner has silenced.
+    if lane_deferred:
+        return []
     from .session_mirror import (
         SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION,
         SessionMirror,
@@ -5821,7 +5913,10 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
     if target_type == "speak" and examples:
         return f"{examples[0]}；如果内容不合适，让 Hermes 记录具体表达反馈"
     if target_type == "session_mirror_apply" and examples:
-        return examples[0]
+        # All three are honoured now. Showing only examples[0] would leave the
+        # Owner believing approve is still the single available answer, which is
+        # the complaint that produced reject/defer in the first place.
+        return " or ".join(examples[:3])
     if target_type == "hindsight_curation" and examples:
         return " or ".join(examples[:3])
     if target_type == "candidate_cleanup":
@@ -5961,6 +6056,8 @@ def _review_consequence(target_type: str) -> str:
         return (
             "批准会授权一个 bounded SessionMirror 生产导入 scope 并允许一次真实 smoke；"
             "不写长期记忆、不发送消息、不执行工具、不改 identity/route/score。"
+            "拒绝只把这个会话永久排除在导入之外，队列里后面的会话照常提问；"
+            "延后会让整条 lane 安静到指定时间（默认 7 天）后自动重新提问。"
         )
     if target_type == "left_brain_advisor_finding":
         return "仅进入 owner digest 可见面；不会创建审批 token、不会 apply、不会改策略或长期记忆。"
@@ -6029,7 +6126,15 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
         )
         return actions
     if target_type == "session_mirror_apply":
-        return [_review_action("approve", "approve_session_mirror_apply", target_type, target_id)]
+        # approve imports this one session; reject permanently excludes it from
+        # the lane; defer silences the whole lane until `deferred_until`. Without
+        # the latter two the Owner's only options were to approve or to be asked
+        # again on the next digest.
+        return [
+            _review_action("approve", "approve_session_mirror_apply", target_type, target_id),
+            _review_action("reject", "reject_session_mirror_apply", target_type, target_id),
+            _review_action("defer", "defer_session_mirror_apply", target_type, target_id),
+        ]
     if target_type == "hindsight_curation":
         return [
             _review_action("approve", "retain_hindsight_curation", target_type, target_id),
@@ -6907,6 +7012,10 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "allow_speak_once"
     if verb == "approve" and target_type == "session_mirror_apply":
         return "approve_session_mirror_apply"
+    if verb == "reject" and target_type == "session_mirror_apply":
+        return "reject_session_mirror_apply"
+    if verb == "defer" and target_type == "session_mirror_apply":
+        return "defer_session_mirror_apply"
     if verb == "approve" and target_type == "hindsight_curation":
         return "retain_hindsight_curation"
     if verb == "reject" and target_type == "hindsight_curation":
@@ -6936,9 +7045,9 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
             "approve_edge",
         }
     if verb == "reject":
-        return action_type in {"reject_candidate", "reject_candidate_cluster", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override", "reject_edge"}
+        return action_type in {"reject_candidate", "reject_candidate_cluster", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override", "reject_edge", "reject_session_mirror_apply"}
     if verb == "defer":
-        return action_type == "defer_candidate_cluster"
+        return action_type in DEFER_ACTION_TYPES
     if verb == "feedback":
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
@@ -8873,7 +8982,7 @@ def _closed_targets(
         action_type = str(action.get("action_type", ""))
         if action_type not in TERMINAL_ACTIONS_BY_TARGET_TYPE.get(target_type, set()):
             continue
-        if action_type == "defer_candidate_cluster" and not _defer_action_is_active(action, now=now):
+        if action_type in DEFER_ACTION_TYPES and not _defer_action_is_active(action, now=now):
             continue
         closed.add(f"{target_type}:{action.get('target_id', '')}")
     return closed
@@ -8953,7 +9062,11 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return "memory_source", value
     if action_type == "allow_speak_once":
         return "speak", value
-    if action_type == "approve_session_mirror_apply":
+    if action_type in {
+        "approve_session_mirror_apply",
+        "reject_session_mirror_apply",
+        "defer_session_mirror_apply",
+    }:
         return "session_mirror_apply", value
     if action_type in HINDSIGHT_CURATION_ACTION_TYPES:
         return "hindsight_curation", value

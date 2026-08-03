@@ -1960,6 +1960,168 @@ static hygiene / public checkout probe（strict），`git diff --check` 干净�
 
 ---
 
+## BY — session_mirror reject/defer + cron lane 停用审计（2026-08-02）
+
+收网评审后 owner 指定开发待办第 4、5 两项（第 6 项 `oa_` 密钥化明确不做）。
+
+### 待办 4 — owner 无法拒绝 session_mirror 导入审批
+
+owner 只有 approve 一个选项，「别再问了」无法表达。owner 决策：**reject + defer 都做**。
+
+两者语义不同，实现路径也不同：
+
+- **reject = 这个会话别导入**。照现有 `closed` 机制按 target 关闭即可——但**只做这一步是错的**。
+  `SessionMirror.scan()` 的选择是纯队头（`platform_filtered[:limit]`，无任何排除状态），
+  于是被拒绝的会话每次 scan 仍在队头、`return []` 短路，**后面所有会话被永久饿死**，
+  而且 lane 一旦毕业，真正被导入的还是这个被拒绝的会话。所以排除必须由
+  `session_mirror.py` 自己认账：新增 `_owner_rejected_fingerprints()`，从 owner action 账本
+  读回 `reject_session_mirror_apply` 的 fingerprint 并过滤 `new_sessions`，
+  新增 `skipped_by_owner_rejection_count` 保持可见（不静默跳过）。
+  **刻意不写进 SessionMirror state**：`_rebuild_state()` 从事件重建，存那里的拒绝会在下一次
+  state 修复时无声消失、被拒会话复活。账本是 append-only 且从不由事件重建。
+  读取路径复用既有的 `read_jsonl(owner_actions_path(...))`（session_mirror 早已这么读，
+  不 import owner_actions 模块，无环）。
+- **defer = 整条 lane 安静一阵**。**不能**用关闭 target 表达——`target_id` 由队头会话 fingerprint
+  派生，换一个会话就是新 target，owner 立刻又被问。改为 lane 级判定
+  `_session_mirror_lane_deferred()`，照搬 `defer_candidate_cluster` 的既有契约
+  （`deferred_until`、默认 7 天、过期自动重开）。
+
+顺链改到的地方：action 类型集合、`TERMINAL_ACTIONS_BY_TARGET_TYPE`、
+`_closed_targets` 的 defer 过期判定抽成 `DEFER_ACTION_TYPES`（漏登记 = 永久关闭而非暂停）、
+idempotency 的过期 defer 重发、action_type→target_type 映射、
+`_owner_action_type_from_reply`、`_reply_verb_matches_action_type`、`_review_actions`、
+校验与 effect handler、owner 可见文案两处（例句原本只显示 approve 一条、后果说明只讲批准）。
+
+`_session_mirror_apply_review_items` 的 `lane_deferred` **故意设为必填关键字参数**（Section W
+第 4 条）：它有两个调用方（digest 组装、aging report），给默认值就会漏掉一个、让被 owner
+静音的项在另一个面继续出现。实测这个决定当场生效——改完两个调用方都以 TypeError 报错而非静默跳过。
+
+安全边界复核：三处 apply 路径（`cli.py:2084`、`session_mirror.py:115/1004`）都硬比对
+`approve_session_mirror_apply`，因此 reject/defer 记录**结构上不可能**授权一次导入；
+两个新类型也未加入 `DIGEST_OPTIONAL_SURFACE_ACTION_TYPES`，仍需 recorded digest 绑定。
+
+### 待办 5 — cron lane 停用没有审计痕迹
+
+生产实况：`memory-os-expression-feedback-request`（active-closure 8 个 job 之一）在 Hermes job
+层 `enabled=false`，而 `cron_lane_disabled.json` **根本不存在**——停用绕开了文档化的 per-lane
+机制，主机上没有任何地方记录原因。owner 决策：**保持停用，但补正式审计记录**。
+
+- `cron_lane_disabled.json` 升 v1：新增 `{"lanes": {key: {reason, actor, disabled_at}}}` 形状，
+  两种旧形状（裸 list、`disabled_lane_keys` 包装）继续解析并回落为空审计字段。
+  新增 `read_lane_disable_records()` / `build_lane_disable_state()`；
+  `read_disabled_lane_keys()` 改为它的派生。**"损坏文件不停用任何 lane"这一失败方向保持不变**。
+- `memory_os_cron_group_runner.py` 里的**第二份拷贝**同步（Section W 第 5 条）。
+  反事实实测：不同步的话，一旦 owner 记了原因、keys 挪到 `lanes` 下，旧解析器就读不到，
+  **审计动作本身会把停用的 lane 重新跑起来**。
+- monitor：`helper_completion_disabled_records` 带出 source/reason/actor/disabled_at；
+  新增「停用但无原因」独立信号 `helper_completion_disabled_undocumented_count` 与 WARN 码
+  `execution_gate_memory_os_cron_helper_completion_disabled_without_audit_record`。
+  状态可能是对的，但「对且无解释」在下次复审时与漂移不可区分。
+
+### 顺手关闭待办 1（比原记录严重）
+
+按 Section W 第 5 条扫同类模式时查实：**未注册的 WARN 码在 clean-host 会被判
+`clean_host_warn_unclassified`，那是 FAIL 不是 WARN**。原记录以为要不要注册取决于
+`deploy_memory_os.py` 是否接入 cron onboarding，实际无关——任何 clean host 上只要有 lane
+被停用/stale/尚未跑过，monitor 就会因为这个红。五个码全部注册，
+一律 `warn_if_production`：**只修 clean-host，绝不把现有生产 WARN 升级成 FAIL**
+（生产当前正在 WARN 的 `..._disabled` 与 `..._boundary_unobserved` 行为不变）。
+
+### 反事实覆盖
+
+7 项全部 revert→FAIL→restore→PASS 实测通过：scan 排除过滤、`DEFER_ACTION_TYPES` 过期重开、
+lane defer 静音、group runner v1 形状、monitor 未登记停用追踪、clean-host WARN 注册、
+reply verb 映射。
+
+### 测试与门
+
+3130 → **3148 passed / 13 skipped / 0 failed**（+18）。
+import cycle / write surface（unclassified 0）/ public checkout probe --strict / `git diff --check`
+全过。`static_hygiene` 的 `compileall` 子项在本 worktree 内 FAIL，经定位为 **Windows MAX_PATH
+环境伪影**：该检查把源码绝对路径镜像到临时 `pycache_prefix` 下，worktree 路径较长导致
+目标 261 字符、超 260 上限一个字符；换短 prefix 后 `compileall` exit 0，全部文件正常编译，
+非代码缺陷（主检出与 Linux CI 不受影响）。
+
+BY 自身仅 `local_pass`（在 PR #10，未合并故未部署）。但本轮顺带关闭了收网评审查出的
+**发布→部署缺口**，见下。
+
+### BY.1 — 3.200 补上 BW(#8) + BX(#9) 部署（2026-08-03）
+
+收网评审查实：生产 `deployed_head=5bf0022`，**BW 与 BX 合并后从未部署**，
+owner 每天 09:00 收到的仍是 BX 之前的渲染（口径撒谎、翻页跳项、`smfp_…`）；
+且 manifest 声明的 `active_runtime_path=/opt/Hermes-Memory-OS` 停在 `192e056`——
+即 BW 接手前那个 CI 红的 WIP commit，谁从该路径部署就会推上已知坏树。
+
+已处理：
+
+- `/opt/Hermes-Memory-OS` 由 `192e056` fast-forward 到 `54296ea`（工作树干净，纯 ff）。
+- 备份 `/root/.hermes/backups/memory-os-pre-bw-bx-20260803T042836Z`（21M，
+  含 plugins / runtime / scripts 三棵已部署代码树与旧 manifest）。
+- `deploy_memory_os.py --mode production-safe --profile upgrade` 走完
+  plan → preflight → dry-run → apply：`fail=[]`，
+  pass 含 apply_applied / postcheck_pass / deployment_manifest_write_pass /
+  cron_adapter_probe_pass / boundary_runtime_probe_pass。**未加 `--allow-restart`，Gateway 未重启。**
+- 部署后核验：live runtime `owner_actions.py` sha 前 16 位 `e43ed37c369748ba`，
+  与仓库 `54296ea` 逐字节一致；`pending_session_preview` 命中 4（BX 到位）、
+  `owner_write_authority.py` 存在（BW 到位）；manifest `deployed_head=54296ea`；
+  fresh-process import 指向 runtime 树。
+- Full Monitor（live，**从 BY worktree 的 monitor 脚本发起**，非主机上已部署的
+  `54296ea` 版；差别是前者多一条 BY 新增的 WARN 码）：**98 PASS / 7 WARN / 1 FAIL**，
+  唯一 FAIL 仍是 `v2_exposure_schema_era_unhealthy`，与本次部署无关（数据成熟度驱动，
+  实测正在推进：rollup lag 74.4h→26.5h、schema-era 分类率 0.6506→0.7018、
+  observation_days 19.7/30、conservation failures 0）。
+
+  与 08-02 部署前快照（99 PASS / 4 WARN / 1 FAIL）逐条对齐后，三条新增 WARN 全部有解释、
+  **无一是本次部署引入的回归**：
+
+  1. `..._disabled_without_audit_record` —— BY 自己新增的码，且它**在真实生产数据上一次命中**
+     就是 item 5 要抓的那个状态（`memory-os-expression-feedback-request` 在 Hermes job 层
+     停用、无任何原因记录）。属预期。
+  2. `full_monitor_runtime_over_target` —— 本次从 Windows 经 SSH 发起，非主机 cron 路径，
+     墙钟本就更长；路线图 §5-5 已登记的既有 WARN。
+  3. `low_clue_llm_judge_unavailable` —— **PASS→WARN 的那一条**（`low_clue_llm_judge_available`
+     在 08-02 是 PASS，PASS 计数 99→98 由它贡献）。经 owner 确认：**OpenAI 额度耗尽**，
+     非功能故障。判断器配置完好（`enabled=true`、`mode=bounded_vote`，实测解析到
+     `gpt-5.6-luna`/`openai-codex`），只是调用发不出去 → `status="skipped"`，
+     而 monitor 的判定是「status 不在 {error, skipped} 才算 available」，于是把
+     "额度不足导致未调用" 与 "判断器不可用" 合并成同一个 WARN。
+     **登记为 monitor 语义弱点**（外部额度/主动跳过/真故障三者不可区分），非本次部署缺陷。
+
+**部署过程中发现一个仓库缺陷（未修，登记）**：`deploy_memory_os.py` 的 `--timeout` 默认 60s，
+而它自己的第一道 compat 门 `memory_os_upgrade_compat_check.py` 在 3.200 上实测需 **63s**，
+于是默认参数下 `--phase preflight` 必然失败，且错误码是 **`compat_json_invalid`**——
+把"超时被截断"报成"JSON 非法"，指向完全错误的方向。本次以 `--timeout 300` 绕过。
+修法应是默认值调高 + 超时与 JSON 解析失败分别报码。
+
+### BY.2 — 修 BY.1 登记的 deployer 超时缺陷（2026-08-03）
+
+两个独立缺陷，一个体感一个误导：
+
+1. **默认预算低于自身第一道门的实测成本。** `--timeout` 默认 60s，而
+   `memory_os_upgrade_compat_check.py` 在 3.200 实测 **63s**，于是**默认参数下
+   `--phase preflight` 必然失败**。低配主机更慢（2.88 约 3.6GiB RAM 且吃 swap）。
+   抽出 `DEFAULT_COMMAND_TIMEOUT_SECONDS = 300` 并用于函数签名、`_run_command`、
+   argparse 三处。这是**上限不是等待**——提前结束的命令不受影响。
+2. **「没给出答案」被报成「答案格式不对」。** `_classification_failures()` 只判
+   `json` 是不是 dict，于是超时（exit 124）、崩溃、真·JSON 非法三种情况全部落
+   `compat_json_invalid`，把运维指向完全错误的方向。改为分三档：
+   `compat_timed_out`（带 `hint` 明说要调 `--timeout`）、`compat_command_failed`（带 exit_code）、
+   `compat_json_invalid`（仅当命令成功但输出不可解析）。`124` 抽成 `_TIMEOUT_EXIT_CODE`。
+
+**按 Section W 第 5 条全项目扫同类模式，查出这不是孤例**——`_classify_llm_judge_probe`、
+`_classify_cron_adapter_probe`、`_classify_boundary_runtime_probe` 三个探针分类器
+**完全相同的缺陷**（只判 payload 形状、不看 exit_code），超时同样被报成 `..._json_invalid`。
+抽 `_probe_transport_fault()` 三处统一修。另三处
+（`_classify_install`、`_run_memory_projection_refresh`、`_classify_deployment_manifest`）
+本来就先判 exit_code，**已正确，未动**。
+
+向后兼容：`exit_code` 缺省取 0（＝无传输故障证据），既有不带 exit_code 的调用与测试行为不变；
+探针输出正常但内容不合格时，原有 `..._json_invalid` 判定原样保留。
+
+反事实：4 项 revert→FAIL→restore→PASS（超时/JSON 分档、默认值下限、崩溃码、探针同族修复）。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1969,17 +2131,33 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 已修复；2/9（pytest_policy skip-count）诊断为本机环境伪影，非项目代码缺陷，不修复。
 
 当前遗留：
-1. 四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否
-   接入 cron onboarding 决定是否需要，BJ 记录）。
+1. ~~四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册~~ —— **BY 已关闭**，且实测
+   比原记录更严重：未注册的 WARN 码在 clean-host 会落 `clean_host_warn_unclassified` 即 **FAIL**，
+   与 `deploy_memory_os.py` 是否接入 cron onboarding 无关。五个码（含 BY 新增的
+   `..._disabled_without_audit_record`）全部按 `warn_if_production` 注册，生产行为不变。
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
    `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
-4. **owner 无法拒绝 session_mirror 导入审批**：`session_mirror_apply` 只暴露 approve，
-   `TERMINAL_ACTIONS_BY_TARGET_TYPE` 也只认 approve，且 target_id 随首个 pending 会话
-   fingerprint 变化。owner 目前没有「别再问了」的表达方式。补 reject/defer 需新 owner
-   action 类型 + 终态注册 + handler + 回滚契约，属治理面扩张，待 owner 决策（BX 记录）。
+4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
+5. **待 BY 合并并部署后，在 3.200 补写 `expression_feedback_request` 的停用审计记录**
+   （item 5 的数据侧，机制侧已在 BY 完成）。**现在不能写**：主机上运行的 group runner
+   仍是 `54296ea`，它只认裸 list 与 `disabled_lane_keys` 两种旧形状，此刻写 v1 的 `lanes`
+   形状会被读成"没有任何 lane 被停用"。BY 部署后再写，内容为：
+
+   ```json
+   {"schema_version": "memory-os.cron_lane_disabled.v1",
+    "lanes": {"expression_feedback_request": {
+      "reason": "<owner 填：与右脑表达 lane 一同退休>",
+      "actor": "owner",
+      "disabled_at": "<写入时 UTC>"}}}
+   ```
+
+   写完后 monitor 的 `..._disabled_without_audit_record` 应从 1 归 0，
+   `..._disabled` 仍保留（lane 确实是停用的，只是从此有据可查）。
+   注意该 lane 当前是在 Hermes **job** 层停用的；补记录不改变运行状态。
+6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2209,3 +2387,40 @@ sannai-community 仓库 README。）
   3119 → **3130 passed / 13 skipped / 0 failed**，四道静态门全过。
   仅 `local_pass`：未跑 3.200 live monitor、未部署。
   留 1 项待 owner 决策：session_mirror 审批目前无 reject/defer（待办第 4 项）。
+- `54296ea..（BY，本节）`：收网评审后按 owner 指定开发待办第 4、5 两项（第 6 项 `oa_` 密钥化
+  明确不做）。**第 4 项最重的一点不是加两个 action 类型，而是查实 reject 若只关闭 target 会
+  饿死整条队列**——`SessionMirror.scan()` 选择是纯队头且无排除状态，被拒会话每次仍在队头、
+  短路返回，后面所有会话永不出现，lane 毕业后真正导入的还是它；排除因此下沉到
+  `session_mirror.py` 自己的 `_owner_rejected_fingerprints()`，且**刻意读 owner action 账本
+  而非写进 state**（`_rebuild_state()` 从事件重建，存 state 的拒绝会在修复时无声消失）。
+  defer 则不能按 target 关闭（`target_id` 随队头 fingerprint 变，换个会话又问一遍），
+  改为 lane 级判定并照搬 `defer_candidate_cluster` 的 `deferred_until`/7 天/过期重开契约；
+  `_closed_targets` 的过期判定抽成 `DEFER_ACTION_TYPES`（漏登记 = 永久关闭而非暂停）。
+  `lane_deferred` 设为必填关键字参数，当场把两个调用方炸成 TypeError 而非静默漏改。
+  第 5 项 `cron_lane_disabled.json` 升 v1 带 reason/actor/disabled_at，两种旧形状继续解析，
+  「损坏文件不停用任何 lane」的失败方向不变，**group runner 的第二份拷贝同步**
+  （否则记录原因这个动作本身会把停用的 lane 重新跑起来），monitor 新增「停用但无原因」
+  独立 WARN 码。顺手关闭待办 1 并更正其严重性：**未注册 WARN 码在 clean-host 是 FAIL
+  不是 WARN**，与 deploy 是否接入 onboarding 无关；五个码一律按 `warn_if_production` 注册，
+  不把现有生产 WARN 升级成 FAIL。7 项反事实全部 revert→FAIL→restore→PASS 实测。
+  3130 → **3148 passed / 13 skipped / 0 failed**（+18），四道静态门全过；
+  `static_hygiene` 的 compileall 在本 worktree 内 FAIL 已定位为 Windows MAX_PATH 伪影
+  （镜像路径 261 字符超 260 一个字符，换短 prefix 后 exit 0），非代码缺陷。
+- `（BY.1，本节）`：3.200 补上 BW(#8)+BX(#9) 部署——收网评审查实生产 `deployed_head=5bf0022`、
+  两个已合并周期从未部署，owner 每日议程一直是坏渲染；且 manifest 声明的
+  `active_runtime_path=/opt` 停在 CI 红的 `192e056`。`/opt` ff 到 `54296ea`、备份后
+  `deploy_memory_os.py` production-safe 走完 apply（`fail=[]`、未重启 Gateway），
+  部署后 owner_actions sha 与 `54296ea` 逐字节一致、manifest 已绑定；
+  Full Monitor **98 PASS / 7 WARN / 1 FAIL**，唯一 FAIL 仍是与本次无关的
+  `v2_exposure_schema_era_unhealthy`（且实测在推进：lag 74.4h→26.5h）。
+  新登记一个仓库缺陷：`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s，
+  默认参数下 preflight 必失败，且错误码 `compat_json_invalid` 把超时误报成 JSON 非法。
+- `（BY.2，本节）`：修 BY.1 登记的 deployer 超时缺陷。两件事：`--timeout` 默认 60s 抽成
+  `DEFAULT_COMMAND_TIMEOUT_SECONDS = 300`（自身 compat 门在 3.200 实测 63s，默认参数下
+  preflight 必失败；低配主机更慢，且这是上限不是等待）；`_classification_failures()` 把
+  超时/崩溃/真·JSON 非法三种情况分成 `compat_timed_out`（带调 `--timeout` 的 hint）、
+  `compat_command_failed`、`compat_json_invalid`，不再把"没给出答案"报成"答案格式不对"。
+  **按 Section W 第 5 条扫出这不是孤例**——三个探针分类器（llm_judge / cron_adapter /
+  boundary_runtime）完全相同的缺陷，抽 `_probe_transport_fault()` 一并修；另三处本就先判
+  exit_code，已正确未动。`exit_code` 缺省取 0 保证既有调用行为不变。
+  4 项反事实 revert→FAIL→restore→PASS。3148 → **3159 passed / 13 skipped / 0 failed**（+11）。

@@ -393,3 +393,44 @@ def test_failed_member_still_records_attempt_so_it_retries_on_cadence(tmp_path, 
 
     assert soon["member_ran_count"] == 0
     assert soon["member_skipped_not_due_count"] == 1
+
+
+def test_v1_audited_disable_file_still_stops_the_lane(tmp_path, stub_helpers):
+    """Counterfactual: the runner's own copy of the parser only understood the
+    bare list and the `disabled_lane_keys` wrapper. Recording a *reason* moves
+    the keys under `lanes`, so an un-updated parser would find no keys and run
+    a lane the owner had disabled -- the audit trail silently re-enabling it.
+    """
+    runner = _load_group_runner()
+    home = tmp_path / "home"
+    stub_helpers("_stub_alpha.py")
+    stub_helpers("_stub_beta.py")
+    _write_snapshot(
+        home,
+        [
+            {"key": "alpha", "raw_script": "_stub_alpha.py"},
+            {"key": "beta", "raw_script": "_stub_beta.py"},
+        ],
+    )
+    disable_path = home / "memory-os" / "system" / "cron_lane_disabled.json"
+    disable_path.parent.mkdir(parents=True, exist_ok=True)
+    disable_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.cron_lane_disabled.v1",
+                "lanes": {
+                    "beta": {
+                        "reason": "retired with the right-brain expression lanes",
+                        "actor": "owner",
+                        "disabled_at": "2026-08-02T00:00:00Z",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = runner.run_group("tick_test", hermes_home=home)
+
+    assert report["member_skipped_disabled_count"] == 1
+    assert {item["key"] for item in report["members"] if item["status"] == "ok"} == {"alpha"}

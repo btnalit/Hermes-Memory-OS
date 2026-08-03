@@ -259,7 +259,9 @@ def _session_mirror_item(tmp_path, monkeypatch) -> dict[str, object]:
     from plugins.memory.memory_os import session_mirror as session_mirror_module
 
     monkeypatch.setattr(session_mirror_module, "SessionMirror", _FakeSessionMirror)
-    items = owner_actions_module._session_mirror_apply_review_items(_store(tmp_path), set())
+    items = owner_actions_module._session_mirror_apply_review_items(
+        _store(tmp_path), set(), lane_deferred=False
+    )
     assert len(items) == 1
     return items[0]
 
@@ -291,10 +293,123 @@ def test_session_preview_survives_the_bounded_digest_copy(tmp_path, monkeypatch)
 
 
 def test_session_mirror_item_offers_no_action_it_cannot_honour(tmp_path, monkeypatch):
-    """reject_session_mirror_apply does not exist; the digest must not imply it."""
+    """The digest must offer exactly the actions the processor will honour.
+
+    This previously pinned approve-only, because reject/defer did not exist and
+    the cron prompt kept teaching the model to invent `memory reject oa_...`.
+    Both now exist, so all three are offered -- but the invariant is unchanged:
+    every rendered token must be terminal for this target type.
+    """
     item = _session_mirror_item(tmp_path, monkeypatch)
     rendered = owner_actions_module._render_review_item(
         owner_actions_module._digest_item(item), section="action_required"
     )
 
-    assert set(rendered["action_tokens"]) == {"approve_session_mirror_apply"}
+    assert set(rendered["action_tokens"]) == {
+        "approve_session_mirror_apply",
+        "reject_session_mirror_apply",
+        "defer_session_mirror_apply",
+    }
+    assert (
+        set(rendered["action_tokens"])
+        <= owner_actions_module.TERMINAL_ACTIONS_BY_TARGET_TYPE["session_mirror_apply"]
+    )
+
+
+# ── Owner defer: lane-wide silence with an expiry ─────────────────────
+
+
+def _defer_action(deferred_until: str, *, result: str = "applied") -> dict[str, object]:
+    return {
+        "schema_version": "memory-os.owner_action.v0",
+        "owner_action_id": "oact_defer_session_mirror",
+        "action_type": "defer_session_mirror_apply",
+        "target_type": "session_mirror_apply",
+        "target_id": "production_bounded:whatever_was_at_the_head",
+        "owner_id": "owner",
+        "channel": "telegram",
+        "result": result,
+        "created_at": "2026-06-01T00:00:00Z",
+        "deferred_until": deferred_until,
+    }
+
+
+def test_active_lane_defer_silences_the_session_mirror_item(tmp_path, monkeypatch):
+    """"别再问了" cannot be expressed by closing a target: `target_id` is derived
+    from the pending session's fingerprint, so the next session produces a new
+    target and the Owner is asked again. Defer is evaluated lane-wide."""
+    from plugins.memory.memory_os import session_mirror as session_mirror_module
+
+    monkeypatch.setattr(session_mirror_module, "SessionMirror", _FakeSessionMirror)
+
+    assert owner_actions_module._session_mirror_lane_deferred([_defer_action("2099-01-01T00:00:00Z")]) is True
+    items = owner_actions_module._session_mirror_apply_review_items(
+        _store(tmp_path), set(), lane_deferred=True
+    )
+
+    assert items == []
+
+
+def test_expired_lane_defer_lets_the_session_mirror_item_return(tmp_path, monkeypatch):
+    """A defer is a pause, not a retirement -- it must expire on its own."""
+    from plugins.memory.memory_os import session_mirror as session_mirror_module
+
+    monkeypatch.setattr(session_mirror_module, "SessionMirror", _FakeSessionMirror)
+
+    assert owner_actions_module._session_mirror_lane_deferred([_defer_action("2020-01-01T00:00:00Z")]) is False
+    items = owner_actions_module._session_mirror_apply_review_items(
+        _store(tmp_path), set(), lane_deferred=False
+    )
+
+    assert len(items) == 1
+
+
+def test_unapplied_defer_does_not_silence_the_lane(tmp_path):
+    """A dry-run reply is not an Owner decision."""
+    assert (
+        owner_actions_module._session_mirror_lane_deferred(
+            [_defer_action("2099-01-01T00:00:00Z", result="dry_run")]
+        )
+        is False
+    )
+
+
+def test_expired_session_mirror_defer_reopens_the_target(tmp_path):
+    """`_closed_targets` skips defer action types whose `deferred_until` passed.
+
+    Counterfactual: with `defer_session_mirror_apply` missing from
+    DEFER_ACTION_TYPES the target closes permanently and the review item is
+    silently retired instead of paused.
+    """
+    active = owner_actions_module._closed_targets([_defer_action("2099-01-01T00:00:00Z")])
+    expired = owner_actions_module._closed_targets([_defer_action("2020-01-01T00:00:00Z")])
+
+    assert "session_mirror_apply:production_bounded:whatever_was_at_the_head" in active
+    assert expired == set()
+
+
+def test_session_mirror_reply_verbs_resolve_to_the_new_action_types():
+    """`memory reject oa_...` / `memory defer oa_...` must resolve for this target.
+
+    Before this existed the verbs resolved to "" and the Owner's reply was
+    refused -- which is why the cron prompt had to teach the model not to write
+    them.
+    """
+    item = {"target_type": "session_mirror_apply"}
+
+    assert owner_actions_module._owner_action_type_from_reply("approve", item) == "approve_session_mirror_apply"
+    assert owner_actions_module._owner_action_type_from_reply("reject", item) == "reject_session_mirror_apply"
+    assert owner_actions_module._owner_action_type_from_reply("defer", item) == "defer_session_mirror_apply"
+    assert owner_actions_module._reply_verb_matches_action_type("reject", "reject_session_mirror_apply") is True
+    assert owner_actions_module._reply_verb_matches_action_type("defer", "defer_session_mirror_apply") is True
+
+
+def test_session_mirror_reject_is_not_an_approval():
+    """OwnerGate: only approve may authorize the bounded import. The CLI apply
+    gate matches on `approve_session_mirror_apply`, so reject/defer must never
+    be accepted there."""
+    from plugins.memory.memory_os import owner_write_authority
+
+    assert "reject_session_mirror_apply" not in owner_write_authority.OWNER_CANONICAL_WRITE_ACTION_TYPES
+    assert "defer_session_mirror_apply" not in owner_write_authority.OWNER_CANONICAL_WRITE_ACTION_TYPES
+    assert owner_actions_module._reply_verb_matches_action_type("approve", "reject_session_mirror_apply") is False
