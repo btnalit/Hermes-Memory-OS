@@ -2065,10 +2065,27 @@ owner 每天 09:00 收到的仍是 BX 之前的渲染（口径撒谎、翻页跳
   与仓库 `54296ea` 逐字节一致；`pending_session_preview` 命中 4（BX 到位）、
   `owner_write_authority.py` 存在（BW 到位）；manifest `deployed_head=54296ea`；
   fresh-process import 指向 runtime 树。
-- Full Monitor（live）：**98 PASS / 7 WARN / 1 FAIL**，唯一 FAIL 仍是
-  `v2_exposure_schema_era_unhealthy`，与本次部署无关（数据成熟度驱动，
+- Full Monitor（live，**从 BY worktree 的 monitor 脚本发起**，非主机上已部署的
+  `54296ea` 版；差别是前者多一条 BY 新增的 WARN 码）：**98 PASS / 7 WARN / 1 FAIL**，
+  唯一 FAIL 仍是 `v2_exposure_schema_era_unhealthy`，与本次部署无关（数据成熟度驱动，
   实测正在推进：rollup lag 74.4h→26.5h、schema-era 分类率 0.6506→0.7018、
   observation_days 19.7/30、conservation failures 0）。
+
+  与 08-02 部署前快照（99 PASS / 4 WARN / 1 FAIL）逐条对齐后，三条新增 WARN 全部有解释、
+  **无一是本次部署引入的回归**：
+
+  1. `..._disabled_without_audit_record` —— BY 自己新增的码，且它**在真实生产数据上一次命中**
+     就是 item 5 要抓的那个状态（`memory-os-expression-feedback-request` 在 Hermes job 层
+     停用、无任何原因记录）。属预期。
+  2. `full_monitor_runtime_over_target` —— 本次从 Windows 经 SSH 发起，非主机 cron 路径，
+     墙钟本就更长；路线图 §5-5 已登记的既有 WARN。
+  3. `low_clue_llm_judge_unavailable` —— **PASS→WARN 的那一条**（`low_clue_llm_judge_available`
+     在 08-02 是 PASS，PASS 计数 99→98 由它贡献）。经 owner 确认：**OpenAI 额度耗尽**，
+     非功能故障。判断器配置完好（`enabled=true`、`mode=bounded_vote`，实测解析到
+     `gpt-5.6-luna`/`openai-codex`），只是调用发不出去 → `status="skipped"`，
+     而 monitor 的判定是「status 不在 {error, skipped} 才算 available」，于是把
+     "额度不足导致未调用" 与 "判断器不可用" 合并成同一个 WARN。
+     **登记为 monitor 语义弱点**（外部额度/主动跳过/真故障三者不可区分），非本次部署缺陷。
 
 **部署过程中发现一个仓库缺陷（未修，登记）**：`deploy_memory_os.py` 的 `--timeout` 默认 60s，
 而它自己的第一道 compat 门 `memory_os_upgrade_compat_check.py` 在 3.200 上实测需 **63s**，
@@ -2097,6 +2114,24 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
 4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
+5. **待 BY 合并并部署后，在 3.200 补写 `expression_feedback_request` 的停用审计记录**
+   （item 5 的数据侧，机制侧已在 BY 完成）。**现在不能写**：主机上运行的 group runner
+   仍是 `54296ea`，它只认裸 list 与 `disabled_lane_keys` 两种旧形状，此刻写 v1 的 `lanes`
+   形状会被读成"没有任何 lane 被停用"。BY 部署后再写，内容为：
+
+   ```json
+   {"schema_version": "memory-os.cron_lane_disabled.v1",
+    "lanes": {"expression_feedback_request": {
+      "reason": "<owner 填：与右脑表达 lane 一同退休>",
+      "actor": "owner",
+      "disabled_at": "<写入时 UTC>"}}}
+   ```
+
+   写完后 monitor 的 `..._disabled_without_audit_record` 应从 1 归 0，
+   `..._disabled` 仍保留（lane 确实是停用的，只是从此有据可查）。
+   注意该 lane 当前是在 Hermes **job** 层停用的；补记录不改变运行状态。
+6. `deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s（BY.1 记录），
+   默认参数下 preflight 必失败且错误码误导，未修。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
