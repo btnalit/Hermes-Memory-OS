@@ -28,6 +28,13 @@ from scripts.memory_os_host_profile import resolve_host_runtime_profile
 Runner = Callable[..., dict[str, Any]]
 FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS = 120
 FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS = 300
+_TIMEOUT_EXIT_CODE = 124
+# Per-command budget. The old 60s default was below what this tool's own first
+# gate needs: memory_os_upgrade_compat_check.py measures ~63s on 3.200, so
+# `--phase preflight` failed on default arguments alone, and low-spec hosts
+# (2.88 runs ~3.6GiB RAM under swap pressure) are slower still. This is a
+# ceiling, not a wait -- commands that finish early are unaffected.
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
 
 
 def deploy_memory_os(
@@ -41,7 +48,7 @@ def deploy_memory_os(
     phase: str,
     profile: str,
     host: str = "",
-    timeout: int = 60,
+    timeout: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     allow_restart: bool = False,
     restart_command: str = "",
     python_bin: str | None = None,
@@ -369,7 +376,7 @@ def _run_json(
     return redacted
 
 
-def _run_command(argv: list[str], *, host: str | None = None, timeout: int = 60) -> dict[str, Any]:
+def _run_command(argv: list[str], *, host: str | None = None, timeout: int = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> dict[str, Any]:
     del host
     # _build_commands() prefixes some argv lists with ["env", "KEY=VALUE", ...]
     # so HERMES_HOME is scoped per-command even when several commands run in
@@ -393,7 +400,7 @@ def _run_command(argv: list[str], *, host: str | None = None, timeout: int = 60)
         stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
         stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
         return {
-            "exit_code": 124,
+            "exit_code": _TIMEOUT_EXIT_CODE,
             "stdout": stdout,
             "stderr": stderr + f"\ncommand timed out after {timeout}s",
         }
@@ -547,7 +554,38 @@ def _run_llm_judge_probe(
     return _classify_llm_judge_probe(result)
 
 
+def _probe_transport_fault(result: dict[str, Any], *, prefix: str) -> dict[str, Any] | None:
+    """A probe that never answered is not a probe that answered badly.
+
+    Same defect class as the compat gate above: keying only on "is the payload
+    the right shape" turns a timeout or a crash into a `..._json_invalid`
+    verdict, which names the wrong cause. Returns a bounded fault report for a
+    transport failure, or None when the command completed and its output should
+    be judged on its own terms.
+    """
+    exit_code = int(result.get("exit_code", 0) or 0)
+    if exit_code == _TIMEOUT_EXIT_CODE:
+        return {
+            "status": "warn",
+            "reason": f"{prefix}_timed_out",
+            "exit_code": exit_code,
+            "hint": "raise --timeout; probes are slower on low-spec hosts",
+            "probe": result,
+        }
+    if exit_code != 0 and not isinstance(result.get("json"), dict):
+        return {
+            "status": "warn",
+            "reason": f"{prefix}_command_failed",
+            "exit_code": exit_code,
+            "probe": result,
+        }
+    return None
+
+
 def _classify_llm_judge_probe(result: dict[str, Any]) -> dict[str, Any]:
+    fault = _probe_transport_fault(result, prefix="llm_judge_probe")
+    if fault is not None:
+        return fault
     data = result.get("json")
     if not isinstance(data, dict) or data.get("schema_version") != "memory-os.low_clue_recall.v0":
         return {"status": "warn", "reason": "llm_judge_probe_json_invalid", "probe": result}
@@ -585,6 +623,9 @@ def _run_cron_adapter_probe(
 
 
 def _classify_cron_adapter_probe(result: dict[str, Any]) -> dict[str, Any]:
+    fault = _probe_transport_fault(result, prefix="cron_adapter_probe")
+    if fault is not None:
+        return fault
     data = result.get("json")
     if not isinstance(data, dict) or data.get("schema_version") != "memory-os.hermes_cron_adapter_probe.v0":
         return {"status": "warn", "reason": "cron_adapter_probe_json_invalid", "probe": result}
@@ -622,6 +663,9 @@ def _run_boundary_runtime_probe(
 
 
 def _classify_boundary_runtime_probe(result: dict[str, Any]) -> dict[str, Any]:
+    fault = _probe_transport_fault(result, prefix="boundary_runtime_probe")
+    if fault is not None:
+        return fault
     data = result.get("json")
     if not isinstance(data, dict) or data.get("schema_version") != "memory-os.boundary_runtime_probe.v0":
         return {"status": "warn", "reason": "boundary_runtime_probe_json_invalid", "probe": result}
@@ -782,7 +826,30 @@ def _classify_deployment_manifest(result: dict[str, Any], *, action: str) -> dic
 
 
 def _classification_failures(result: dict[str, Any]) -> list[dict[str, Any]]:
+    # Distinguish "the gate ran and said no" from "the gate never produced an
+    # answer".  Collapsing them into compat_json_invalid sent operators looking
+    # for malformed JSON when the real cause was a timeout: the compat check
+    # needs ~63s on 3.200 and the default budget used to be 60s, so the very
+    # first phase failed on default arguments and blamed the wrong thing.
+    exit_code = int(result.get("exit_code", 0) or 0)
+    if exit_code == _TIMEOUT_EXIT_CODE:
+        return [
+            {
+                "code": "compat_timed_out",
+                "exit_code": exit_code,
+                "hint": "raise --timeout; the compatibility gate is slower on low-spec hosts",
+                "stderr_tail": str(result.get("stderr") or "")[-300:],
+            }
+        ]
     data = result.get("json")
+    if exit_code != 0 and not isinstance(data, dict):
+        return [
+            {
+                "code": "compat_command_failed",
+                "exit_code": exit_code,
+                "stderr_tail": str(result.get("stderr") or "")[-300:],
+            }
+        ]
     if not isinstance(data, dict):
         return [{"code": "compat_json_invalid"}]
     classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
@@ -1003,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--llm-judge-preset", choices=["active", "none", "report-only", "bounded-vote"], default="active")
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")
-    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_COMMAND_TIMEOUT_SECONDS)
     parser.add_argument(
         "--python-bin",
         default="",

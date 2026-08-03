@@ -2093,6 +2093,33 @@ owner 每天 09:00 收到的仍是 BX 之前的渲染（口径撒谎、翻页跳
 把"超时被截断"报成"JSON 非法"，指向完全错误的方向。本次以 `--timeout 300` 绕过。
 修法应是默认值调高 + 超时与 JSON 解析失败分别报码。
 
+### BY.2 — 修 BY.1 登记的 deployer 超时缺陷（2026-08-03）
+
+两个独立缺陷，一个体感一个误导：
+
+1. **默认预算低于自身第一道门的实测成本。** `--timeout` 默认 60s，而
+   `memory_os_upgrade_compat_check.py` 在 3.200 实测 **63s**，于是**默认参数下
+   `--phase preflight` 必然失败**。低配主机更慢（2.88 约 3.6GiB RAM 且吃 swap）。
+   抽出 `DEFAULT_COMMAND_TIMEOUT_SECONDS = 300` 并用于函数签名、`_run_command`、
+   argparse 三处。这是**上限不是等待**——提前结束的命令不受影响。
+2. **「没给出答案」被报成「答案格式不对」。** `_classification_failures()` 只判
+   `json` 是不是 dict，于是超时（exit 124）、崩溃、真·JSON 非法三种情况全部落
+   `compat_json_invalid`，把运维指向完全错误的方向。改为分三档：
+   `compat_timed_out`（带 `hint` 明说要调 `--timeout`）、`compat_command_failed`（带 exit_code）、
+   `compat_json_invalid`（仅当命令成功但输出不可解析）。`124` 抽成 `_TIMEOUT_EXIT_CODE`。
+
+**按 Section W 第 5 条全项目扫同类模式，查出这不是孤例**——`_classify_llm_judge_probe`、
+`_classify_cron_adapter_probe`、`_classify_boundary_runtime_probe` 三个探针分类器
+**完全相同的缺陷**（只判 payload 形状、不看 exit_code），超时同样被报成 `..._json_invalid`。
+抽 `_probe_transport_fault()` 三处统一修。另三处
+（`_classify_install`、`_run_memory_projection_refresh`、`_classify_deployment_manifest`）
+本来就先判 exit_code，**已正确，未动**。
+
+向后兼容：`exit_code` 缺省取 0（＝无传输故障证据），既有不带 exit_code 的调用与测试行为不变；
+探针输出正常但内容不合格时，原有 `..._json_invalid` 判定原样保留。
+
+反事实：4 项 revert→FAIL→restore→PASS（超时/JSON 分档、默认值下限、崩溃码、探针同族修复）。
+
 ---
 
 ## 待办
@@ -2130,8 +2157,7 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    写完后 monitor 的 `..._disabled_without_audit_record` 应从 1 归 0，
    `..._disabled` 仍保留（lane 确实是停用的，只是从此有据可查）。
    注意该 lane 当前是在 Hermes **job** 层停用的；补记录不改变运行状态。
-6. `deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s（BY.1 记录），
-   默认参数下 preflight 必失败且错误码误导，未修。
+6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2389,3 +2415,12 @@ sannai-community 仓库 README。）
   `v2_exposure_schema_era_unhealthy`（且实测在推进：lag 74.4h→26.5h）。
   新登记一个仓库缺陷：`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s，
   默认参数下 preflight 必失败，且错误码 `compat_json_invalid` 把超时误报成 JSON 非法。
+- `（BY.2，本节）`：修 BY.1 登记的 deployer 超时缺陷。两件事：`--timeout` 默认 60s 抽成
+  `DEFAULT_COMMAND_TIMEOUT_SECONDS = 300`（自身 compat 门在 3.200 实测 63s，默认参数下
+  preflight 必失败；低配主机更慢，且这是上限不是等待）；`_classification_failures()` 把
+  超时/崩溃/真·JSON 非法三种情况分成 `compat_timed_out`（带调 `--timeout` 的 hint）、
+  `compat_command_failed`、`compat_json_invalid`，不再把"没给出答案"报成"答案格式不对"。
+  **按 Section W 第 5 条扫出这不是孤例**——三个探针分类器（llm_judge / cron_adapter /
+  boundary_runtime）完全相同的缺陷，抽 `_probe_transport_fault()` 一并修；另三处本就先判
+  exit_code，已正确未动。`exit_code` 缺省取 0 保证既有调用行为不变。
+  4 项反事实 revert→FAIL→restore→PASS。3148 → **3159 passed / 13 skipped / 0 failed**（+11）。
