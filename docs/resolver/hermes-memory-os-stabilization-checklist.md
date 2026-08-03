@@ -2042,7 +2042,39 @@ import cycle / write surface（unclassified 0）/ public checkout probe --strict
 目标 261 字符、超 260 上限一个字符；换短 prefix 后 `compileall` exit 0，全部文件正常编译，
 非代码缺陷（主检出与 Linux CI 不受影响）。
 
-仅 `local_pass`：本节记录时尚未部署 3.200。
+BY 自身仅 `local_pass`（在 PR #10，未合并故未部署）。但本轮顺带关闭了收网评审查出的
+**发布→部署缺口**，见下。
+
+### BY.1 — 3.200 补上 BW(#8) + BX(#9) 部署（2026-08-03）
+
+收网评审查实：生产 `deployed_head=5bf0022`，**BW 与 BX 合并后从未部署**，
+owner 每天 09:00 收到的仍是 BX 之前的渲染（口径撒谎、翻页跳项、`smfp_…`）；
+且 manifest 声明的 `active_runtime_path=/opt/Hermes-Memory-OS` 停在 `192e056`——
+即 BW 接手前那个 CI 红的 WIP commit，谁从该路径部署就会推上已知坏树。
+
+已处理：
+
+- `/opt/Hermes-Memory-OS` 由 `192e056` fast-forward 到 `54296ea`（工作树干净，纯 ff）。
+- 备份 `/root/.hermes/backups/memory-os-pre-bw-bx-20260803T042836Z`（21M，
+  含 plugins / runtime / scripts 三棵已部署代码树与旧 manifest）。
+- `deploy_memory_os.py --mode production-safe --profile upgrade` 走完
+  plan → preflight → dry-run → apply：`fail=[]`，
+  pass 含 apply_applied / postcheck_pass / deployment_manifest_write_pass /
+  cron_adapter_probe_pass / boundary_runtime_probe_pass。**未加 `--allow-restart`，Gateway 未重启。**
+- 部署后核验：live runtime `owner_actions.py` sha 前 16 位 `e43ed37c369748ba`，
+  与仓库 `54296ea` 逐字节一致；`pending_session_preview` 命中 4（BX 到位）、
+  `owner_write_authority.py` 存在（BW 到位）；manifest `deployed_head=54296ea`；
+  fresh-process import 指向 runtime 树。
+- Full Monitor（live）：**98 PASS / 7 WARN / 1 FAIL**，唯一 FAIL 仍是
+  `v2_exposure_schema_era_unhealthy`，与本次部署无关（数据成熟度驱动，
+  实测正在推进：rollup lag 74.4h→26.5h、schema-era 分类率 0.6506→0.7018、
+  observation_days 19.7/30、conservation failures 0）。
+
+**部署过程中发现一个仓库缺陷（未修，登记）**：`deploy_memory_os.py` 的 `--timeout` 默认 60s，
+而它自己的第一道 compat 门 `memory_os_upgrade_compat_check.py` 在 3.200 上实测需 **63s**，
+于是默认参数下 `--phase preflight` 必然失败，且错误码是 **`compat_json_invalid`**——
+把"超时被截断"报成"JSON 非法"，指向完全错误的方向。本次以 `--timeout 300` 绕过。
+修法应是默认值调高 + 超时与 JSON 解析失败分别报码。
 
 ---
 
@@ -2313,3 +2345,12 @@ sannai-community 仓库 README。）
   3130 → **3148 passed / 13 skipped / 0 failed**（+18），四道静态门全过；
   `static_hygiene` 的 compileall 在本 worktree 内 FAIL 已定位为 Windows MAX_PATH 伪影
   （镜像路径 261 字符超 260 一个字符，换短 prefix 后 exit 0），非代码缺陷。
+- `（BY.1，本节）`：3.200 补上 BW(#8)+BX(#9) 部署——收网评审查实生产 `deployed_head=5bf0022`、
+  两个已合并周期从未部署，owner 每日议程一直是坏渲染；且 manifest 声明的
+  `active_runtime_path=/opt` 停在 CI 红的 `192e056`。`/opt` ff 到 `54296ea`、备份后
+  `deploy_memory_os.py` production-safe 走完 apply（`fail=[]`、未重启 Gateway），
+  部署后 owner_actions sha 与 `54296ea` 逐字节一致、manifest 已绑定；
+  Full Monitor **98 PASS / 7 WARN / 1 FAIL**，唯一 FAIL 仍是与本次无关的
+  `v2_exposure_schema_era_unhealthy`（且实测在推进：lag 74.4h→26.5h）。
+  新登记一个仓库缺陷：`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s，
+  默认参数下 preflight 必失败，且错误码 `compat_json_invalid` 把超时误报成 JSON 非法。
