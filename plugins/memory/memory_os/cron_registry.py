@@ -729,23 +729,75 @@ def lane_disable_state_path(hermes_home: Path | str) -> Path:
     return Path(hermes_home) / "memory-os" / "system" / "cron_lane_disabled.json"
 
 
-def read_disabled_lane_keys(hermes_home: Path | str) -> frozenset[str]:
-    """Lane keys the owner has disabled. Unreadable/malformed state disables
-    nothing -- a corrupt file must never silently stop governed lanes."""
+LANE_DISABLE_STATE_SCHEMA_VERSION = "memory-os.cron_lane_disabled.v1"
+LANE_DISABLE_AUDIT_FIELDS = ("reason", "actor", "disabled_at")
+
+
+def read_lane_disable_records(hermes_home: Path | str) -> dict[str, dict[str, str]]:
+    """Disabled lane keys mapped to whatever audit detail the owner recorded.
+
+    Three on-disk shapes are accepted, oldest first::
+
+        ["lane_key", ...]                                   # pre-audit bare list
+        {"disabled_lane_keys": ["lane_key", ...]}           # pre-audit wrapper
+        {"lanes": {"lane_key": {"reason": ..., "actor": ..., "disabled_at": ...}}}
+
+    The first two carry no reason at all, so their records come back with empty
+    audit fields; that is what lets the monitor separate "the owner disabled
+    this lane, and here is why" from an undocumented stop.  A corrupt or
+    unreadable file disables nothing -- that failure direction keeps governed
+    lanes running rather than silently starving them.
+    """
     path = lane_disable_state_path(hermes_home)
     if not path.exists():
-        return frozenset()
+        return {}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return frozenset()
+        return {}
+    entries: Any
     if isinstance(loaded, dict):
+        lanes = loaded.get("lanes")
+        if isinstance(lanes, dict):
+            records: dict[str, dict[str, str]] = {}
+            for key, value in lanes.items():
+                lane_key = str(key)
+                if not lane_key:
+                    continue
+                detail = value if isinstance(value, dict) else {}
+                records[lane_key] = {
+                    field: str(detail.get(field) or "") for field in LANE_DISABLE_AUDIT_FIELDS
+                }
+            return records
         entries = loaded.get("disabled_lane_keys")
     else:
         entries = loaded
     if not isinstance(entries, list):
-        return frozenset()
-    return frozenset(str(entry) for entry in entries if str(entry))
+        return {}
+    return {
+        str(entry): {field: "" for field in LANE_DISABLE_AUDIT_FIELDS}
+        for entry in entries
+        if str(entry)
+    }
+
+
+def build_lane_disable_state(records: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """The v1 document shape, so an operator writing this file by hand produces
+    something the runtime and the monitor both already parse."""
+    return {
+        "schema_version": LANE_DISABLE_STATE_SCHEMA_VERSION,
+        "lanes": {
+            str(key): {field: str((detail or {}).get(field) or "") for field in LANE_DISABLE_AUDIT_FIELDS}
+            for key, detail in records.items()
+            if str(key)
+        },
+    }
+
+
+def read_disabled_lane_keys(hermes_home: Path | str) -> frozenset[str]:
+    """Lane keys the owner has disabled. Unreadable/malformed state disables
+    nothing -- a corrupt file must never silently stop governed lanes."""
+    return frozenset(read_lane_disable_records(hermes_home))
 
 
 def groups_for_specs(specs: tuple[MemoryOSCronSpec, ...]) -> tuple[MemoryOSCronGroupSpec, ...]:

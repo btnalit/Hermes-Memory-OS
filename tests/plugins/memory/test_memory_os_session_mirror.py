@@ -7,6 +7,7 @@ from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.execution_gate import execution_gate_records_path, execution_gate_scope_hash
 from plugins.memory.memory_os.fixtures import build_event
+from plugins.memory.memory_os.read_model_paths import owner_actions_path
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
@@ -906,3 +907,119 @@ def test_unreadable_session_json_is_surfaced_not_silently_skipped(tmp_path):
         if finding["id"] in {"session_json_unreadable", "session_json_not_an_object"}
     }
     assert surfaced == {"session_json_unreadable", "session_json_not_an_object"}
+
+
+# ── Owner reject: scan-level exclusion ────────────────────────────────
+
+
+def _add_session(path, *, session_id, platform="telegram", marker="B"):
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
+            (session_id, platform, "2026-05-21T09:00:00+00:00", "2026-05-21T09:01:00+00:00"),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+            [
+                (session_id, "user", "第二个会话的问题 " + marker * 120, "2026-05-21T09:00:01+00:00"),
+                (session_id, "assistant", "第二个会话的回答 " + marker * 120, "2026-05-21T09:00:02+00:00"),
+            ],
+        )
+
+
+def _reject_owner_action(store, fingerprint, *, result="applied"):
+    _append_owner_action(
+        owner_actions_path(store.roots),
+        {
+            "schema_version": "memory-os.owner_action.v0",
+            "owner_action_id": f"oact_reject_{fingerprint[:8]}",
+            "action_type": "reject_session_mirror_apply",
+            "target_type": "session_mirror_apply",
+            "target_id": f"production_bounded:{fingerprint}",
+            "owner_id": "owner",
+            "channel": "telegram",
+            "result": result,
+            "result_ref": {"selected_pending_session_fingerprint": fingerprint},
+            "owner_effect": {"owner_rejected_session_mirror_apply": True},
+        },
+    )
+
+
+def test_owner_rejected_session_stops_starving_the_sessions_behind_it(tmp_path):
+    """Counterfactual: selection is pure head-of-queue (`platform_filtered[:limit]`).
+
+    Without the scan-level rejection filter, the rejected session stays at the
+    head, is re-offered on every digest, and is still the session the lane would
+    import once graduated -- so every session behind it is starved forever.
+    """
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-a")
+    _add_session(tmp_path / "state.db", session_id="session-b")
+
+    first = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+    head = first["selected_session_fingerprints"][0]
+    assert first["skipped_by_owner_rejection_count"] == 0
+
+    _reject_owner_action(store, head)
+    after = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert after["skipped_by_owner_rejection_count"] == 1
+    assert len(after["selected_session_fingerprints"]) == 1
+    assert head not in after["selected_session_fingerprints"]
+
+
+def test_owner_rejection_survives_session_mirror_state_rebuild(tmp_path):
+    """The rejection is read from the append-only owner action ledger, never from
+    SessionMirror state: `_rebuild_state()` reconstructs state from Memory-OS
+    events, so a rejection stored there would silently vanish on the next repair
+    and the rejected session would be re-offered and eventually imported."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-a")
+    _add_session(tmp_path / "state.db", session_id="session-b")
+
+    head = SessionMirror(store).scan(dry_run=True, max_sessions=1)["selected_session_fingerprints"][0]
+    _reject_owner_action(store, head)
+
+    mirror = SessionMirror(store)
+    mirror.state_path.parent.mkdir(parents=True, exist_ok=True)
+    mirror.state_path.write_text("{ this is not json", encoding="utf-8")
+
+    rebuilt = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert rebuilt["state_rebuilt"] is True
+    assert rebuilt["skipped_by_owner_rejection_count"] == 1
+    assert head not in rebuilt["selected_session_fingerprints"]
+
+
+def test_unapplied_reject_record_does_not_exclude_the_session(tmp_path):
+    """A dry-run owner action is not a decision. Only applied/duplicate_ignored
+    rejections may remove a session from the candidate list."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-a")
+
+    head = SessionMirror(store).scan(dry_run=True, max_sessions=1)["selected_session_fingerprints"][0]
+    _reject_owner_action(store, head, result="dry_run")
+
+    after = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert after["skipped_by_owner_rejection_count"] == 0
+    assert after["selected_session_fingerprints"] == [head]
+
+
+def test_owner_rejected_session_is_never_imported_by_a_real_apply(tmp_path):
+    """The exclusion must hold on the write path, not only on the digest surface."""
+    store = _store(tmp_path)
+    _enable_test_host_apply(store)
+    _create_state_db(tmp_path / "state.db", session_id="session-a")
+    _add_session(tmp_path / "state.db", session_id="session-b")
+
+    head = SessionMirror(store).scan(dry_run=True, max_sessions=1)["selected_session_fingerprints"][0]
+    _reject_owner_action(store, head)
+
+    applied = SessionMirror(store).scan(
+        dry_run=False, max_sessions=1, apply_governance=_test_host_governance()
+    )
+
+    assert applied["skipped_by_owner_rejection_count"] == 1
+    assert head not in applied["selected_session_fingerprints"]
+    assert applied["new_event_count"] == 1

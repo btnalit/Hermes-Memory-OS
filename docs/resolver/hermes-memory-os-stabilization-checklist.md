@@ -1960,6 +1960,92 @@ static hygiene / public checkout probe（strict），`git diff --check` 干净�
 
 ---
 
+## BY — session_mirror reject/defer + cron lane 停用审计（2026-08-02）
+
+收网评审后 owner 指定开发待办第 4、5 两项（第 6 项 `oa_` 密钥化明确不做）。
+
+### 待办 4 — owner 无法拒绝 session_mirror 导入审批
+
+owner 只有 approve 一个选项，「别再问了」无法表达。owner 决策：**reject + defer 都做**。
+
+两者语义不同，实现路径也不同：
+
+- **reject = 这个会话别导入**。照现有 `closed` 机制按 target 关闭即可——但**只做这一步是错的**。
+  `SessionMirror.scan()` 的选择是纯队头（`platform_filtered[:limit]`，无任何排除状态），
+  于是被拒绝的会话每次 scan 仍在队头、`return []` 短路，**后面所有会话被永久饿死**，
+  而且 lane 一旦毕业，真正被导入的还是这个被拒绝的会话。所以排除必须由
+  `session_mirror.py` 自己认账：新增 `_owner_rejected_fingerprints()`，从 owner action 账本
+  读回 `reject_session_mirror_apply` 的 fingerprint 并过滤 `new_sessions`，
+  新增 `skipped_by_owner_rejection_count` 保持可见（不静默跳过）。
+  **刻意不写进 SessionMirror state**：`_rebuild_state()` 从事件重建，存那里的拒绝会在下一次
+  state 修复时无声消失、被拒会话复活。账本是 append-only 且从不由事件重建。
+  读取路径复用既有的 `read_jsonl(owner_actions_path(...))`（session_mirror 早已这么读，
+  不 import owner_actions 模块，无环）。
+- **defer = 整条 lane 安静一阵**。**不能**用关闭 target 表达——`target_id` 由队头会话 fingerprint
+  派生，换一个会话就是新 target，owner 立刻又被问。改为 lane 级判定
+  `_session_mirror_lane_deferred()`，照搬 `defer_candidate_cluster` 的既有契约
+  （`deferred_until`、默认 7 天、过期自动重开）。
+
+顺链改到的地方：action 类型集合、`TERMINAL_ACTIONS_BY_TARGET_TYPE`、
+`_closed_targets` 的 defer 过期判定抽成 `DEFER_ACTION_TYPES`（漏登记 = 永久关闭而非暂停）、
+idempotency 的过期 defer 重发、action_type→target_type 映射、
+`_owner_action_type_from_reply`、`_reply_verb_matches_action_type`、`_review_actions`、
+校验与 effect handler、owner 可见文案两处（例句原本只显示 approve 一条、后果说明只讲批准）。
+
+`_session_mirror_apply_review_items` 的 `lane_deferred` **故意设为必填关键字参数**（Section W
+第 4 条）：它有两个调用方（digest 组装、aging report），给默认值就会漏掉一个、让被 owner
+静音的项在另一个面继续出现。实测这个决定当场生效——改完两个调用方都以 TypeError 报错而非静默跳过。
+
+安全边界复核：三处 apply 路径（`cli.py:2084`、`session_mirror.py:115/1004`）都硬比对
+`approve_session_mirror_apply`，因此 reject/defer 记录**结构上不可能**授权一次导入；
+两个新类型也未加入 `DIGEST_OPTIONAL_SURFACE_ACTION_TYPES`，仍需 recorded digest 绑定。
+
+### 待办 5 — cron lane 停用没有审计痕迹
+
+生产实况：`memory-os-expression-feedback-request`（active-closure 8 个 job 之一）在 Hermes job
+层 `enabled=false`，而 `cron_lane_disabled.json` **根本不存在**——停用绕开了文档化的 per-lane
+机制，主机上没有任何地方记录原因。owner 决策：**保持停用，但补正式审计记录**。
+
+- `cron_lane_disabled.json` 升 v1：新增 `{"lanes": {key: {reason, actor, disabled_at}}}` 形状，
+  两种旧形状（裸 list、`disabled_lane_keys` 包装）继续解析并回落为空审计字段。
+  新增 `read_lane_disable_records()` / `build_lane_disable_state()`；
+  `read_disabled_lane_keys()` 改为它的派生。**"损坏文件不停用任何 lane"这一失败方向保持不变**。
+- `memory_os_cron_group_runner.py` 里的**第二份拷贝**同步（Section W 第 5 条）。
+  反事实实测：不同步的话，一旦 owner 记了原因、keys 挪到 `lanes` 下，旧解析器就读不到，
+  **审计动作本身会把停用的 lane 重新跑起来**。
+- monitor：`helper_completion_disabled_records` 带出 source/reason/actor/disabled_at；
+  新增「停用但无原因」独立信号 `helper_completion_disabled_undocumented_count` 与 WARN 码
+  `execution_gate_memory_os_cron_helper_completion_disabled_without_audit_record`。
+  状态可能是对的，但「对且无解释」在下次复审时与漂移不可区分。
+
+### 顺手关闭待办 1（比原记录严重）
+
+按 Section W 第 5 条扫同类模式时查实：**未注册的 WARN 码在 clean-host 会被判
+`clean_host_warn_unclassified`，那是 FAIL 不是 WARN**。原记录以为要不要注册取决于
+`deploy_memory_os.py` 是否接入 cron onboarding，实际无关——任何 clean host 上只要有 lane
+被停用/stale/尚未跑过，monitor 就会因为这个红。五个码全部注册，
+一律 `warn_if_production`：**只修 clean-host，绝不把现有生产 WARN 升级成 FAIL**
+（生产当前正在 WARN 的 `..._disabled` 与 `..._boundary_unobserved` 行为不变）。
+
+### 反事实覆盖
+
+7 项全部 revert→FAIL→restore→PASS 实测通过：scan 排除过滤、`DEFER_ACTION_TYPES` 过期重开、
+lane defer 静音、group runner v1 形状、monitor 未登记停用追踪、clean-host WARN 注册、
+reply verb 映射。
+
+### 测试与门
+
+3130 → **3148 passed / 13 skipped / 0 failed**（+18）。
+import cycle / write surface（unclassified 0）/ public checkout probe --strict / `git diff --check`
+全过。`static_hygiene` 的 `compileall` 子项在本 worktree 内 FAIL，经定位为 **Windows MAX_PATH
+环境伪影**：该检查把源码绝对路径镜像到临时 `pycache_prefix` 下，worktree 路径较长导致
+目标 261 字符、超 260 上限一个字符；换短 prefix 后 `compileall` exit 0，全部文件正常编译，
+非代码缺陷（主检出与 Linux CI 不受影响）。
+
+仅 `local_pass`：本节记录时尚未部署 3.200。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1969,17 +2055,16 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 已修复；2/9（pytest_policy skip-count）诊断为本机环境伪影，非项目代码缺陷，不修复。
 
 当前遗留：
-1. 四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否
-   接入 cron onboarding 决定是否需要，BJ 记录）。
+1. ~~四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册~~ —— **BY 已关闭**，且实测
+   比原记录更严重：未注册的 WARN 码在 clean-host 会落 `clean_host_warn_unclassified` 即 **FAIL**，
+   与 `deploy_memory_os.py` 是否接入 cron onboarding 无关。五个码（含 BY 新增的
+   `..._disabled_without_audit_record`）全部按 `warn_if_production` 注册，生产行为不变。
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
    `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
-4. **owner 无法拒绝 session_mirror 导入审批**：`session_mirror_apply` 只暴露 approve，
-   `TERMINAL_ACTIONS_BY_TARGET_TYPE` 也只认 approve，且 target_id 随首个 pending 会话
-   fingerprint 变化。owner 目前没有「别再问了」的表达方式。补 reject/defer 需新 owner
-   action 类型 + 终态注册 + handler + 回滚契约，属治理面扩张，待 owner 决策（BX 记录）。
+4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2209,3 +2294,22 @@ sannai-community 仓库 README。）
   3119 → **3130 passed / 13 skipped / 0 failed**，四道静态门全过。
   仅 `local_pass`：未跑 3.200 live monitor、未部署。
   留 1 项待 owner 决策：session_mirror 审批目前无 reject/defer（待办第 4 项）。
+- `54296ea..（BY，本节）`：收网评审后按 owner 指定开发待办第 4、5 两项（第 6 项 `oa_` 密钥化
+  明确不做）。**第 4 项最重的一点不是加两个 action 类型，而是查实 reject 若只关闭 target 会
+  饿死整条队列**——`SessionMirror.scan()` 选择是纯队头且无排除状态，被拒会话每次仍在队头、
+  短路返回，后面所有会话永不出现，lane 毕业后真正导入的还是它；排除因此下沉到
+  `session_mirror.py` 自己的 `_owner_rejected_fingerprints()`，且**刻意读 owner action 账本
+  而非写进 state**（`_rebuild_state()` 从事件重建，存 state 的拒绝会在修复时无声消失）。
+  defer 则不能按 target 关闭（`target_id` 随队头 fingerprint 变，换个会话又问一遍），
+  改为 lane 级判定并照搬 `defer_candidate_cluster` 的 `deferred_until`/7 天/过期重开契约；
+  `_closed_targets` 的过期判定抽成 `DEFER_ACTION_TYPES`（漏登记 = 永久关闭而非暂停）。
+  `lane_deferred` 设为必填关键字参数，当场把两个调用方炸成 TypeError 而非静默漏改。
+  第 5 项 `cron_lane_disabled.json` 升 v1 带 reason/actor/disabled_at，两种旧形状继续解析，
+  「损坏文件不停用任何 lane」的失败方向不变，**group runner 的第二份拷贝同步**
+  （否则记录原因这个动作本身会把停用的 lane 重新跑起来），monitor 新增「停用但无原因」
+  独立 WARN 码。顺手关闭待办 1 并更正其严重性：**未注册 WARN 码在 clean-host 是 FAIL
+  不是 WARN**，与 deploy 是否接入 onboarding 无关；五个码一律按 `warn_if_production` 注册，
+  不把现有生产 WARN 升级成 FAIL。7 项反事实全部 revert→FAIL→restore→PASS 实测。
+  3130 → **3148 passed / 13 skipped / 0 failed**（+18），四道静态门全过；
+  `static_hygiene` 的 compileall 在本 worktree 内 FAIL 已定位为 Windows MAX_PATH 伪影
+  （镜像路径 261 字符超 260 一个字符，换短 prefix 后 exit 0），非代码缺陷。

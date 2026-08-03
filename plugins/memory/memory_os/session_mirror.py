@@ -54,6 +54,7 @@ def _bounded_auto_apply_dry_run(report: dict[str, Any]) -> dict[str, Any]:
         "selected_session_count": int(report.get("selected_session_count") or 0),
         "skipped_by_platform_count": int(report.get("skipped_by_platform_count") or 0),
         "skipped_by_limit_count": int(report.get("skipped_by_limit_count") or 0),
+        "skipped_by_owner_rejection_count": int(report.get("skipped_by_owner_rejection_count") or 0),
         "selected_session_fingerprints": [
             str(item)
             for item in (report.get("selected_session_fingerprints") if isinstance(report.get("selected_session_fingerprints"), list) else [])
@@ -365,6 +366,29 @@ class SessionMirror:
             "findings": findings,
         }
 
+    def _owner_rejected_fingerprints(self) -> frozenset[str]:
+        """Pending-session fingerprints the Owner rejected from a digest reply.
+
+        Read from the owner action ledger, not from SessionMirror state:
+        ``_rebuild_state()`` reconstructs state from Memory-OS events, so a
+        rejection recorded there would silently vanish on the next state repair
+        and the rejected session would be re-offered and eventually imported.
+        The ledger is append-only and is never rebuilt from events.
+        """
+        rejected: set[str] = set()
+        for record in read_jsonl(owner_actions_path(self.store.roots)):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("action_type") or "") != "reject_session_mirror_apply":
+                continue
+            if str(record.get("result") or "") not in {"applied", "duplicate_ignored"}:
+                continue
+            result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
+            fingerprint = str(result_ref.get("selected_pending_session_fingerprint") or "")
+            if fingerprint:
+                rejected.add(fingerprint)
+        return frozenset(rejected)
+
     def scan(
         self,
         *,
@@ -379,11 +403,23 @@ class SessionMirror:
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         covered = self._provider_captured_session_ids()
-        new_sessions = [
+        pending_sessions = [
             session
             for session in sessions
             if session["session_id"] not in covered and session["dedup_key"] not in state["seen_sessions"]
         ]
+        # An Owner rejection is honoured here rather than only on the digest
+        # surface. Selection is otherwise pure head-of-queue (`[:limit]` below),
+        # so a rejected session would be re-offered on every scan, permanently
+        # starving every session behind it, and would still be the one this lane
+        # imported once the lane graduated.
+        rejected_fingerprints = self._owner_rejected_fingerprints()
+        new_sessions = [
+            session
+            for session in pending_sessions
+            if str(session.get("fingerprint") or "") not in rejected_fingerprints
+        ]
+        skipped_by_owner_rejection_count = len(pending_sessions) - len(new_sessions)
         platforms = _normalize_platform_allowlist(platform_allowlist)
         platform_filtered = [
             session for session in new_sessions if not platforms or str(session.get("platform") or "").lower() in platforms
@@ -429,6 +465,7 @@ class SessionMirror:
                     "selected_session_count": len(selected_sessions),
                     "skipped_by_platform_count": skipped_by_platform_count,
                     "skipped_by_limit_count": skipped_by_limit_count,
+                    "skipped_by_owner_rejection_count": skipped_by_owner_rejection_count,
                     "new_event_count": 0,
                     "dry_run": False,
                     "apply_bounded": True,
@@ -482,6 +519,7 @@ class SessionMirror:
                 selected_session_count=len(selected_sessions),
                 skipped_by_platform_count=skipped_by_platform_count,
                 skipped_by_limit_count=skipped_by_limit_count,
+                skipped_by_owner_rejection_count=skipped_by_owner_rejection_count,
                 platform_allowlist=platforms,
                 max_sessions=limit,
                 selected_sessions=selected_safe_sessions,
@@ -502,6 +540,7 @@ class SessionMirror:
             "selected_session_count": len(selected_sessions),
             "skipped_by_platform_count": skipped_by_platform_count,
             "skipped_by_limit_count": skipped_by_limit_count,
+            "skipped_by_owner_rejection_count": skipped_by_owner_rejection_count,
             "new_event_count": len(selected_sessions),
             "dry_run": dry_run,
             "apply_bounded": not dry_run or bool(limit or platforms),
@@ -691,6 +730,7 @@ class SessionMirror:
         selected_session_count: int,
         skipped_by_platform_count: int,
         skipped_by_limit_count: int,
+        skipped_by_owner_rejection_count: int,
         platform_allowlist: list[str],
         max_sessions: int,
         selected_sessions: list[dict[str, Any]],
@@ -715,6 +755,7 @@ class SessionMirror:
             "selected_session_count": selected_session_count,
             "skipped_by_platform_count": skipped_by_platform_count,
             "skipped_by_limit_count": skipped_by_limit_count,
+            "skipped_by_owner_rejection_count": skipped_by_owner_rejection_count,
             "written_event_ids": written_event_ids,
             "written_event_ids_count": len(written_event_ids),
             "selected_sessions": selected_sessions,

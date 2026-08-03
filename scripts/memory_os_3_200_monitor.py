@@ -326,6 +326,37 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host can expose bounded component suppressed-error counters without proving runtime unhealthy",
         "production_behavior": "warn_if_production",
     },
+    # ExecutionGate cron helper-completion family. An unclassified WARN is a
+    # clean-host FAIL (`clean_host_warn_unclassified`), and none of these five
+    # were registered -- so any host where a lane was disabled, stale, or had
+    # not yet run turned the clean-host monitor red for a state that is normal
+    # there. `warn_if_production` is deliberate: it preserves today's
+    # production behaviour exactly rather than escalating live WARNs to FAIL.
+    "execution_gate_memory_os_cron_helper_completion_missing": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host installs the lanes before any of them has run, so completion evidence is legitimately absent",
+        "production_behavior": "warn_if_production",
+    },
+    "execution_gate_memory_os_cron_helper_completion_stale": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host has no natural cron cadence, so the newest completion record ages past its lane window",
+        "production_behavior": "warn_if_production",
+    },
+    "execution_gate_memory_os_cron_helper_completion_disabled": {
+        "classification": "expected_clean_host",
+        "reason": "a disabled lane is an owner/operator decision, not an install or runtime defect",
+        "production_behavior": "warn_if_production",
+    },
+    "execution_gate_memory_os_cron_helper_completion_disabled_without_audit_record": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host disables jobs without writing the per-lane audit record; the gap is reported, not treated as a defect",
+        "production_behavior": "warn_if_production",
+    },
+    "execution_gate_memory_os_cron_helper_boundary_unobserved": {
+        "classification": "expected_clean_host",
+        "reason": "boundary evidence only exists once a lane has actually executed under its envelope",
+        "production_behavior": "warn_if_production",
+    },
     "doctor_warning_finding": {
         "classification": "expected_clean_host",
         "reason": "clean-host can surface non-blocking doctor warnings during bootstrap compatibility checks",
@@ -2380,6 +2411,22 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "code": "execution_gate_memory_os_cron_helper_completion_disabled",
                         "count": helper_disabled,
                         "lanes": execution_gate_cron.get("helper_completion_disabled_lanes") or [],
+                        "records": execution_gate_cron.get("helper_completion_disabled_records") or {},
+                    }
+                )
+            helper_disabled_undocumented = int(
+                execution_gate_cron.get("helper_completion_disabled_undocumented_count") or 0
+            )
+            if helper_disabled_undocumented > 0:
+                # The lane is stopped and nothing on the host records why. The
+                # state may well be correct -- but "correct and unexplained" is
+                # indistinguishable from drift on the next review, so it is
+                # reported rather than folded into the plain disabled WARN.
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_completion_disabled_without_audit_record",
+                        "count": helper_disabled_undocumented,
+                        "lanes": execution_gate_cron.get("helper_completion_disabled_undocumented_lanes") or [],
                     }
                 )
             if helper_stale > 0:
@@ -7513,11 +7560,18 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     # member of its group), so per-lane control is restored via this list --
     # see plugins/memory/memory_os/cron_registry.read_disabled_lane_keys.
     try:
-        from plugins.memory.memory_os.cron_registry import read_disabled_lane_keys
+        from plugins.memory.memory_os.cron_registry import read_lane_disable_records
 
-        disabled_lane_keys = read_disabled_lane_keys(_hermes_home)
+        lane_disable_records = read_lane_disable_records(_hermes_home)
     except Exception:
-        disabled_lane_keys = frozenset()
+        lane_disable_records = {}
+    disabled_lane_keys = frozenset(lane_disable_records)
+    # A lane can also be stopped by disabling its Hermes job directly, which
+    # bypasses the per-lane file and therefore records no reason anywhere.
+    # That is a different fact from a documented owner disable and is reported
+    # separately -- otherwise the WARN says a lane is off but nothing says why.
+    disabled_undocumented: list[str] = []
+    disabled_records: dict[str, dict[str, str]] = {}
     for lane in sorted(expected_lanes):
         spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
         job_name = str(spec.get("name") or "")
@@ -7527,6 +7581,16 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         owner_disabled_lane = bool(lane_key) and lane_key in disabled_lane_keys
         if (isinstance(cron_job, dict) and cron_job.get("enabled") is False) or owner_disabled_lane:
             disabled.append(lane)
+            audit = lane_disable_records.get(lane_key) if owner_disabled_lane else {}
+            audit = audit if isinstance(audit, dict) else {}
+            disabled_records[lane] = {
+                "source": "lane_disable_file" if owner_disabled_lane else "hermes_job",
+                "reason": str(audit.get("reason") or ""),
+                "actor": str(audit.get("actor") or ""),
+                "disabled_at": str(audit.get("disabled_at") or ""),
+            }
+            if not disabled_records[lane]["reason"]:
+                disabled_undocumented.append(lane)
             if record:
                 # A disabled job isn't expected to produce FRESH evidence,
                 # but if a completion record already exists, any recorded
@@ -7594,6 +7658,9 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_missing_lanes": missing,
         "helper_completion_reconciled_lanes": reconciled_via_cron_status,
         "helper_completion_disabled_lanes": disabled,
+        "helper_completion_disabled_records": disabled_records,
+        "helper_completion_disabled_undocumented_count": len(disabled_undocumented),
+        "helper_completion_disabled_undocumented_lanes": disabled_undocumented,
         "helper_completion_reconciliation_status": "degraded" if reconciled_via_cron_status else "not_used",
         "helper_completion_accounted_count": len(completed) + len(missing) + len(reconciled_via_cron_status) + len(disabled),
         "helper_completion_stale_lanes": stale,

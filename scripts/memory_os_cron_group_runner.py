@@ -342,6 +342,14 @@ def _load_group_from_registry(group_key: str) -> tuple[dict[str, Any], list[dict
 
 
 def _read_disabled_lane_keys(hermes_home: Path) -> frozenset[str]:
+    """Mirror of ``cron_registry.read_lane_disable_records`` for the installed
+    layout, where the registry module may not be importable.
+
+    Three shapes are accepted: the pre-audit bare list, the pre-audit
+    ``disabled_lane_keys`` wrapper, and the v1 ``lanes`` map carrying
+    reason/actor/disabled_at.  The tick only needs the keys, but it must not
+    stop honouring a disable just because the owner recorded a reason for it.
+    """
     path = hermes_home / "memory-os" / "system" / "cron_lane_disabled.json"
     if not path.exists():
         return frozenset()
@@ -350,6 +358,8 @@ def _read_disabled_lane_keys(hermes_home: Path) -> frozenset[str]:
     except (OSError, json.JSONDecodeError):
         # A corrupt disable list must never silently stop governed lanes.
         return frozenset()
+    if isinstance(loaded, dict) and isinstance(loaded.get("lanes"), dict):
+        return frozenset(str(key) for key in loaded["lanes"] if str(key))
     entries = loaded.get("disabled_lane_keys") if isinstance(loaded, dict) else loaded
     if not isinstance(entries, list):
         return frozenset()
