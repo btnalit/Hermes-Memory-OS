@@ -18,6 +18,7 @@ from .jsonl_io import (
 )
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
+from .timeutil import parse_utc
 
 
 EXECUTION_GATE_SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
@@ -688,16 +689,13 @@ def rotate_execution_gate_records(
 
 
 def _record_created_at(record: dict[str, Any]) -> datetime | None:
-    raw = str(record.get("created_at") or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    # `created_at` on these records is written by this module itself
+    # (`now.isoformat().replace("+00:00", "Z")`), so it is always a full
+    # machine-generated ISO timestamp -- which is what makes parse_utc a safe
+    # substitute here. parse_utc is deliberately stricter than fromisoformat
+    # (it rejects date-only and second-less values), so sites parsing
+    # user- or config-supplied timestamps must not be migrated the same way.
+    return parse_utc(str(record.get("created_at") or "").strip(), allow_naive=True)
 
 
 def _expiry_status(value: Any, *, now: datetime | None = None, require_present: bool = False) -> str:

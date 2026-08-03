@@ -33,9 +33,17 @@ class TestParseUtc:
         assert parse_utc("2026-07-22T12:00:00") is None
 
     def test_naive_allowed(self):
+        # This previously asserted `dt.tzinfo is None`, pinning a defect: the
+        # function's docstring promises "a timezone-aware datetime in UTC", and
+        # every inlined copy it exists to replace coerces a naive value to UTC.
+        # Returning naive made the helper unusable -- subtracting it from an
+        # aware datetime raises TypeError. Nobody hit it because nothing in
+        # production ever called this module, so its own test simply encoded
+        # its own assumption. allow_naive means "accept input carrying no
+        # offset", not "hand back something that cannot be used".
         dt = parse_utc("2026-07-22T12:00:00", allow_naive=True)
         assert dt is not None
-        assert dt.tzinfo is None
+        assert dt.tzinfo == timezone.utc
 
     def test_empty_string(self):
         assert parse_utc("") is None
@@ -151,3 +159,62 @@ class TestAliases:
     def test_parse_dt(self):
         assert parse_dt("2026-07-22T12:00:00Z") is not None
         assert parse_dt("2026-07-22T12:00:00") is None  # naive rejected
+
+# ── allow_naive must still return a UTC-aware datetime ────────────────
+
+
+def _inlined_parse(value):
+    """The shape this helper exists to replace, copied verbatim from the
+    call sites that have been running it in production for months."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def test_allow_naive_returns_utc_aware_not_naive():
+    """Counterfactual: without the fix this returns a NAIVE datetime, and the
+    first caller that subtracts it from an aware datetime raises
+    TypeError: can't subtract offset-naive and offset-aware datetimes.
+
+    The docstring promises "a timezone-aware datetime in UTC"; allow_naive
+    means "accept input carrying no offset", not "return something unusable".
+    """
+    parsed = parse_utc("2026-08-03T04:05:06", allow_naive=True)
+
+    assert parsed is not None
+    assert parsed.tzinfo == timezone.utc
+    # The arithmetic that would have blown up.
+    assert (datetime(2026, 8, 3, 5, 0, 0, tzinfo=timezone.utc) - parsed).total_seconds() > 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-03T04:05:06Z",
+        "2026-08-03T04:05:06+08:00",
+        "2026-08-03T04:05:06",
+        "2026-08-03T04:05:06.123456Z",
+        "2026-08-03 04:05:06",
+        "",
+    ],
+)
+def test_parse_utc_matches_the_inlined_implementation_it_replaces(value):
+    """Differential test: migrating a call site must not change its result."""
+    assert parse_utc(value, allow_naive=True) == _inlined_parse(value)
+
+
+@pytest.mark.parametrize("value", ["2026-08-03", "2026-08-03T04:05"])
+def test_parse_utc_is_deliberately_stricter_than_fromisoformat(value):
+    """Standing hazard, pinned on purpose.
+
+    parse_utc rejects date-only and second-less timestamps; the inlined
+    implementation accepts both. Any call site that currently accepts these
+    formats will SILENTLY START DROPPING RECORDS if migrated. This test exists
+    so that divergence is a documented contract rather than a surprise.
+    """
+    assert _inlined_parse(value) is not None
+    assert parse_utc(value, allow_naive=True) is None
