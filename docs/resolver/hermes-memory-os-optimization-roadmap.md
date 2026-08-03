@@ -264,14 +264,14 @@ designed
      例外，生成式独立脚本不 import 仓库模块）；`timeutil` 当前唯一生产采用路径为
      `__init__ → session_approval`，其余 5 个消费方（continuity/lifecycle/proposal_state/
      natural_evidence/restraint）自身均为 helper-only；
-   - `natural_evidence` typed provenance/观察窗/毕业门 helper（生产 natural-row 门控见 4.4，
+   - ~~`natural_evidence`~~ **已删除（2026-08-03）**：生产 natural-row 门控走 `execution_gate.resolve_trigger_class()`（生产 natural-row 门控见 4.4，
      不经过此模块）；
    - `restraint`（DenialTracker / SessionPriority / CandidateEvaluation，与 9.3 一致，缺主会话
      真实 caller）；
    - `recall_golden` 正式召回 consumer；
-   - `lifecycle` 正式 runtime caller；
+   - ~~`lifecycle`~~ **已删除（2026-08-03）**：`plugins/system/lifecycle.py` 才是在用的那个；
    - `error_registry` 全局 consumer；
-   - `proposal_state` OwnerAction/token ledger 迁移；
+   - ~~`proposal_state`~~ **已删除（2026-08-03）**：终态判定由 `TERMINAL_ACTIONS_BY_TARGET_TYPE` + `DEFER_ACTION_TYPES` 承载；
    - `continuity` system prompt/overlay consumer；
    - `gap_note` 正式 session/recall renderer；
    - `seed_evidence_incremental` 生产调用；
@@ -338,7 +338,7 @@ observation_days >= configured_gate
   typed helper 未采用，继续审计剩余 consumer。
 - timeutil：公共 helper 与 fixture 完成；剩余 10 处 ad-hoc parser 待逐模块迁移（清单见 P2 #10）。
 - error registry：保持 helper/tested，直至生产 consumer 迁移。
-- SectionStatus：helper/tested；Full Monitor section 尚未统一迁移。
+- ~~SectionStatus~~ **已删除（2026-08-03）**：接线意味着大改 `memory_os_3_200_monitor.py`，与 CLAUDE.md「大文件只做最小定向改动」冲突。
 - Proposal/Token state：helper/tested；OwnerActionProcessor/token ledger 尚未迁移。
 - Trigger provenance：`natural_cron | manual | legacy_unmarked` 类型封闭，manual 不得伪造 natural envelope。
 
