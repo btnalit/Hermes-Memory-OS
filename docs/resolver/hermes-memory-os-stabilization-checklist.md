@@ -2470,6 +2470,76 @@ static hygiene（含 compileall）/ public checkout probe `--strict` /
 - 相关性下限对**生产规模**数据的行为未验证（本地测试都是近空库 + 2200 字宽预算）。
 - ①未实现。
 
+### CA.1 — 按本节文档对 3.200 的完整只读核对与复盘（2026-08-04）
+
+**全程只读**：无部署、无重启、无写入。C 仍未部署（按 Owner 裁定全部完成后统一部署）。
+
+#### 与文档一致（4 项，逐条实测）
+
+| 断言 | 实况 |
+|---|---|
+| `deployed_head` = `01356df` | manifest `01356df3a52a…`、`active_runtime_path=/opt/Hermes-Memory-OS`；`/opt` HEAD 同值且工作树干净——**manifest 与 `/opt` 本次无漂移** |
+| C 未部署 | 三角互证：`continuity_freshness.jsonl` 不存在、live `prefetch.py` 中 `_record_continuity_freshness` 出现 0 次、`/opt` 停在 C 之前 |
+| 8 job / tick 错开 / legacy 暂停不删 | **26 = 7 enabled + 19 paused**；`2,17,32,47`、`7,37`、`12`、`5 0` 逐字一致；第 8 个 `expression-feedback-request` 为 Owner 刻意停用 |
+| lane 停用有审计记录 | `memory-os.cron_lane_disabled.v1`，`expression_feedback_request` 的 actor=owner / 2026-07-28 / reason 已填 |
+
+#### Full Monitor 基线已变化：97/6/1 → **102 PASS / 5 WARN / 1 FAIL**
+
+FAIL 仍只有 `v2_exposure_schema_era_unhealthy`。
+**口径声明**：本次 monitor **由本整合分支发起，非主机已部署的 `01356df`**，
+差别至少含本轮新增的 `continuity_freshness_ledger_absent_healthy`（PASS）
+——与 BY.1 记录的同类口径问题一致，比较时须扣除。
+runtime 181.197s / 目标 180s → `full_monitor_runtime_over_target` 仍 WARN。
+
+#### 文档漂移 1（好的方向）：LLM 判断器已恢复
+
+BY.1 记的「`low_clue_llm_judge_unavailable` WARN，OpenAI 额度耗尽」**已过期**：
+本次 `low_clue_llm_judge_available` 在 **PASS** 列。
+独立佐证：`system-modules/fact_judge/verdicts.jsonl` 643 行，最近 80 次
+`failure_reason` 分布 **`none: 58` / `llm_empty_content: 22`** —— 通路可用（72.5%），
+但**约 27.5% 返回空**。
+**这实测验证了待办 12（①）的设计决定**：若①继承 `_call_hermes_runtime_model`
+裸返回 `""`，约四分之一的抽取会静默产出空。照抄 `fact_judge` 的重试 + 具名
+failure_reason + 确定性兜底**不是保守，是必需**。
+
+#### 文档漂移 2（真缺口）：那个唯一 FAIL 不会自己好，且无告警
+
+路线图 P1-4 与 BY.1 称该 FAIL「数据成熟度驱动，**实测正在推进**（lag 74.4h→26.5h）」。
+实况：`exposure_rollup.jsonl` 共 **16 行，最后一行 2026-08-01T16:05**（此前 07-29/30/31 亦有空档）。
+lag 靠新 rollup 缩小，停产则只会重涨——**"正在推进"当前不成立**。
+
+更精确的诊断（比"停了"更值得记）：该 lane **08-01/02/03 每天都开了 envelope**
+（`due_interval_minutes=1440`，00:05 本地 = 16:05 UTC，时区差已核），
+但**只有 08-01 那次产出了账本行**。**跑了却不产出。**
+
+#### 本次核对最重要的结论：一个反复出现的缺陷模式
+
+**系统观测"跑过了"，不观测"产出了"。** 三个独立实例同型：
+
+| 实例 | 被观测到 | 未被观测到 |
+|---|---|---|
+| `exposure_rollup` | 08-01/02/03 envelope 完整 | 仅 08-01 产出账本行 |
+| `session_mirror` | 637 次 apply 运行 | 累计 `finding_count` = 0（且积压 1574→1575 在涨） |
+| `_call_hermes_runtime_model` | 调用返回 | 返回 `""` 与成功不可区分 |
+
+monitor 的 helper completion 只判 envelope，**`completion ≠ output`**，因此
+三者皆无告警。批次 C 的账本设计（状态迁移去重 + `unknown_grade_count` 计数器）
+刚好是这个模式的反面——**那不是巧合，应当推广为通例**。
+已登记为待办 14。
+
+#### 本次核对中我自己的两次误报（方法教训，须记）
+
+1. **「26 个 cron job 而文档说 8」** —— 错。截断了输出 + 未把 19 个 paused legacy 计入。
+   8 注册 − 1 Owner 停用 = 7 enabled，文档准确。
+2. **「`working_cleanup`/`hindsight_advisory_digest` 4 天没跑 = monitor 漏报」** —— 错。
+   两者 `due_interval_minutes=10080`（**7 天**），4 天 < 7 天，**不该判 stale**，
+   `stale=0` 是正确的。而且这恰好证明 CLAUDE.md 警告的那个陷阱
+   （用 group cron 表达式推导窗口会把周 lane 误报 stale）**生产里正确避开了**。
+
+**两次都是"先报警、后核实"。** 与本会话早先那三次（方案 §4.1 的错误说法、
+臆造批次 G、">140 不可恢复"）是同一个毛病：**结论跑在证据前面**。
+在这份清单里，报警和核实之间必须隔一次 grep。
+
 ---
 
 ## 待办
@@ -2548,7 +2618,19 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 13. **`session_mirror` 一般性队头偏置未修**（CA 实测）。
     `selected_sessions = platform_filtered[:limit]`，BY 只修了被拒会话饿死后队那一半。
     与待办 12 相关但独立：即使①另建 lane，这条仍使 `session_mirror` 自身永远追不上积压。
-
+14. **monitor 只观测"跑过了"，不观测"产出了"**（CA.1 查出，未修——**本轮最重要的一条**）。
+    helper completion 只判 ExecutionGate envelope，`completion ≠ output`。三个同型实例：
+    `exposure_rollup` 08-01/02/03 envelope 齐全但只有 08-01 产出账本行（**唯一那个 FAIL
+    因此不会自己好，且无任何告警**，路线图 P1-4 的"实测正在推进"当前不成立）；
+    `session_mirror` 637 次运行 findings=0 且积压在涨；`_call_hermes_runtime_model`
+    返回 `""` 与成功不可区分。
+    修法方向：为有产出契约的 lane 增加"本次产出行数/新增记录数"信号，
+    completion 与 production 分别判定。批次 C 账本的
+    状态迁移去重 + `unknown_grade_count` 正是这个模式的反面，**应推广为通例**。
+15. **`exposure_rollup` 跑了却不产出**（CA.1 实测，未诊断到根因）。
+    `due_interval_minutes=1440`，08-01/02/03 均按时执行，仅 08-01 追加了账本行。
+    需查它在什么条件下决定不 append（可能是"无新合格数据即不写"的正常行为，
+    也可能是静默失败）——**这两种可能对那个 FAIL 的处置完全不同**，不许猜。
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
 sannai-community 仓库 README。）
@@ -2876,3 +2958,18 @@ sannai-community 仓库 README。）
   复用 `_call_hermes_runtime_model`（Hermes 自身模型，已有两个先例），未实现。
   3071 → **3089 passed / 13 skipped / 0 failed**（+18），四门全过；
   **仅 `local_pass`，三项均未部署 3.200**（按 Owner 裁定全部完成后统一部署）。
+- `（CA.1，本节）`：按 CA 节逐条对 3.200 做**只读**核对与复盘（无部署/重启/写入）。
+  **4 项与文档一致**（`deployed_head=01356df` 且 manifest 与 `/opt` 本次无漂移；
+  C 未部署经三角互证；26 job = 7 enabled + 19 paused 且 tick 分钟逐字一致；
+  lane 停用审计记录完整）。**Full Monitor 基线由 97/6/1 变为 102 PASS / 5 WARN / 1 FAIL**
+  （本次由整合分支发起而非已部署的 `01356df`，须扣除本轮新增的 PASS 码——与 BY.1 同一口径问题）。
+  **两处文档漂移**：① BY.1 记的「LLM 判断器因额度耗尽 WARN」已过期，现为 PASS，
+  `fact_judge` 最近 80 次 `none:58 / llm_empty_content:22` 佐证通路可用但约 27.5% 返回空
+  ——**实测验证了待办 12 必须照抄 `fact_judge` 的失败处理而非继承裸 `""`**；
+  ② 路线图 P1-4 的「唯一 FAIL 正在推进」**当前不成立**——`exposure_rollup` 08-01/02/03
+  每天开 envelope 但只有 08-01 产出账本行，lag 只会重涨且**无任何告警**。
+  由此得出本轮最重要的结论并登记为待办 14：**系统观测"跑过了"，不观测"产出了"**
+  （`exposure_rollup` / `session_mirror` 637 次 0 findings / `_call_hermes_runtime_model`
+  返回 `""` 三个同型实例），而批次 C 账本的迁移去重 + unknown 计数器正是其反面，应推广。
+  **另如实记下本次我自己的两次误报**（「26 vs 8」、「周 lane 4 天未跑 = 漏报」），
+  两次都是结论跑在证据前面——与本会话早先三次同一个毛病。
