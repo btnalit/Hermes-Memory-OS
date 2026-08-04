@@ -2502,15 +2502,29 @@ BY.1 记的「`low_clue_llm_judge_unavailable` WARN，OpenAI 额度耗尽」**�
 裸返回 `""`，约四分之一的抽取会静默产出空。照抄 `fact_judge` 的重试 + 具名
 failure_reason + 确定性兜底**不是保守，是必需**。
 
-#### 文档漂移 2（真缺口）：那个唯一 FAIL 不会自己好，且无告警
+#### 文档漂移 2：那个唯一 FAIL —— 我最初的诊断也是错的（已于同日修正，见 CA.2）
 
-路线图 P1-4 与 BY.1 称该 FAIL「数据成熟度驱动，**实测正在推进**（lag 74.4h→26.5h）」。
-实况：`exposure_rollup.jsonl` 共 **16 行，最后一行 2026-08-01T16:05**（此前 07-29/30/31 亦有空档）。
-lag 靠新 rollup 缩小，停产则只会重涨——**"正在推进"当前不成立**。
+BY.1（本清单 L2070-2072）称该 FAIL「数据成熟度驱动，**实测正在推进**：
+rollup lag 74.4h→26.5h、schema-era 分类率 0.6506→0.7018」。
+我当时反驳为「`exposure_rollup` 停产，lag 只会重涨，'正在推进'不成立」。
+（附带纠正：此处原文把该说法也记到"路线图 P1-4"名下，**属误引**——
+路线图只在 L218/L291 要求"继续观察 lag/attribution/conservation"，并未声称正在推进；
+且它 L107 早已正确写明唯一 FAIL 是 `v2_exposure_schema_era_unhealthy`。）
 
-更精确的诊断（比"停了"更值得记）：该 lane **08-01/02/03 每天都开了 envelope**
-（`due_interval_minutes=1440`，00:05 本地 = 16:05 UTC，时区差已核），
-但**只有 08-01 那次产出了账本行**。**跑了却不产出。**
+**双方都错，且错在同一个轴上**：monitor 里**根本不存在 lag 门控**。
+`grep -n "exposure_rollup_lag" scripts/memory_os_3_200_monitor.py` 零命中；
+`exposure_rollup_lag_hours` 只由 `exposure_monitor_stats()` 计算并上报，
+**从未进入 PASS/WARN/FAIL 判定**。拿 lag 论证 FAIL 是否推进，无论方向都无意义。
+
+真正的 FAIL 与根因见 CA.2。此处仅保留方法教训：
+**在用某个指标论证结论之前，先 grep 它是否真的被门控。**
+一个"被计算并上报"的指标不等于一个"会告警"的指标。
+
+BY.1 那句话里**真正需要推翻的不是"正在推进"，而是"数据成熟度驱动"**：
+CA.2 实测该 FAIL 的唯一驱动因素是 `schema_era_attribution_gap_count = 69`，
+而它是一个**代码缺陷**（`working` 段落从不填 `source_ids`），不是成熟度不足。
+**再等多久都不会自己好。** 一个佐证：BY.1 记的分类率是 `0.6506→0.7018`，
+本次实测仍是 **0.7018**，一位不差——那条曲线早已停住。
 
 #### 本次核对最重要的结论：一个反复出现的缺陷模式
 
@@ -2518,14 +2532,19 @@ lag 靠新 rollup 缩小，停产则只会重涨——**"正在推进"当前不�
 
 | 实例 | 被观测到 | 未被观测到 |
 |---|---|---|
-| `exposure_rollup` | 08-01/02/03 envelope 完整 | 仅 08-01 产出账本行 |
+| `exposure_rollup` | envelope 完整关闭 | **两条"不产出"退出路径的证据完全相同**：`if not new_records` 的良性跳过（L141）与 `source_cursor_not_found` 的永久错误（L128-138），都在开 envelope 前 return，都不写 jsonl、也不写 snapshot |
 | `session_mirror` | 637 次 apply 运行 | 累计 `finding_count` = 0（且积压 1574→1575 在涨） |
-| `_call_hermes_runtime_model` | 调用返回 | 返回 `""` 与成功不可区分 |
+| `_call_hermes_runtime_model` | 调用返回 | 返回 `""` 与成功不可区分（实测 27.5% `llm_empty_content`） |
 
 monitor 的 helper completion 只判 envelope，**`completion ≠ output`**，因此
-三者皆无告警。批次 C 的账本设计（状态迁移去重 + `unknown_grade_count` 计数器）
-刚好是这个模式的反面——**那不是巧合，应当推广为通例**。
-已登记为待办 14。
+三者皆无告警。`exposure_rollup` 这一行尤其说明问题：它其实**已经**在 report 里
+写了 `skipped=True`，但那个 report 只返回给调用方、不落盘，于是从产物侧
+**一个永久坏掉的 lane 与一个正常空转的 lane 长得一模一样**——本轮要区分它们，
+不得不读源码 + 手工把游标拿去和 `memory_sources.jsonl` 比对（见 CA.2）。
+
+批次 C 的账本设计（状态迁移去重 + `unknown_grade_count` 计数器）刚好是这个模式的
+反面——**那不是巧合，应当推广为通例**。已登记为待办 14，并已写入 CLAUDE.md
+新增小节 **“Completion Is Not Output”**（含"不产出必须落盘写明原因码"的硬要求）。
 
 #### 本次核对中我自己的两次误报（方法教训，须记）
 
@@ -2539,6 +2558,110 @@ monitor 的 helper completion 只判 envelope，**`completion ≠ output`**，�
 **两次都是"先报警、后核实"。** 与本会话早先那三次（方案 §4.1 的错误说法、
 臆造批次 G、">140 不可恢复"）是同一个毛病：**结论跑在证据前面**。
 在这份清单里，报警和核实之间必须隔一次 grep。
+
+---
+
+### CA.2 — 待办 15 结案 + 那个唯一 FAIL 的真实根因（2026-08-04，只读实测）
+
+CA.1 把待办 15 留成"不许猜"的开放项：`exposure_rollup` 每天开 envelope 却不追加账本行，
+**"无新合格数据"与"静默失败"对处置的要求完全相反**。本节把它查到底，
+结论是**两个假设都不成立，答案是第三种**，并顺带定位到那个唯一 FAIL 的真实根因。
+
+#### 一、读源码：`exposure_rollup` 有两条"不产出"退出路径
+
+`plugins/memory/memory_os/exposure_rollup.py::run_exposure_rollup_cycle`：
+
+| 位置 | 条件 | 行为 | 性质 |
+|---|---|---|---|
+| L141-143 | `if not new_records` | `skipped=True` 直接 return | **良性**，按设计不写 |
+| L128-138 | `_latest_source_cursor` 返回 `source_cursor_not_found` | `status="error"` 直接 return | **永久失败** |
+
+两条**都在开 envelope 之前 return**，因此 jsonl 与 snapshot **都不写**
+（snapshot 写在 L309-326，且是 `except Exception: pass` 的 best-effort）。
+这解释了实测现象：两个文件 mtime 完全相同、都停在 `2026-08-02 00:05:18 +0800`。
+**证据侧无法区分**——这就是待办 14 那个模式的教科书实例。
+
+`source_cursor_not_found` 的危险性值得单记：`_latest_source_cursor` 是 fail-closed 的，
+一旦压缩把游标记录从 `memory_sources.jsonl` 移除，之后**每一次运行都会走同一条错误路径、
+永远不产出**，而 lag 只会单调增长。
+
+#### 二、判别式实测：游标仍在队首 ⇒ 良性空转
+
+只读探针（远端 `python3`，不落任何文件）：
+
+```
+memory_sources.jsonl   rows: 988   mtime 2026-08-01T15:51:08 (+0800)
+  最后一条 created_at : 2026-08-01T07:51:08.673109Z
+  最后一条 record_id  : msrc_20260801T075108673109Z_4d466577
+exposure_rollup.jsonl  rows: 16
+  最后一行 window_end            : 2026-08-01T16:05:18.054652Z
+  最后一行 source_offset_end     : 988
+  最后一行 source_cursor_record_id: msrc_20260801T075108673109Z_4d466577
+  ⇒ 游标命中 index 987 / 988 ⇒ new_records = 0
+```
+
+**结论：走 L141 良性分支，非缺陷。** `source_offset_end = 988` 等于源文件总行数，
+游标就是最后一条记录，上游自 `08-01T07:51Z` 起零增长 —— lane 没有输入可处理。
+**待办 15 结案。**
+
+#### 三、纠正我自己在 CA.1 里的错误：monitor 根本没有 lag 门控
+
+CA.1（以及路线图 P1-4）都在用 `exposure_rollup_lag_hours` 论证那个 FAIL 是否推进。
+`grep -n "exposure_rollup_lag" scripts/memory_os_3_200_monitor.py` → **零命中**。
+该指标只由 `exposure_monitor_stats()` 计算并上报，**从不进入 PASS/WARN/FAIL**。
+**用一个不被门控的指标论证告警状态，方向对错都无意义。**
+教训并入待办 14：**"被计算并上报"≠"会告警"，引用指标前先 grep 它是否真的被判定。**
+
+#### 四、那么那个唯一 FAIL 到底是什么：`working` 段落缺归因
+
+远端实测 `exposure_monitor_stats()`：
+
+```
+schema_era_health                    = FAIL
+schema_era_attribution_gap_count     = 69      ← 唯一驱动因素
+schema_era_conservation_failure_count= 0
+telemetry_degraded_count             = 0
+conservation_total_passes            = True
+schema_era_natural_record_count      = 170
+schema_era_classified_ratio          = 0.7018
+exposure_rollup_lag_hours            = 68.0    （不被门控，仅供参考）
+```
+
+`schema_era_health` 的判定是 `FAIL if schema_gap or conservation_failures or
+telemetry_degraded_count`（L473-475），后两项皆 0 ⇒ **FAIL 完全由 69 个归因缺口驱动**。
+
+再按 `source_class` 分组（只读探针，复用 `_memory_source_has_attribution_gap` 同一判据）：
+
+| source_class | bucket | 缺口段落数 | 有归因段落数 |
+|---|---|---|---|
+| `working` | dropped | **41** | 0 |
+| `working` | selected | **28** | 0 |
+| `crystallized` | dropped | 0 | 83 |
+| `crystallized` | selected | 0 | 50 |
+
+**69 个缺口 100% 集中在 `working`，且 `working` 从无一次填对；`crystallized` 133 段零缺口。**
+即 prefetch 披露工作记忆时报了 `chars`/`count` > 0，却从不填 `source_ids`。
+
+同一缺陷的另一面：`_extract_record_ids_from_section`（L80-86）只接受
+`crystallized:` / `candidate:` 前缀，所以 `working` 记录**即使填了 ID 也不会被分类** ——
+这正是 `classified_ratio = 0.7018`（≈30% 处理了但分类不到）的来源。两个数字同源。
+
+**未修，登记为待办 16。** 修前必须先定的设计问题：工作记忆记录的规范 ID 前缀是什么
+（新增 `working:`？），以及归因补齐后 `classified_ratio`/`conservation` 语义是否需同步调整。
+这一条与"关键事实漏失"同源——都在 prefetch 披露侧，是批次 C 的邻接面。
+
+#### 五、方法记账
+
+本节唯一做对的地方是**先读源码把"不产出"的所有退出路径穷举出来，再设计判别式实测**，
+而不是从现象直接推断。CA.1 的错误恰恰相反：拿一个没验证过是否被门控的指标去论证结论。
+**顺序是——穷举分支 → 设计判别式 → 取证 → 才下结论。**
+
+（3.200 全程只读：无部署、无重启、无写入。批次 C 仍未部署，按 Owner 要求全部任务完成后统一部署。）
+
+**遗留清理项**：3.200 的 `/tmp` 下有 4 个历史遗留克隆目录
+（`hmos-fresh-clone-QQ82NL`、`Hermes-Memory-OS-community-commit-clone`、
+`Hermes-Memory-OS-community-clean2`、`Hermes-Memory-OS-community-clean`），
+系早前会话的探针残留。本轮只记录未删除（生产主机上的删除动作需 Owner 确认）。
 
 ---
 
@@ -2620,17 +2743,36 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     与待办 12 相关但独立：即使①另建 lane，这条仍使 `session_mirror` 自身永远追不上积压。
 14. **monitor 只观测"跑过了"，不观测"产出了"**（CA.1 查出，未修——**本轮最重要的一条**）。
     helper completion 只判 ExecutionGate envelope，`completion ≠ output`。三个同型实例：
-    `exposure_rollup` 08-01/02/03 envelope 齐全但只有 08-01 产出账本行（**唯一那个 FAIL
-    因此不会自己好，且无任何告警**，路线图 P1-4 的"实测正在推进"当前不成立）；
-    `session_mirror` 637 次运行 findings=0 且积压在涨；`_call_hermes_runtime_model`
-    返回 `""` 与成功不可区分。
+    `exposure_rollup` 的两条不产出退出路径（良性跳过 / `source_cursor_not_found`
+    永久错误）在产物侧证据完全相同；`session_mirror` 637 次运行 findings=0 且积压在涨；
+    `_call_hermes_runtime_model` 返回 `""` 与成功不可区分（实测 27.5%）。
     修法方向：为有产出契约的 lane 增加"本次产出行数/新增记录数"信号，
-    completion 与 production 分别判定。批次 C 账本的
+    completion 与 production 分别判定；**不产出时必须落盘写明封闭原因码**，
+    使读者不重跑、不读源码即可区分"无合格输入"与"处理失败"。批次 C 账本的
     状态迁移去重 + `unknown_grade_count` 正是这个模式的反面，**应推广为通例**。
-15. **`exposure_rollup` 跑了却不产出**（CA.1 实测，未诊断到根因）。
-    `due_interval_minutes=1440`，08-01/02/03 均按时执行，仅 08-01 追加了账本行。
-    需查它在什么条件下决定不 append（可能是"无新合格数据即不写"的正常行为，
-    也可能是静默失败）——**这两种可能对那个 FAIL 的处置完全不同**，不许猜。
+    已写入 CLAUDE.md 新增小节 “Completion Is Not Output”。
+15. ~~**`exposure_rollup` 跑了却不产出**~~ —— **已诊断结案，属良性空转，非缺陷**（CA.2）。
+    游标实测仍在队首（`msrc_20260801T075108673109Z_4d466577`，index 987/988）⇒
+    `new_records = 0` ⇒ 走 L141 `skipped=True` 良性分支，**按设计不写任何文件**。
+    上游 `memory_sources.jsonl` 自 `2026-08-01T07:51:08Z` 起零增长，故 lane 无输入可处理。
+    **未落入 `source_cursor_not_found` 那条永久错误路径**（该路径仍是真实风险，
+    压缩一旦移除游标记录即永久静默失败，已并入待办 14 的产出可观测性要求）。
+    附带纠正：本条原文（以及路线图 P1-4）都在用 lag 论证，而 monitor 中**并不存在
+    lag 门控**，`exposure_rollup_lag_hours` 只计算上报、从不参与判定。
+16. **那个唯一 FAIL 的真实根因：`working` 段落缺 `source_ids` 归因**（CA.2 实测定位，未修）。
+    **这是代码缺陷、不是数据成熟度问题——再等多久都不会自己好**（BY.1 记的分类率
+    `0.6506→0.7018`，本次实测仍精确为 `0.7018`，曲线早已停住）。
+    FAIL 码是 `v2_exposure_schema_era_unhealthy`，由 `schema_era_attribution_gap_count = 69`
+    单独驱动（conservation 与 telemetry 均为 0，`conservation_total_passes = True`）。
+    按 `source_class` 分组后 **69 个缺口 100% 集中在 `working`**（dropped 41 + selected 28），
+    而 `crystallized` 133 个段落**零缺口**——即 prefetch 披露工作记忆时报了
+    `chars`/`count` > 0 却从不填 `source_ids`。
+    同一缺陷的另一面：`exposure_rollup._extract_record_ids_from_section` 只接受
+    `crystallized:` / `candidate:` 前缀，因此 `working` 记录**即使填了 ID 也无法被分类**，
+    这正是 `schema_era_classified_ratio = 0.7018`（≈30% 处理了但分类不到）的来源。
+    修前须定的设计问题：**工作记忆记录的规范 ID 前缀是什么**（新增 `working:`？），
+    以及归因补齐后 `classified_ratio` 与 `conservation` 的语义是否需同步调整。
+    与"关键事实漏失"同源——都发生在 prefetch 披露侧，属批次 C 的邻接面。
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
 sannai-community 仓库 README。）
@@ -2967,9 +3109,25 @@ sannai-community 仓库 README。）
   `fact_judge` 最近 80 次 `none:58 / llm_empty_content:22` 佐证通路可用但约 27.5% 返回空
   ——**实测验证了待办 12 必须照抄 `fact_judge` 的失败处理而非继承裸 `""`**；
   ② 路线图 P1-4 的「唯一 FAIL 正在推进」**当前不成立**——`exposure_rollup` 08-01/02/03
-  每天开 envelope 但只有 08-01 产出账本行，lag 只会重涨且**无任何告警**。
+  每天开 envelope 但只有 08-01 产出账本行（**此条的诊断在 CA.2 被推翻，见下**）。
   由此得出本轮最重要的结论并登记为待办 14：**系统观测"跑过了"，不观测"产出了"**
   （`exposure_rollup` / `session_mirror` 637 次 0 findings / `_call_hermes_runtime_model`
   返回 `""` 三个同型实例），而批次 C 账本的迁移去重 + unknown 计数器正是其反面，应推广。
   **另如实记下本次我自己的两次误报**（「26 vs 8」、「周 lane 4 天未跑 = 漏报」），
   两次都是结论跑在证据前面——与本会话早先三次同一个毛病。
+- `（CA.2，本节）`：查结待办 15，并**推翻 CA.1 自己对那个 FAIL 的诊断**（3.200 全程只读）。
+  先穷举 `run_exposure_rollup_cycle` 的两条"不产出"退出路径（L141 良性跳过 /
+  L128 `source_cursor_not_found` 永久失败，**两者都在开 envelope 前 return，证据侧不可区分**），
+  再据此设计判别式实测：游标 `msrc_20260801T075108673109Z_4d466577` 命中 index 987/988
+  ⇒ `new_records = 0` ⇒ **走良性分支，非缺陷；上游 `memory_sources.jsonl` 自 08-01T07:51Z 零增长**。
+  **待办 15 结案。** 同时纠正 CA.1 与路线图共同的方法错误：**monitor 中不存在 lag 门控**
+  （`grep exposure_rollup_lag` 零命中），`exposure_rollup_lag_hours` 只计算上报、从不判定，
+  拿它论证 FAIL 推进与否方向对错都无意义。
+  **那个唯一 FAIL 的真实根因随之定位**：码为 `v2_exposure_schema_era_unhealthy`，
+  由 `schema_era_attribution_gap_count = 69` **单独驱动**（conservation / telemetry 均 0）；
+  按 `source_class` 分组后 **69 个缺口 100% 在 `working`**（dropped 41 + selected 28），
+  `crystallized` 133 段零缺口——prefetch 披露工作记忆时报了 `chars`/`count` 却从不填
+  `source_ids`；且 `_extract_record_ids_from_section` 只认 `crystallized:`/`candidate:` 前缀，
+  故 `working` 即使填了 ID 也无法分类，这正是 `classified_ratio = 0.7018` 的同源解释。
+  登记为待办 16（未修，须先定 `working` 记录的规范 ID 前缀）。
+  方法教训：**穷举分支 → 设计判别式 → 取证 → 才下结论**；以及"被计算并上报"≠"会告警"。

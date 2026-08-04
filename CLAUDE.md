@@ -103,7 +103,7 @@ Minimal Hermes compatibility glue. `MemoryProvider` base class and provider regi
 
 ### Gate System
 - **ExecutionGate**: every automatic execution must open a permit envelope, validate scope/risk_class/boundary, and record completion postcheck.
-- **StructuralWriteGate**: every automatic JSONL append must be classified through a permit. `write_surface_check.py` enforces `unclassified_count=0`.
+- **StructuralWriteGate**: every automatic JSONL append must be classified through a permit. `write_surface_check.py` enforces `unclassified_count=0`. **One structural exception**: the per-turn prefetch path runs inside Hermes' request, not inside a cron envelope, so it has no permit to spend. Writes there are classified through the `report_only_*` allowlist route instead (`prefetch.py::_record_substrate_shadow_recall`, `_record_graph_layer_shadow`, `_record_continuity_freshness` — see `ALLOWED_WRITE_SURFACES`). Do not "fix" such a write by opening an envelope on the hot path: that puts gate bookkeeping in the user's latency path and violates INV-5's spirit. Classify it report-only, keep it append-bounded, and give it a signature-dedup so a per-turn path cannot grow unboundedly.
 - **OwnerGate**: crystallized writes, revoke/demote/delete, identity/relationship writes, route/score authority, Hindsight store mutation, and external sends are permanent human-trust boundaries.
 - **ResolverGate**: validates owner-channel or execution-token authority before apply. Self-declared `--owner-approved` is not valid authority.
 
@@ -112,6 +112,24 @@ Canonical data lives as JSONL files under `$HERMES_HOME/memory-os/`. SQLite inde
 
 ### No Silent Failures
 Broad `except Exception` must record bounded error records (`error_record` schema: component, operation, error_code, severity, recoverable). Silent pass on live write paths is forbidden. The monitor aggregates suppressed error counts per component.
+
+### Completion Is Not Output
+Helper completion is judged from the ExecutionGate envelope, which records **that a lane ran** — never that it *produced* anything. A lane that legitimately has nothing to do and a lane that is broken both close a clean envelope, so the envelope alone cannot tell them apart. Three verified instances of this shape:
+
+- `low_clue_recall._call_hermes_runtime_model` returns `""` on *any* failure, indistinguishably from a successful empty answer. On production 22 of the last 80 `fact_judge` calls were `llm_empty_content` (27.5%). Never propagate that bare `""` as success — `plugins/modules/governance/fact_judge.py` is the reference for doing it correctly (retry loop, typed `failure_reason`, deterministic fallback).
+- `session_mirror` ran 637 times with 0 findings while its backlog grew (1574 → 1575). Its selection is pure head-of-queue (`platform_filtered[:limit]`, self-admitted in a code comment), so a stuck head starves the tail forever. Never copy that selection pattern; use a durable processed-fingerprint set so the backlog drains.
+- `exposure_rollup` has two no-write exits that leave **byte-identical** evidence: the benign `if not new_records: skipped=True` return, and the `source_cursor_not_found` error return when compaction removed the cursor. Both leave `exposure_rollup.jsonl` *and* `exposure_rollup_snapshot.json` untouched, so from the artifacts alone a permanently-broken lane looks exactly like an idle one. Distinguishing them required reading the source and hand-probing the cursor against `memory_sources.jsonl`.
+
+**Therefore**: any lane that produces no output must record *why* in a durable artifact, using a closed set of documented reason codes, so a reader can separate "no eligible input" from "input existed but processing failed" **without re-running anything or reading the source**. Per-run production counters (inputs scanned / eligible / processed / produced, plus failures keyed by reason) are part of the lane's contract, not optional telemetry. `continuity.py`'s freshness ledger (transition dedup plus an explicit `unknown` counter) is the pattern to copy. Note that a metric which is merely *computed and reported* does not close this gap: `exposure_rollup_lag_hours` is returned by `exposure_monitor_stats` but is never graded into PASS/WARN/FAIL, so it alerts nobody.
+
+### LLM Integration — Reuse, Never Rebuild
+Memory-OS does not own model credentials, clients, or provider selection. It borrows Hermes'. Before adding any model call, use the existing seam:
+
+- **`low_clue_recall._call_hermes_runtime_model(prompt, config) -> str`** is the single entry point, and **`_extract_json_object`** is the response parser. Both are imported across module boundaries by existing callers (`plugins/modules/governance/fact_judge.py`); that private cross-module import is deliberate and precedented — keep new callers consistent with it rather than inventing a wrapper or a second client.
+- Provider resolution lives in `_resolve_hermes_default_runtime`, which imports `hermes_cli.config.load_config` and `hermes_cli.runtime_provider.resolve_runtime_provider`, falling back through `HERMES_AGENT_ROOT` then `/usr/local/lib/hermes-agent` on `sys.path`. Provider id is `hermes_default`; api modes are `chat_completions` / `codex_responses` / `anthropic_messages`. Do not add a provider, a credentials path, or an SDK dependency.
+- **`fact_judge.py` is the reference implementation for a governed LLM lane.** Copy its shape: bounded config (`timeout_ms` 15000, `max_tokens` 1024), a retry loop, typed failure values (`llm_exception`, `llm_empty_content`, `llm_parse_failed`, `llm_missing_key`), a deterministic non-LLM fallback, and a `failure_reason` on the report. See **Completion Is Not Output** for why the bare `""` return must never be treated as success.
+- Per-lane limits are knobs registered in `OVERRIDABLE_KNOBS` (`knob_overrides.py`), named `<lane>_max_tokens` / `<lane>_max_per_tick` / `<lane>_timeout_ms`.
+- **INV-5: no LLM on the hot path.** Model calls belong in offline cron lanes only — never in prefetch, `sync_turn`, or heartbeat. Always bound the *input* too: a single production session message has been measured at 975,665 characters against a 1024-token reply budget, so unbounded input is a guaranteed failure, not an edge case.
 
 ### Evidence Levels (never conflate)
 - `fast_probe_pass` — cron/gate health (seconds)
@@ -151,6 +169,8 @@ Rules that follow from this:
 - Per-lane disable lives in `<hermes_home>/memory-os/system/cron_lane_disabled.json` (owners lost per-job disable granularity to grouping). Honoured by both the tick runner and the monitor.
 - Legacy pre-consolidation per-lane jobs are listed in `LEGACY_PER_LANE_CRON_JOBS` and classified `known_optional` / `superseded_by_group_tick`. Onboarding **pauses, never deletes** them — that is the rollback path. `classify_hermes_cron_jobs` exists in three places (`hermes_cron_adapter.py`, `plugins/seam/.../cron_adapter.py`, and an embedded fallback in `memory_os_3_200_monitor.py`); the seam copy is what production reads, so any change must be applied to all three.
 - Nothing except `memory_os_owner_cron_onboarding.py` may create Memory-OS cron jobs. `install_memory_os.sh` and `deploy_l3_probe.py --apply` used to create per-lane jobs directly and would double-run a lane that a tick now owns.
+- **A raw job count is not a drift signal.** On the production host the 8 registered group jobs appear as **7 enabled + 1 owner-disabled**, alongside the **19 paused** legacy per-lane jobs — 26 Memory-OS entries in total. Always compare against the registry *plus* the enabled/disabled/paused classification, never against the documented job count alone. Reading "26 jobs vs the documented 8" as drift is a false alarm that has already been raised once.
+- **A lane being idle is not a lane being broken, and the reverse also holds.** `exposure_rollup` correctly wrote nothing for three days because its upstream `memory_sources.jsonl` gained no rows in that window — its cursor was verified still at the head. Before treating a stale artifact as a defect, check whether *eligible input existed*; before treating a fresh envelope as health, check whether *output was produced*.
 
 The `full` profile adds `module_cadence_report`. On upgraded hosts, active-closure onboarding pauses (does not delete) known optional jobs. The monitor classifies paused optional jobs as known optional rather than unregistered drift.
 
