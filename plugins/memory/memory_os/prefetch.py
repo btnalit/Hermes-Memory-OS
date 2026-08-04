@@ -40,6 +40,8 @@ DIAGNOSTIC_SUPPRESSION_NOTICE = (
     "Historical recall suppressed for diagnostic query. Use Current Memory-OS Runtime Facts only."
 )
 CONTINUITY_SELECTOR_SCHEMA_VERSION = "memory-os.continuity_selector.v0"
+# Kill switch for continuity freshness grading (report-only disclosure lane).
+CONTINUITY_FRESHNESS_KNOB = "lane_continuity_freshness_enabled"
 # Max working items shown per file (most recent first).
 WORKING_ITEMS_PER_FILE = 5
 
@@ -193,6 +195,11 @@ def build_prefetch(
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
     low_clue_config = normalize_low_clue_recall_config(low_clue_recall_config)
+    # Graded before any early return, so every prefetch path (diagnostic
+    # grounding, foreground-only, router-apply, normal) is covered by the same
+    # disclosure.  This must not influence anything below it — see the
+    # function docstring.
+    _record_continuity_freshness(store, session_id=session_id)
     if isinstance(substrate_recall_report, dict):
         _record_substrate_shadow_recall(
             store=store,
@@ -764,6 +771,93 @@ def _record_substrate_shadow_recall(
             )
     except Exception:
         pass  # fail-open: operations ledger loss must not break prefetch
+
+
+def _record_continuity_freshness(store: MemoryOSStore, *, session_id: str = "") -> None:
+    """Grade current-task freshness and append a report-only diagnostic record.
+
+    **Discloses; never filters.**  This function returns None and is called for
+    its side effect only.  It must never influence the assembled context: the
+    existing recency filters (``state_overlay.py`` 7-day candidate window,
+    ``_recent_cross_session_lines`` 48-hour window) stay exactly as they are,
+    and the live prefetch string is byte-identical whether or not this runs.
+    A test pins that.
+
+    What it produces is the ``stale_task_revision`` finding, which no
+    production code emitted before — Gap Note is a renderer whose only two
+    eligible reason codes had no upstream producer.
+
+    Kill switch: ``lane_continuity_freshness_enabled``, default True.  The
+    owner ruling removed the *waiting window*, not the ability to turn a lane
+    off; grading is live from day one and reversible by one owner override.
+    """
+    path = store.roots.memory_os_root / "system" / "continuity_freshness.jsonl"
+    try:
+        from .knob_overrides import resolve_knob
+        if not bool(resolve_knob(
+            CONTINUITY_FRESHNESS_KNOB, True, roots=store.roots,
+        )):
+            return
+        from .continuity import (
+            ContinuityState,
+            build_continuity_freshness_record,
+            build_current_task_continuity_object,
+            continuity_freshness_record_is_reportable,
+            continuity_freshness_signature,
+        )
+        from .task_state import read_effective_current_task
+
+        # max_age_hours=0 is deliberate and must stay hardcoded.  That
+        # parameter is itself one of the production recency filters: any
+        # positive value makes the read return None for exactly the aged
+        # records this lane exists to grade, so grading would see only what
+        # already passed the filter and could never disagree with it.
+        task_record = read_effective_current_task(store.roots, max_age_hours=0)
+        state = ContinuityState(
+            current_task=build_current_task_continuity_object(task_record),
+        )
+        freshness = build_continuity_freshness_record(state, session_id=session_id)
+        if not continuity_freshness_record_is_reportable(freshness):
+            return
+        # One line per state transition, not per turn — see
+        # ``continuity_freshness_signature``.
+        signature = continuity_freshness_signature(freshness)
+        if signature and signature == _last_continuity_freshness_signature(path):
+            return
+    except Exception:
+        return  # fail-open: grading must never break prefetch
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        from .jsonl_io import append_jsonl_locked
+        append_jsonl_locked(path, freshness)
+    except Exception:
+        pass  # fail-open: disclosure loss must not break prefetch
+
+
+def _last_continuity_freshness_signature(path: Path) -> str | None:
+    """Signature of the newest ledger record, or None when it cannot be read.
+
+    Returns None rather than "" on any failure: None means "unknown", and the
+    caller then writes.  Losing a duplicate line is the cheap failure;
+    silently skipping the record that explains a degraded answer is not.
+    """
+    if not path.exists():
+        return None
+    try:
+        from .continuity import continuity_freshness_signature
+        # Tail-capped: this file is bounded by transitions, but a pre-existing
+        # long file must not turn a per-turn read into an unbounded one.
+        lines = path.read_text(encoding="utf-8").splitlines()[-20:]
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if isinstance(record, dict):
+                return continuity_freshness_signature(record)
+        return None
+    except Exception:
+        return None  # unknown → caller writes
 
 
 def _substrate_recall_lines(report: dict[str, Any] | None) -> list[str]:

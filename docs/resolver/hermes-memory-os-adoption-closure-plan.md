@@ -280,6 +280,63 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
    一个已过 `stale_after` 的对象**被判为 STALE**，
    **且 live prefetch 输出逐字节不变**。
 
+> **批次 C 执行结果（2026-08-04，已实现）——三处方案与实测不符，逐条记明。**
+>
+> **(1) 数据源不是 overlay。** 方案 4.2 前言写「overlay 对象已带时间戳
+> （`state_overlay.py:281` 的 `last_updated`/`ts`）」。实测：`OverlayEntry` 只有
+> `text`/`source`/`source_kind`，**没有任何时间字段**。281 行读到的候选时间戳在
+> `_read_open_threads_from_candidates` 内部用完即丢（296 行只返回
+> `(summary, candidate_id)`）。**overlay 投影里没有任何可分级的东西。**
+> 真正的源是 `task_state.read_effective_current_task()`：它投影出 `revision`
+> （账本行号即修订号）与 `source_at`，且 `created_at` 由
+> `_active_task_anchor_record` 以 `.isoformat().replace("+00:00","Z")` 机器写入，
+> **写入者可完整追溯**（正是批次 B 裁定要求的条件）。
+> `stale_task_revision` 这个码名与它的 `revision` 字段本来就是对应的。
+>
+> **(2) trap #3 的「必须走 StructuralWriteGate」在这条路径上做不到，已改为 allowlist 登记。**
+> `append_governed_jsonl` 要求一个有效且未使用的 ExecutionGate permit，而 prefetch 是
+> Hermes **每轮**调用的热路径，**不存在 envelope** → 每次调用都 `StoreError`
+> → 诊断记录永远写不出来。那正是 trap #3 想防的静默失败，照字面执行会亲手制造它。
+> 备选方案（改从 heartbeat 写，那里有 envelope）会丢掉「本次 recall 看到了什么」这个
+> 唯一让它有诊断价值的性质。
+> **实际做法**：`append_jsonl_locked` + 在 `ALLOWED_WRITE_SURFACES` 登记为
+> `report_only_continuity_freshness`，与同文件里两个既有的 report-only shadow 写
+> （`_record_substrate_shadow_recall`、`_record_graph_layer_shadow`）**同一契约**。
+> trap #3 的**目的**（`unclassified_count=0`）由此满足，实测 write surface 门
+> `status=pass / unclassified_count=0`；删掉这条登记则该门立刻 FAIL（已实测）。
+> **记在这里而不只是记在代码注释里**：本项目一贯把「文档说 A、代码做 B」当缺陷。
+>
+> **(3) 只做 `current_task`，open_threads 明确不在 C 范围内。**
+> 理由不是没空：open-thread 的时间戳按 (1) 在 overlay 里根本不存在，
+> 而候选的 7 天窗口按本节裁定**不许动**。因此 `active_open_threads()` /
+> `stale_open_threads()` 在 C 之后**仍然是零生产调用**——按第 8 节这正是要防的模式，
+> 所以在此显式登记原因，而不是让它们静默地继续躺着。
+> 若日后要分级 open_threads，前置工作是让 `OverlayEntry` 携带时间戳，那是独立一项。
+>
+> **另外两条实现期决定：**
+>
+> - **账本记录状态迁移，不记轮次。** 反向评审时发现：`current_task` 的 `stale_after`
+>   是 1 小时，而任务锚点**只在意图切换时重写**（defer/resume/cancel/新任务），
+>   于是同一个任务连做超过 1 小时后，**每一轮 prefetch 都会追加一行**——热路径上无界增长。
+>   改为按 `(session_id, object_id, revision, grade, unknown_count)` 签名去重：
+>   一个状态一行。`session_id` 刻意进签名——新会话看到同一个过期对象是新事实，
+>   也是「答案变差时定位到哪个会话」的抓手。
+> - **`max_age_hours=0` 必须硬编码。** 该参数**本身就是一个生产时效过滤器**：任何正值
+>   都会让读取对过期锚点返回 `None`，于是分级只能看到已经通过过滤的东西、永远无法与它
+>   不一致，整条 lane 变成装饰。已用测试在调用边界上断言 `max_age_hours == 0`，
+>   而不是只靠"分级结果对了"间接推断。
+>
+> **与 R1.2 的关系（配套要求）**：C **不违反** R1.2——R1.2 要求
+> 「保持 live output 不变」，而 C 正是 report-only、live 输出逐字节不变。
+> 需要修订 R1.2 的是 **D**（gap_note 要往 live 输出加一句话且不开 shadow 窗口）。
+> 已在路线图 R1.2 就地标注该修订待 D 落地。
+>
+> **D 的接点已探明**：`recall_facade.py:116` 的 `build_recall_plan(...,
+> current_task_revision=task_revision)` **已经**把当前任务修订号带进 recall plan
+> （由 `prefetch.py:634` 以同一个 `max_age_hours=0` 读出），但那个 plan
+> **没有 `findings` 键**。D 的活就是把 C 产出的 finding 挂进去让 gap_note 渲染，
+> 不需要新建结构。
+
 ### 4.2b `continuity` 原始条目（存档）
 
 - **具名调用点**：`prefetch.py` 上下文组装 + `state_overlay.py`。
@@ -311,6 +368,45 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 - **退出条件**：先出**状态持久化的 Owner 决策**（见第 6 节），再谈接线。
 - **回滚**：开关切回"永不暂停猜测"。
 - **建议**：**先拆出持久化决策，本轮不接线**。
+
+### 4.4 关键事实未入库导致召回漏项（Owner 2026-08-04 提出，**只登记，未开工**）
+
+Owner 原话：「我发现很多"关键事实"没存入记忆，导致召回漏掉了一些，这个是后续要仔细分析优化的。」
+
+**本条只做登记。**「后续要仔细分析」是明确的排序指令，不是开工许可；
+本轮未做任何相关改动。
+
+**本文档的理解（写明以便一句话纠正）**：指的是 **Memory-OS 自身**的事实捕获/结晶覆盖率
+——`sync_turn` → candidate → owner 批准 → crystallized 这条写入链漏掉了本该留存的事实，
+**不是**指 claude-mem（会话记忆插件）。如果理解错了，一句话即可改。
+
+**开工前必须先分离的两件事（这是第一步，不是背景）**：
+
+事实"召回不到"有两种完全不同的成因，修法相反：
+
+| | 成因 | 检验方法 |
+|---|---|---|
+| **A. 没入库** | 写入链丢了它 | 在 canonical JSONL 里 grep 该事实——**不在** |
+| **B. 入库了但没召回** | 检索/排序/权威分层漏了它 | grep——**在**，但 prefetch 不返回它 |
+
+**先做这一步的理由**：Owner 的措辞是"没存入记忆"，指向 A；但"召回漏掉了"同样与 B 相容，
+而 B 是检索缺陷、与捕获率无关。**在分清之前动手，有一半概率修错那一半系统。**
+检验很便宜（拿几条具体漏掉的事实，在 `events/` `candidates.jsonl` `crystallized/` 里 grep）。
+
+**若确为 A，写入链上有三个独立的丢弃点**，须逐个量化而不是笼统归因：
+
+1. **`sync_turn` 是 summary-only 的。** 事实若没进事件摘要，此后整条链都不可能有它——
+   这是最上游、也最容易被忽略的丢弃点。
+2. **candidate 生成**未把它抽成候选。
+3. **候选停在候选态**（Owner 从未批准）→ 未进 crystallized → 召回权威层级低。
+
+**⚠️ 与批次 F 的交互，必须在删 `recall_golden` 之前一并考虑。**
+`recall_golden`（3.3 节，当前裁定"倾向删除"）**正是测量召回漏项的仪器**——
+它对 golden set 跑出 hit/miss/authority 报告。本条待办的整个诊断阶段都需要
+"哪些事实该被召回、实际召回了没有"的可复跑量化，而这就是它的功能。
+**因此 F 的删除决定不再是独立的**：删掉它，G 的诊断就得手工做或重建同类工具
+（而 3.3 节自己写着"真需要时再连同 CI job 一起作为新功能建"——G 可能正是那个"真需要"）。
+**提请 Owner 在拍 F 之前先看这一条。**
 
 ---
 
@@ -449,17 +545,19 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 |---|---|---|
 | **A** | 删除 `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | ✅ 已合并（PR #15，原计划是接线这四项，实测后全部改为删除） |
 | **B** | `timeutil`：修 `allow_naive` 契约违反 + 迁移 1 处已追溯站点 | ✅ 已合并（PR #16，`09c9629`；31 处里只迁 1 处，其余按裁定不迁） |
-| **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | 待做，**下一项** |
-| **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C** |
+| **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | ✅ 已实现（3035→3070 passed，+35；6 项反事实实测；四门全过） |
+| **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C（C 已落地，接点见 4.2 末）** |
 | **E** | `restraint`：接 `low_clue_recall.py:593` 的 `_recent_correction_signal` → `DenialTracker` → `restraint_denials.json` | 待做 |
 | **F** | ~~`recall_golden`~~ | **倾向删除**（见 3.3），待 Owner 一句话确认 |
+| **G** | **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，见 4.4） | 待做，**须先分析再动手** |
 
 **部署时机**：3.200 的 `/opt` 同步与部署验证**在整条 C→D→E 链落地后一次性做**，
 不逐批部署。删除类改动单独部署没有可验证的行为变化，反而多几轮风险窗口。
+C 已落地但**尚未部署**，按此裁定等 D、E。
 
-A、B 完成后：**9 项已终结**（8 项删除 + 1 项 timeutil 修复与定向迁移）。
-剩余只有 **C→D→E 这一条链**（continuity 产出 → gap_note 披露 → restraint 克制），
-外加待确认删除的 `recall_golden`。
+A、B、C 完成后：**10 项已终结**（8 项删除 + timeutil 修复与定向迁移 + continuity 分级披露）。
+剩余 **D→E**（gap_note 披露 → restraint 克制），外加待确认删除的 `recall_golden`
+与新登记的 G。
 
 这比初版方案设想的小得多——因为大部分"待接线"其实是不该接。
 **初版说「6 项合并即终结」，实测后其中 4 项是删除**；

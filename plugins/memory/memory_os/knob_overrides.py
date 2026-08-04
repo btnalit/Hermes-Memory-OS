@@ -78,6 +78,18 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # Continuity freshness grading. Default True: the owner ruling removed the
+    # waiting window, so this lane is live from day one — the switch exists for
+    # rollback, not for graduation. lane_switch => never auto-approvable.
+    "lane_continuity_freshness_enabled": {
+        "module": "prefetch",
+        "default": True,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     "session_scoped_recent_events": {
         "module": "prefetch",
         "default": True,

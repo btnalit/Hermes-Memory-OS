@@ -3060,3 +3060,280 @@ class TestAttributionClosure:
         assert all(
             sid.startswith("crystallized:") for sid in source_ids
         ), f"Bad source_id format: {source_ids}"
+
+
+# ── Continuity freshness disclosure (batch C) ────────────────────────────────
+# The ruling: continuity grades freshness and discloses it. It does NOT filter,
+# and the existing recency windows (state_overlay 7-day, cross-session 48-hour)
+# stay untouched. See docs/resolver/hermes-memory-os-adoption-closure-plan.md 4.2
+
+
+def _continuity_ledger_path(store):
+    return store.roots.memory_os_root / "system" / "continuity_freshness.jsonl"
+
+
+def _read_continuity_ledger(store):
+    path = _continuity_ledger_path(store)
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _write_task_anchor(store, *, age_hours: float, status: str = "active"):
+    """Write one append-only active-task-anchor row aged *age_hours*."""
+    created_at = (
+        datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    ).isoformat().replace("+00:00", "Z")
+    path = store.roots.memory_os_root / "system" / "active_task_anchor.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_testanchor00001",
+        "created_at": created_at,
+        "profile": "memoryos-test",
+        "session_id": "sess-anchor",
+        "anchor": "Owner foreground task body",
+        "status": status,
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return record
+
+
+def _seed_context(store):
+    """Seed enough canonical content that prefetch returns a non-empty string."""
+    event = EventEnvelope.from_dict(build_event(seed=1, profile="memoryos-test"))
+    working_item = build_working_item(seed=2, source_event_id=event.id)
+    crystallized = build_crystallized_frontmatter(seed=3, source_event_ids=[event.id])
+    store.append_event(event)
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": working_item.updated_at,
+            "items": [{**working_item.__dict__, "text": "Synthetic memory working item 2"}],
+        },
+    )
+    (store.roots.relationships_root / "owner.md").write_text(
+        "Owner relationship memory.", encoding="utf-8",
+    )
+    store.append_crystallized_record(
+        "moments.md", crystallized.__dict__, "Approved crystallized memory.",
+    )
+
+
+def test_continuity_grades_stale_task_without_changing_live_prefetch_output(
+    tmp_path, monkeypatch,
+):
+    """Target counterfactual: one test pinning the entire design decision.
+
+    A task anchor past ``stale_after`` is graded STALE and disclosed, **and**
+    the live prefetch string is byte-identical to the string produced with
+    grading disabled. Both halves are required: byte-identity alone would pass
+    trivially if the hook silently no-opped, so the same test asserts a ledger
+    record was written.
+
+    The baseline is the same call with the hook patched to a no-op — not a
+    second live call, which can differ for now-derived reasons that have
+    nothing to do with continuity.
+    """
+    from plugins.memory.memory_os import prefetch as prefetch_module
+
+    store = _store(tmp_path)
+    _seed_context(store)
+    _write_task_anchor(store, age_hours=2)  # stale_after for current_task is 1h
+
+    monkeypatch.setattr(
+        prefetch_module, "_record_continuity_freshness", lambda *a, **k: None,
+    )
+    baseline = build_prefetch("memory", budget_chars=2200, store=store, index=None)
+    assert baseline, "fixture must produce a non-empty context"
+    assert not _continuity_ledger_path(store).exists()
+
+    monkeypatch.undo()
+    graded = build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    # Half 1 — the live output did not change by a single byte.
+    assert graded == baseline
+
+    # Half 2 — and grading did happen.
+    records = _read_continuity_ledger(store)
+    assert len(records) == 1
+    record = records[0]
+    assert record["schema_version"] == "memory-os.continuity_freshness.v0"
+    assert record["current_task_grade"] == "stale"
+    assert record["stale_task_count"] == 1
+    assert record["findings"][0]["code"] == "stale_task_revision"
+    # And it filtered nothing.
+    assert record["filtered_count"] == 0
+    assert record["filters_applied"] == []
+
+
+def test_continuity_disclosure_records_no_anchor_body(tmp_path):
+    """Metadata-only surface: the anchor body must never reach the ledger."""
+    store = _store(tmp_path)
+    _write_task_anchor(store, age_hours=5)
+
+    build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    raw = _continuity_ledger_path(store).read_text(encoding="utf-8")
+    assert "Owner foreground task body" not in raw
+    assert json.loads(raw.splitlines()[0])["raw_body_included"] is False
+
+
+def test_continuity_fresh_task_writes_no_disclosure_record(tmp_path):
+    """Bounded volume: a fresh anchor must not append one line per turn."""
+    store = _store(tmp_path)
+    _seed_context(store)
+    _write_task_anchor(store, age_hours=0)
+
+    for _ in range(3):
+        build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    assert _read_continuity_ledger(store) == []
+
+
+def test_continuity_absent_anchor_is_not_reported_as_stale(tmp_path):
+    """Absence must not disclose "your task information may be out of date"."""
+    store = _store(tmp_path)
+    _seed_context(store)
+
+    build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    assert _read_continuity_ledger(store) == []
+
+
+def test_continuity_kill_switch_disables_disclosure(tmp_path):
+    """Owner rollback path: one lane_switch override turns grading off."""
+    from plugins.memory.memory_os.knob_overrides import (
+        OVERRIDABLE_KNOBS,
+        register_override,
+    )
+    from plugins.memory.memory_os.prefetch import CONTINUITY_FRESHNESS_KNOB
+
+    spec = OVERRIDABLE_KNOBS.get(CONTINUITY_FRESHNESS_KNOB)
+    assert spec is not None, "kill switch must be a registered knob"
+    assert spec["kind"] == "lane_switch"  # never auto-approvable
+    assert spec["default"] is True  # live from day one, per the owner ruling
+
+    store = _store(tmp_path)
+    _write_task_anchor(store, age_hours=9)
+    register_override(
+        CONTINUITY_FRESHNESS_KNOB,
+        False,
+        prior=True,
+        proposed_by="owner",
+        approved_via="owner_channel",
+        expires_at="",
+        roots=store.roots,
+    )
+
+    build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    assert _read_continuity_ledger(store) == []
+
+
+def test_continuity_grading_ignores_the_age_filter_it_must_outlive(tmp_path):
+    """Grading must see what the production recency filter would have rejected.
+
+    ``read_effective_current_task(max_age_hours=N)`` is itself one of the
+    production filters: any positive value returns None for an aged anchor. If
+    the hook ever inherits a non-zero value, grading can only agree with the
+    filter and the lane becomes decorative — so ``max_age_hours=0`` is asserted
+    at the call boundary, not just implied by a passing grade.
+    """
+    from plugins.memory.memory_os import prefetch as prefetch_module
+    from plugins.memory.memory_os import task_state
+
+    store = _store(tmp_path)
+    _write_task_anchor(store, age_hours=30)
+
+    seen = {}
+    real = task_state.read_effective_current_task
+
+    def _spy(roots, **kwargs):
+        seen.update(kwargs)
+        return real(roots, **kwargs)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(task_state, "read_effective_current_task", _spy)
+    try:
+        prefetch_module._record_continuity_freshness(store, session_id="s1")
+    finally:
+        monkey.undo()
+
+    assert seen.get("max_age_hours") == 0
+    records = _read_continuity_ledger(store)
+    assert len(records) == 1
+    assert records[0]["current_task_grade"] == "stale"
+    assert records[0]["session_id"] == "s1"
+
+
+def test_continuity_records_one_line_per_state_not_per_turn(tmp_path):
+    """Bounded volume on the per-turn hot path.
+
+    ``stale_after`` for a current task is one hour, but the task anchor is only
+    rewritten on an intent transition — so a single task worked on for longer
+    than an hour grades STALE on every turn. Without transition-only recording
+    this ledger would grow one line per conversational turn forever.
+    """
+    store = _store(tmp_path)
+    _seed_context(store)
+    _write_task_anchor(store, age_hours=3)
+
+    for _ in range(5):
+        build_prefetch(
+            "memory", budget_chars=2200, store=store, index=None,
+            session_id="sess-a",
+        )
+
+    assert len(_read_continuity_ledger(store)) == 1
+
+
+def test_continuity_records_again_for_a_new_session(tmp_path):
+    """A new session seeing the same stale object is a new locatable fact."""
+    store = _store(tmp_path)
+    _write_task_anchor(store, age_hours=3)
+
+    build_prefetch("memory", budget_chars=2200, store=store, index=None, session_id="sess-a")
+    build_prefetch("memory", budget_chars=2200, store=store, index=None, session_id="sess-a")
+    build_prefetch("memory", budget_chars=2200, store=store, index=None, session_id="sess-b")
+
+    records = _read_continuity_ledger(store)
+    assert [r["session_id"] for r in records] == ["sess-a", "sess-b"]
+
+
+def test_continuity_records_again_when_the_graded_revision_changes(tmp_path):
+    """A newer anchor row is a different revision, so it is graded afresh."""
+    store = _store(tmp_path)
+    _write_task_anchor(store, age_hours=3)
+    build_prefetch("memory", budget_chars=2200, store=store, index=None, session_id="s")
+    _write_task_anchor(store, age_hours=4)  # second append-only row
+    build_prefetch("memory", budget_chars=2200, store=store, index=None, session_id="s")
+
+    records = _read_continuity_ledger(store)
+    assert [r["current_task_revision"] for r in records] == [1, 2]
+
+
+def test_continuity_disclosure_failure_never_breaks_prefetch(tmp_path, monkeypatch):
+    """Fail-open: a broken grading path must not take recall down with it."""
+    from plugins.memory.memory_os import task_state
+
+    store = _store(tmp_path)
+    _seed_context(store)
+    _write_task_anchor(store, age_hours=4)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("synthetic grading failure")
+
+    monkeypatch.setattr(task_state, "read_effective_current_task", _boom)
+
+    context = build_prefetch("memory", budget_chars=2200, store=store, index=None)
+
+    assert context.startswith("## Memory-OS Context")
+    assert _read_continuity_ledger(store) == []

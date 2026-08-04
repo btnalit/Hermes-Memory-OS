@@ -71,6 +71,12 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/owner_actions.py::_candidate_aggregation_status_block::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
     "plugins/memory/memory_os/prefetch.py::_record_substrate_shadow_recall::path.open_a::path": "report_only_shadow_recall",
     "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::path.open_a::path": "report_only_graph_layer_shadow",
+    # Continuity freshness disclosure. Classified here rather than routed
+    # through StructuralWriteGate because this is the per-turn prefetch path,
+    # which holds no ExecutionGate envelope — append_governed_jsonl would raise
+    # on every call and the diagnostic would never be written. Same contract as
+    # the two report-only shadow writers above. See the closure plan §4.2.
+    "plugins/memory/memory_os/prefetch.py::_record_continuity_freshness::append_jsonl_locked_call::path": "report_only_continuity_freshness",
     "plugins/memory/memory_os/state_overlay.py::append_overlay_run::path.open_a::out_path": "state_overlay_run_ledger",
     "scripts/memory_os_entity_index_refresh.py::main::path.open_a::run_path": "entity_index_refresh_run_ledger",
     "plugins/memory/memory_os/permanent_promotion.py::ProposalLedger.create_or_get::append_under_lock_call::target": "permanent_promotion_proposal_ledger",
