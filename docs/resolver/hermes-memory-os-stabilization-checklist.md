@@ -2341,6 +2341,137 @@ import cycle（`cycles: []`）/ write surface（`unclassified_count=0`）/ stati
 
 ---
 
+## CA — Owner 报告「关键事实漏失」的实测定位 + 三项并行修复（2026-08-04）
+
+Owner 原话：「我发现很多"关键事实"没存入记忆，导致召回漏掉了一些。」
+本节记录**实测定位**（含两处推翻本会话自己论断的证据）与随之做的三项修复。
+
+### 定位结论：不是一个 bug，是三个独立成因
+
+| | 位置 | 性质 |
+|---|---|---|
+| **① 捕获截断** | `__init__.py:1828` `_turn_summary` = `_clip(user,140)` + `_clip(assistant,140)`，**硬编码，全仓无 knob**；正文只以 `user_sha256`/`assistant_sha256` 落盘 | 事件层只有 280 字 |
+| **② 无事实抽取** | `inner_drive.py:294` `body=f"Remembered from event {event.id}: {event.summary}"` | 候选正文就是那 280 字加前缀；①不修这里也拿不到更多 |
+| **③ 候选在召回里几乎不可见** | `prefetch.py` `_should_include_candidates` | 查询不含 `candidate/crystallized/候选/结晶/沉淀/长期记忆/审查队列/待审` 就 `return []`，**与相关性无关** |
+
+`runtime.py:111` 的候选生成读的是 `store.read_events()`，即那 280 字事件——所以①②③在一条链上。
+
+### 3.200 只读核实推翻了本会话两个论断（这是本节最重要的部分）
+
+| 本会话先前的断言 | 生产实测 |
+|---|---|
+| ">140 字永久不可恢复（只剩哈希）" | **错。** 完整正文durable 存在 `/root/.hermes/sessions/*.json`——**468 个文件 / 136MB**，单条消息内容最长 **975,665 字**；抽样会话 68 条消息中 31 条超 140 字 |
+| "cron lane 里 LLM 抽取结构上不可能（无可抽取对象）" | **错。** 正文在磁盘上，off-hot-path 完全读得到 |
+
+**教训**：第一个论断是从"本仓库没有反查映射"推出"系统层不可恢复"——**跨系统边界的否定结论不能只用本仓库证据**。
+第二个论断是把"热路径禁 LLM（INV-5）"这条约束**惯性延伸**到了 off-hot-path，
+而它成立的前提（抽取必须发生在 `sync_turn`）在第一个论断被推翻时就死了。
+
+### 生产规模（实测硬数字，供 3.200 复核对账）
+
+- 事件：**3815** 条，其中 `conversation_turn` **1982** 条、`conversation_turn_mirrored` **539** 条。
+- 截断率：**助手侧 67.3%（1333/1982）**、**用户侧 19.0%（377/1982）**（以 `_clip` 的 `...` 尾标判定）。
+- `session_mirror`：**637 次 apply 运行、累计 `finding_count` = 0**；
+  `auto_apply_max_sessions_per_run: 1`，最近一次 `candidate_session_count: 1575` / `selected_session_count: 1`。
+- 镜像事件实际内容形如
+  `Session … mirrored; last_user=nihao; last_assistant=你好呀 👋 …`，**最长 259 字**
+  ——即 136MB 会话数据每个会话只产出约 160 字的"最后一条消息预览"。
+- **选择仍是纯队头**：`session_mirror.py` 的 `selected_sessions = platform_filtered[:limit]`
+  （代码注释自陈 "Selection is otherwise pure head-of-queue"）。批次 BY 只修了"被拒会话饿死后队"
+  那一半，**一般性队头偏置未修** → 1575 积压按 1/run 永远排不空。
+
+### 本轮做了什么（三项并行，文件互斥，各自独立 worktree）
+
+1. **③ 候选相关性下限**（`prefetch.py`）。**没有删那个关键词门**——已核实它是**刻意的权威分层**
+   （测试用「这些结晶候选和长期记忆有什么关系？」并断言输出带
+   `candidate only / not approved crystallized memory` 标签）。改为：magic-word 路径**行为逐字不变**，
+   新增相关性路径 `_extract_query_tokens` + `_record_body_score >= 2`。
+   阈值取 2 有实测依据：`_tokenize_for_floor_match` 会把 `"what's"` 切出单字符 token `"s"`
+   从而几乎匹配任何正文；`_extract_query_tokens` 的 CJK 侧发无过滤重叠 bigram，阈值取 1 时
+   「我们什么时候开会？」会靠语法 bigram「什么」匹上无关候选。
+2. **F `recall_golden` 接线**（`recall_golden.py` / `cli.py` + seed fixture）。
+   裁决由"倾向删除"反转为保留——它是①唯一的度量仪器。**同时查出 authority 维度是死代码**，
+   见方案 §3.3；hit/miss 那一半经反事实实测为真。
+3. **`continuity_freshness` monitor 可见性 + 并发单测**（`memory_os_3_200_monitor.py` / `tests/scripts/`）。
+   **刻意不引入任何新 WARN 码**（全走 `pass`/`info`），因此
+   `CLEAN_HOST_WARN_CLASSIFICATIONS` 无需注册——避开了待办 1 那个坑
+   （未注册 WARN 码在 clean host 会落 `clean_host_warn_unclassified` 即 **FAIL**）。
+   账本缺失被显式判为 `continuity_freshness_ledger_absent_healthy`（**缺失是正常健康态**，
+   因为状态迁移去重意味着没有 stale 就不写）。
+
+### 整合评审纠正的一处 agent 报告错误
+
+第 1 项的 agent 报告称候选段"可能挤掉 `Recent Event Summaries`(80) / `Indexed Recall`(90)"——**方向说反了**。
+`_budget_keep_priority` docstring 明写 "Higher value means survive budget pressure longer"，
+而 `_next_budget_drop_index` 升序排序后丢 `candidates[0]`，**即数字小的先被淘汰**。
+`Crystallized Review Candidates` = 50 会在 60/65/80/90 **之前**被丢，
+所以**未批准候选挤不掉已批准/已索引内容**——方向是安全的那一边。
+**记在这里以免后来者去"修"一个不存在的问题。**
+
+### 顺带查出的一条真缺陷（未修，登记）
+
+`cli.py::_check_vector_available()` **急切 import `sentence_transformers`/`torch`**，
+导致单次 `status`/`doctor` 调用耗时 **17–29 秒**。
+`shell_alias_no_env()` 并发跑 22 条 CLI 探针 → 这**很可能就是待办 3 那个生产 flake 的成因**
+（BY.3 记录过一次 `shell_alias_no_env_failed` 重跑不复现）。
+本轮未修（超出该 agent 白名单），登记为待办。
+
+### 并发测试的诚实声明
+
+`shell_alias_no_env` **不是模块属性**——它在 `_remote_probe_script()` 的嵌入式字符串里
+（第 5368–8471 行是一整个 `r'''` 串，经 subprocess 执行），不可 import；本沙箱也没有 `hermes`。
+因此测的是两件可达的事：22 条探针在 `hermes` 确定缺失时并发命中 `except OSError`
+且无跨 future 串号；以及 17 条真实只读 CLI 探针在 workers=1 与 workers=4 下结果一致。
+**未发现竞态**（futures 模式无线程间共享可变状态）。
+`status`/`doctor` 因上述 17–29 秒延迟被排除在并发命令集外——如实声明，这不是全覆盖。
+
+### ①的设计（已定案，未实现）
+
+**①是一条按 `fact_judge` 模板建的新 cron lane，不是新 LLM 集成，也不扩 `session_mirror` 的 charter。**
+
+复用既有机制（Owner 明确要求"别重复造车"，已查证）：
+- `low_clue_recall._call_hermes_runtime_model(prompt, config)` + `_extract_json_object`，
+  `provider="hermes_default"` → 经 `hermes_cli.config.load_config` +
+  `resolve_runtime_provider` **直接用 Hermes 自己配置的模型**
+  （支持 `chat_completions` / `codex_responses` / `anthropic_messages`）。
+  **已有两个先例**：`llm_edge_proposer.py`、`plugins/modules/governance/fact_judge.py`
+  ——跨模块导入这两个私有函数是既定模式，照做即可，**且刻意不改 `low_clue_recall.py`**
+  （那还顺便避开与批次 E 的文件冲突）。
+- 失败处理**照抄 `fact_judge`**：重试 + 具名 failure_reason
+  （`llm_exception` / `llm_empty_content` / `llm_parse_failed` / `llm_missing_key`）
+  + **回落确定性启发式**。**绝不继承** `_call_hermes_runtime_model` 裸返回 `""` 的行为——
+  否则会造出第二个"637 次运行 0 findings"的静默 lane。
+  （这也作废了"确定性 vs LLM"的二选一：房子里的做法是 LLM 主路 + 确定性兜底。）
+- 限额走 knob（`*_max_tokens` / `*_max_per_tick` / `*_timeout_ms`），注册进 `OVERRIDABLE_KNOBS`。
+- cron 接入：2 行 shim `from memory_os_execution_gate_runner import main`，
+  注册进 `cron_registry.py` 的 lane 表并**挂进既有 group**（按 CLAUDE.md：加 lane 不是加 cron job）。
+- **写入可走 `append_governed_jsonl`**——它跑在 ExecutionGate envelope 下，
+  这点比批次 C 干净（C 在 prefetch 热路径无 envelope，只能走 allowlist 登记）。
+
+**必须避开的两个已知坑**：
+1. **不得照搬纯队头选择**，否则 1575 积压永远排不空——新 lane 最容易继承的 bug。
+2. `fact_judge` 默认 `max_tokens=1024` / `timeout_ms=15000` 对一条 97 万字消息远远不够
+   → 必须分块/选段 + per-tick 上限，**不能"把会话喂进去"**。
+
+**与③配套**：①产候选、③让候选能被召回；单做任一件效果都打折。
+
+### 测试与门
+
+3071 → **3089 passed / 13 skipped / 0 failed**（+18）。
+分段实测：两份整合时 3083（recall_golden +8、候选下限 +4），并入 monitor 那份后 3089（+6）。
+import cycle（`cycles: []`）/ write surface（`unclassified_count=0`, surface_count 154）/
+static hygiene（含 compileall）/ public checkout probe `--strict` /
+`git diff --check origin/main...HEAD`（按区间）—— 全过。
+
+### 未验证项（如实声明）
+
+- **仅 `local_pass`。三项均未部署 3.200**——按 Owner 裁定，部署在全部任务完成后统一执行。
+- seed golden set 是示例性的，未绑定真实捕获数据；在真实库上非标记项的命中结果未验证。
+- 相关性下限对**生产规模**数据的行为未验证（本地测试都是近空库 + 2200 字宽预算）。
+- ①未实现。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -2370,10 +2501,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    现文案如实写明"owner 2026-08-02 决定保持停用 / 原始理由未知 / 本条为补记不改变运行状态"，
    owner 可随时替换该文本。
 6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
-7. **`system/continuity_freshness.jsonl` 无 monitor 字段**（BZ 登记）。
-   保留策略已在 BZ 补登记（`metadata_retention` 的 `shadow_retention_days`，
-   与两个兄弟 shadow 账本同等），状态迁移去重后体积有界；**仍缺的是 monitor 可见性**
-   ——没有任何 monitor 字段报告分级结果或 UNKNOWN 计数。C→D→E 链部署前应补。
+7. ~~**`system/continuity_freshness.jsonl` 无 monitor 字段**~~ —— **CA 已关闭**。
+   新增 `continuity_freshness_summary()` + `classify_snapshot` 分支 + 中文摘要行，
+   **不引入新 WARN 码**（全走 `pass`/`info`），账本缺失显式判为
+   `continuity_freshness_ledger_absent_healthy`。保留策略已在 BZ 登记。
 8. **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，**只登记未开工**——
    「后续要仔细分析」是排序指令）。指 Memory-OS 的写入链
    `sync_turn` → candidate → owner 批准 → crystallized 漏掉了本该留存的事实。
@@ -2400,6 +2531,23 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
    `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
    `recorded_at`（立即覆盖历史行，影响更大）。
+10. **`recall_golden` 的 authority 维度是死代码**（CA 查出，未修）。
+    `evaluate_recall` 的 `matched_source_ref` 从**期望值**抄，`matched_authority` 从不赋值，
+    `authority_class`/`min_score` 从不被读，`"context_insufficient"` 无分支返回。
+    后果：方案 §3.3 的退出条件「hit/miss/**authority** 报告」只满足前两项，
+    **不得据现状声称该项达标**。hit/miss 经反事实实测为真。
+11. **`cli.py::_check_vector_available()` 急切 import `sentence_transformers`/`torch`**
+    （CA 查出，未修）。单次 `status`/`doctor` 耗时 **17–29 秒**；而
+    `shell_alias_no_env()` 并发跑 22 条 CLI 探针——**很可能是待办 3 那个生产 flake 的成因**。
+    这条同时也是 `full_monitor_runtime_over_target` 的候选成因之一。
+    修法方向：把 vector 可用性探测改为惰性/缓存，不在 `status`/`doctor` 路径上加载模型。
+12. **①会话事实抽取 lane 未实现**（CA 定案设计，见 CA 节末）。
+    按 `fact_judge` 模板建新 cron lane，复用 `_call_hermes_runtime_model`。
+    两个必须避开的坑：不得照搬 `session_mirror` 的纯队头选择（1575 积压排不空）；
+    默认 `max_tokens=1024`/`timeout_ms=15000` 对 97 万字消息远远不够，须分块+per-tick 上限。
+13. **`session_mirror` 一般性队头偏置未修**（CA 实测）。
+    `selected_sessions = platform_filtered[:limit]`，BY 只修了被拒会话饿死后队那一半。
+    与待办 12 相关但独立：即使①另建 lane，这条仍使 `session_mirror` 自身永远追不上积压。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2705,3 +2853,26 @@ sannai-community 仓库 README。）
   `substrate_recall_shadow` 完全无时间字段 → 都永远不老化），刻意只记录不修
   （修它等于让两个从未被剪的生产账本首次进入归档计划），见待办第 9 项。
   最终 8 项反事实、**3071 passed / 13 skipped / 0 failed**（+36）。
+- `f40a746..`（CA，本节）：Owner 报告「关键事实漏失」的实测定位 + 三项并行修复。
+  **定位为三个独立成因**：`_turn_summary` 140 字硬截断（正文只落哈希）、
+  `inner_drive.py:294` 无事实抽取（候选正文就是那 280 字）、
+  `_should_include_candidates` 关键词门使未批准候选**与相关性无关地**不可见。
+  **3.200 只读核实推翻本会话两个论断**：完整正文durable 在 `/root/.hermes/sessions/`
+  （468 文件/136MB，单条最长 975,665 字）故 >140 可恢复；off-hot-path LLM 抽取因此可行
+  ——教训是"跨系统边界的否定结论不能只用本仓库证据"，以及不要把热路径约束（INV-5）
+  惯性延伸到 off-hot-path。**生产规模**：助手侧 **67.3%**、用户侧 **19.0%** 的轮次被截断；
+  `session_mirror` **637 次运行累计 findings=0**、每会话只产约 160 字"最后一条消息预览"、
+  且选择仍是**纯队头**故 1575 积压永远排不空。
+  三项修复：③候选相关性下限（**不删那个刻意的权威门**，magic-word 路径行为逐字不变，
+  新增 `_record_body_score >= 2` 相关性路径，阈值 2 有实测依据）；
+  F `recall_golden` **裁决反转为保留并接线**（它是①唯一的度量仪器），
+  **但查出其 authority 维度是死代码**，§3.3 退出条件只满足 hit/miss 两项；
+  `continuity_freshness` monitor 可见性（**刻意不引入新 WARN 码**，避开 clean-host
+  未注册即 FAIL 的坑）+ 并发单测（未发现竞态，但查出
+  `cli.py::_check_vector_available()` 急切 import torch 致 `status` 耗时 17–29 秒，
+  **很可能是待办 3 生产 flake 的成因**，已登记未修）。
+  整合评审纠正了 agent 报告里说反的预算优先级方向（候选段 50 是**最先被淘汰**的，
+  挤不掉已批准内容）。①设计定案：按 `fact_judge` 模板建新 cron lane、
+  复用 `_call_hermes_runtime_model`（Hermes 自身模型，已有两个先例），未实现。
+  3071 → **3089 passed / 13 skipped / 0 failed**（+18），四门全过；
+  **仅 `local_pass`，三项均未部署 3.200**（按 Owner 裁定全部完成后统一部署）。

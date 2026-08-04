@@ -185,13 +185,31 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
   与其永远挂在"批次 F"，不如按删除默认处理；真需要时再连同 CI job 一起作为新功能建。
   **待 Owner 一句话确认。**
 
-> **⚠️ 这个删除决定不再是独立的（2026-08-04）。** Owner 提出「很多关键事实没存入记忆，
-> 导致召回漏掉了一些」并要求后续仔细分析——而 `recall_golden` **正是测量召回漏项的仪器**
-> （对 golden set 跑 hit/miss/authority 报告）。那项分析需要"哪些事实该被召回、
-> 实际召回了没有"的可复跑量化，正是它的功能。
-> 上一条自己写着"真需要时再连同 CI job 一起作为新功能建"——这可能就是那个"真需要"。
-> **提请 Owner 在拍 F 之前先看这一条。** 该项分析本身不属于本文档
-> （本文档只覆盖"已实现待接线的 helper"），登记在稳定化清单待办第 8 项。
+> **✅ 裁决已改为「保留并接线」，已执行（2026-08-04）。**
+>
+> 推翻"倾向删除"的理由不是"以后可能有用"，而是 Owner 提出「很多关键事实没存入记忆，
+> 导致召回漏掉了一些」之后，**它成了唯一能度量那件事的仪器**：捕获链的任何修复都需要
+> "哪些事实该被召回、实际召回了没有"的可复跑前后对比，而这正是它的功能。
+> 上一条自己写着"真需要时再连同 CI job 一起作为新功能建"——这就是那个"真需要"。
+>
+> 已接线：`run_golden_set_report()` + CLI 子命令 `recall-golden run`
+> + 一份 seed golden set（含两条 >140 字截断的 before/after 标记项，
+> **刻意标注为"今天预期 FAIL"**，是捕获修复的前后基准）。
+>
+> **⚠️ 但本节原写的退出条件「跑出 hit/miss/authority 报告」只满足三分之二。**
+> 接线时读实现查出 **authority 维度是死代码**：
+> - `evaluate_recall` 里 `matched_source_ref = expected.source_ref if matched else ""`
+>   ——从**期望值**抄的，不是从实际匹配推导，于是
+>   `classify_evaluation_item` 的 `source_authority_issue` 分支**从真实输出永远不可达**
+>   （只有手搓 `RecallEvaluationItem` 的单测能进去）。
+> - `matched_authority` 声明了但 `evaluate_recall` 从不赋值，恒为 `""`。
+> - `GoldenResult.authority_class` / `min_score` 声明在 schema 里但评估器从不读。
+> - `classify_evaluation_item` docstring 列的 `"context_insufficient"` 无任何分支返回。
+>
+> **hit/miss 那一半是真的**（反事实实测：经真实生产写入路径建一条 crystallized 记录 →
+> `recall_rate == 1.0`，删掉记录文件 → 降为 `0.0`；未删时观察到 `assert 1 == 0`）。
+> 本轮**只接线、不修这些死代码**（超出"给它一个消费者"的范围），已登记为稳定化清单待办。
+> 因此**不得据此声称退出条件已满足**——authority 那一项仍未达标。
 
 ### ~~`evidence_gen`~~ → 已删除（见 5.8）  <!-- was 3.4 `evidence_gen` -->
 
@@ -542,7 +560,7 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 | **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | ✅ 已实现（3035→3071 passed，+36；8 项反事实实测；四门全过） |
 | **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C（C 已落地，接点见 4.2 末）** |
 | **E** | `restraint`：接 `low_clue_recall.py:593` 的 `_recent_correction_signal` → `DenialTracker` → `restraint_denials.json` | 待做 |
-| **F** | ~~`recall_golden`~~ | **倾向删除**（见 3.3），待 Owner 一句话确认；**该决定已不独立**，见 3.3 末尾 |
+| **F** | `recall_golden`：CLI 子命令 + seed golden set | ✅ **已保留并接线**（裁决反转，见 3.3）。**但 authority 维度是死代码，退出条件只满足 hit/miss 两项** |
 
 **部署时机**：3.200 的 `/opt` 同步与部署验证**在整条 C→D→E 链落地后一次性做**，
 不逐批部署。删除类改动单独部署没有可验证的行为变化，反而多几轮风险窗口。
