@@ -2884,15 +2884,26 @@ lane `due_interval_minutes=360` ⇒ 每天 4 次 × 每次 2 个会话 = **8 个
 - 新增 20 个测试（`test_memory_os_session_fact_extraction.py` 17 +
   `test_memory_os_session_fact_extraction_lane.py` 3，均为子 agent 所写）
   ＋ 整合评审中我补的 3 个（两个反事实 + 脱敏防漂移）= **+23**。
-- **3089 → 3112 passed / 13 skipped / 0 real failed。** 数字对得上：3089 + 23 = 3112。
-- 全量套件最后一跑报 `1 failed, 3111 passed`，那一条是
-  `test_completion_append_and_sidecar_are_idempotent_under_concurrency`
-  的 **已知 Windows 文件锁 flake**（`PermissionError: access is denied`）：
-  单独重跑立即 PASS，且上一次全量跑它是绿的，与本批改动无关
-  （execution_gate sidecar 并发，与 session_fact_extraction 无交集）。
+  CB.1 又补 3 个（延后可重试、延后有界、账本保留可老化）⇒ 本节合计 **+26**。
+- **3089 → 3115 passed / 13 skipped / 0 failed（最终一跑全绿）。**
+  数字对得上：3089 + 26 = 3115。
 - 四门全过：`write_surface_check`（`surface_count` 154 不变、`unclassified_count=0`）、
   `import_cycle_check`（`cycle_count=0`）、`static_hygiene`、
-  `public_checkout_probe --strict`（`PASS`）；`git diff --check` 干净；无 CRLF。
+  `public_checkout_probe --strict`（`PASS`）；**空白检查按推送区间**
+  （`git diff --check origin/main...HEAD`）干净，非逐提交；无 CRLF。
+- 中途两次全量跑各有 1 个**环境性**失败，均已隔离证伪、与本批改动无关，如实记下：
+  ① `test_completion_append_and_sidecar_are_idempotent_under_concurrency`
+  （`PermissionError`，已知 Windows 文件锁 flake，单独重跑即 PASS）；
+  ② `test_t2_2_5_gate_fails_closed_when_fts_query_errors`
+  （`sqlite3.OperationalError: unable to open database file`）——
+  单独重跑 PASS、同一 `--basetemp` 单跑 PASS、整文件 64 个全 PASS；
+  是 OS 资源错误而非断言失败，且 graph_layer 的 FTS 门与本批所改的
+  `session_fact_extraction`/`metadata_retention` 无任何调用关系。
+  **换全新 basetemp 重跑后 3115 全绿，证实成因是该次运行累积的 3863 个临时目录**
+  ——不是回归。（教训：不要用"它是 flake"收尾，要换掉可疑变量再跑一次拿到绿。）
+- **环境注记**：本机 C: 盘在此期间被占满（98G/99G），触发 ENOSPC 一度使 shell
+  不可用（连工具自身的输出文件都创建不了）。非本会话造成（本会话产物 <1MB）。
+  处置：清掉 pytest 残留后把测试临时目录改到 D: 盘（`TMPDIR` + `--basetemp`）。
 - 证据级别：**仅 `local_pass`**。未部署、未在 3.200 上跑过本 lane。
 
 #### CB.1 — 顾问复审又抓出 3 处（含一个会让整条 lane 失去意义的缺陷）
@@ -3515,4 +3526,29 @@ sannai-community 仓库 README。）
   ——统一部署必须重新生成快照并事后核对；子 agent 报的"会报 `unknown_registry_key`"不准确，
   实际比那更隐蔽。生产形状已实测核对（3.200 上 `session_*.json` 命中 141 个，
   `messages[0]` 含 `content`/`role`，与实现假设一致），排空速率 8 个/天 ⇒ 约 18 天。
-  3089 → **3112 passed / 13 skipped / 0 real failed**（+23），四门全过。
+  3089 → **3115 passed / 13 skipped / 0 failed**（+26，含 CB.1 的 3 个），四门全过，
+  空白检查按推送区间干净。
+- `（CB.1，本节）`：顾问复审①又抓出 3 处，第一处**会让整条 lane 失去意义**：
+  **LLM 失败后仍无条件把会话指纹记为已处理 ⇒ 那些事实永久丢失**
+  （`newly_processed_fingerprints.append` 在每会话循环末尾、每消息循环之外）。
+  生产实测 `llm_empty_content` 占 27.5%，是常态而非边缘；而"丢事实"正是本 lane 要消除的缺陷。
+  并暴露出**我派单指令本身的错误**：我让照抄 `fact_judge` 的确定性回退，
+  但 fact_judge 判的是"已存在内容"的布尔，本 lane 要**生成**摘要，**没有启发式能做摘要**；
+  marker 命中的 500 字符原文切片不是恢复出的事实，恰是本 lane 要消除的截断，
+  且 `_DURABLE_MARKERS` 含 `"用"`（实测），模型故障期几乎每条长中文消息都会变成
+  这种切片候选，还都是 resolver 可自动提升为**临时结晶**的 —— 治理问题，不只是噪声。
+  **两半一起改**：失败即**延后不臆造**（删除 `_heuristic_extract_fact`）；
+  指纹账本增加 `status`（`processed`/`deferred`/`abandoned`）与 `attempt`，
+  仅终态抑制重跑，`MAX_EXTRACTION_ATTEMPTS=3` 后记 `abandoned`
+  （终态但与成功可区分，使"放弃"看得见），并新增两个延后计数器。
+  第二处：两个新账本**重复了待办 9** —— 原写 `processed_at`（`_record_created_at` 不认）
+  且**根本未在 `metadata_retention` 注册** ⇒ 永久 `retained_records` + 对保留计划不可见；
+  已改 `created_at` 并双双注册。第三处（流程）：空白检查须按**推送区间**做而非逐提交。
+  三条反事实均实测确认会失败（`assert 0 == 1` / `assert False` / `assert None is not None`），
+  且保留那条**经真实生产者取证**（断言 lane 实跑写出的行，不是手写夹具）。
+  另重写 4 个原本断言"臆造行为"的测试，并删掉 `heuristic_only`（它命名的 knob 从不存在）。
+  3089 → **3115 passed / 13 skipped / 0 failed**（+26），四门全过。
+  **方法记账**：这 3 处我逐行读完 785 行仍全部漏掉。第一处漏因值得记——
+  我问的是"这段代码做什么"，而没问"**依赖失效时**它做什么"。
+  `fingerprint_outcomes` 的赋值点语法上毫不显眼，但它与失败路径的交互决定整条 lane 有无意义。
+  **教训：读一个有外部依赖的循环，必须把"依赖失效"那条路径当成独立的一遍来走。**
