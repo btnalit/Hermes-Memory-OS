@@ -2374,14 +2374,6 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    保留策略已在 BZ 补登记（`metadata_retention` 的 `shadow_retention_days`，
    与两个兄弟 shadow 账本同等），状态迁移去重后体积有界；**仍缺的是 monitor 可见性**
    ——没有任何 monitor 字段报告分级结果或 UNKNOWN 计数。C→D→E 链部署前应补。
-9. **两个既有 report-only shadow 账本已登记保留策略但永远不会老化**（BZ 查出，未修）。
-   `metadata_retention._record_created_at()` 只认 `created_at`/`ts`/`timestamp`，而
-   `graph_layer_shadow` 的记录写 `recorded_at`、`substrate_recall_shadow` 的记录
-   **没有任何时间字段** → 两者的每条记录都被判"无时间戳" → 永久 `retained_records`。
-   **本轮刻意只记录不修**：修它等于让两个从未被剪过的生产账本首次进入归档计划，
-   属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
-   `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
-   `recorded_at`（立即覆盖历史行，影响更大）。
 8. **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，**只登记未开工**——
    「后续要仔细分析」是排序指令）。指 Memory-OS 的写入链
    `sync_turn` → candidate → owner 批准 → crystallized 漏掉了本该留存的事实。
@@ -2400,6 +2392,14 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 
    **这一条改变了批次 F 的性质**：`recall_golden` 正是测量召回漏项的仪器，
    删除决定不再独立——见接线闭环方案 §3.3 末尾。
+9. **两个既有 report-only shadow 账本已登记保留策略但永远不会老化**（BZ 查出，未修）。
+   `metadata_retention._record_created_at()` 只认 `created_at`/`ts`/`timestamp`，而
+   `graph_layer_shadow` 的记录写 `recorded_at`、`substrate_recall_shadow` 的记录
+   **没有任何时间字段** → 两者的每条记录都被判"无时间戳" → 永久 `retained_records`。
+   **本轮刻意只记录不修**：修它等于让两个从未被剪过的生产账本首次进入归档计划，
+   属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
+   `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
+   `recorded_at`（立即覆盖历史行，影响更大）。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
