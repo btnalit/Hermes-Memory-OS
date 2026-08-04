@@ -423,6 +423,136 @@ def test_prefetch_labels_candidates_as_review_only_not_approved_crystallized(tmp
     assert "### Crystallized Memory" not in context
 
 
+def test_prefetch_surfaces_relevant_candidate_without_magic_word(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=71, profile="memoryos-test"))
+    store.append_event(event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-relevance-floor",
+            kind="insight",
+            body="Candidate-only insight about memory continuity.",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    # No magic word ("candidate", "结晶", "review queue", ...) anywhere in
+    # this query, but it textually overlaps the candidate body above
+    # ("memory", "continuity"). The relevance floor should let it surface,
+    # still carrying the mandatory authority-labeling prefix.
+    context = build_prefetch(
+        "Tell me about memory continuity insights",
+        budget_chars=2200,
+        store=store,
+        index=None,
+    )
+
+    assert "### Crystallized Review Candidates" in context
+    assert "candidate only" in context
+    assert "not approved crystallized memory" in context
+    assert "Candidate-only insight about memory continuity." in context
+
+
+def test_prefetch_suppresses_irrelevant_candidate_without_magic_word(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=72, profile="memoryos-test"))
+    store.append_event(event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-relevance-floor-miss",
+            kind="insight",
+            body="Candidate-only insight about memory continuity.",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    # No magic word, and no textual overlap with the candidate body either.
+    # The relevance floor must stay conservative: no match => no line, no
+    # filler.
+    context = build_prefetch(
+        "What's the weather forecast for tomorrow?",
+        budget_chars=2200,
+        store=store,
+        index=None,
+    )
+
+    assert "Candidate-only insight about memory continuity." not in context
+    assert "### Crystallized Review Candidates" not in context
+
+
+def test_prefetch_surfaces_relevant_cjk_candidate_without_magic_word(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=73, profile="memoryos-test"))
+    store.append_event(event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-relevance-floor-cjk",
+            kind="insight",
+            body="用户提到下周要去日本旅行，还没定好行程。",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    # No magic word, but the query shares the substantive multi-character
+    # words "日本"/"旅行"/"行程" with the candidate body (each contributes
+    # multiple overlapping CJK bigrams), well past the >=2 relevance floor.
+    context = build_prefetch(
+        "日本旅行的行程安排得怎么样了？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+    )
+
+    assert "### Crystallized Review Candidates" in context
+    assert "candidate only" in context
+    assert "not approved crystallized memory" in context
+    assert "用户提到下周要去日本旅行，还没定好行程。" in context
+
+
+def test_prefetch_suppresses_cjk_grammar_overlap_without_magic_word(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=74, profile="memoryos-test"))
+    store.append_event(event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-relevance-floor-cjk-miss",
+            kind="insight",
+            body="不知道为什么用户对这个功能有疑问，建议后续跟进。",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    # No magic word. This query is about an unrelated topic (meeting time)
+    # and shares only a single common CJK grammar bigram ("什么") with the
+    # candidate body above -- pure function-word noise, not topical overlap.
+    # A single-bigram floor would let this leak; the >=2 floor must not.
+    context = build_prefetch(
+        "我们什么时候开会？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+    )
+
+    assert "不知道为什么用户对这个功能有疑问，建议后续跟进。" not in context
+    assert "### Crystallized Review Candidates" not in context
+
+
 def test_prefetch_filters_diagnostic_working_memory_from_casual_memory_chat(tmp_path):
     store = _store(tmp_path)
     diagnostic_item = build_working_item(seed=80, source_event_id="evt-diagnostic")

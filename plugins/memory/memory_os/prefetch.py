@@ -1664,10 +1664,53 @@ def _crystallized_lines(
 
 
 def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:
-    if not _should_include_candidates(query):
+    # A magic word ("candidate", "结晶", "review queue", ...) is an explicit
+    # "show me the review queue" request and always lists the queue
+    # (unchanged behavior). Absent a magic word, a candidate is still
+    # allowed to surface when it is genuinely relevant to the query — the
+    # relevance floor below.
+    #
+    # Matching machinery reused: _extract_query_tokens (query -> tokens) +
+    # _record_body_score (score one record body in isolation). Considered
+    # _tokenize_for_floor_match first since it is _record_body_score's usual
+    # partner in _crystallized_lines, but that pairing is a *soft* rank
+    # (score-0 records sink and only drop out via a cap truncation) and its
+    # tokenizer emits single-character tokens on punctuation boundaries
+    # (e.g. "what's" -> "s"), which trivially substring-matches almost any
+    # body and defeats a *hard* include/exclude gate — verified empirically:
+    # an unrelated query ("What's the weather forecast for tomorrow?")
+    # still matched via the stray "s" token. _extract_query_tokens is the
+    # other mixed-language tokenizer already in this file (used for
+    # cross-session event relevance above) and drops ASCII tokens under 3
+    # chars plus stop words, so it doesn't produce that noise. Paired with
+    # _record_body_score — which scores a single record body in isolation,
+    # exactly the candidate-record shape — this is the closest existing fit
+    # for a strict gate; no new scorer is introduced.
+    #
+    # Threshold: require >=2 distinct token hits, not >=1. _extract_query_tokens
+    # emits overlapping CJK bigrams with no stop-word filter (unlike its ASCII
+    # side), and a single shared bigram is often pure grammar noise (的/是/在-
+    # style function words such as "什么"/"我们"/"这个") rather than topical
+    # overlap — verified empirically: query "我们什么时候开会？" (meeting time)
+    # scored 1 against an unrelated candidate body about a feature-confusion
+    # report purely via the shared bigram "什么". Genuine topical overlap
+    # reliably produces >=2 hits because a real shared multi-character word
+    # contributes multiple overlapping bigrams (e.g. "日本旅行" shared between
+    # query and body scored 4). The >=2 floor also holds for the ASCII case
+    # this was built against (score 3 for "about"/"memory"/"continuity").
+    RELEVANCE_FLOOR_MIN_SCORE = 2
+    magic_word_match = _should_include_candidates(query)
+    relevance_tokens: list[str] = [] if magic_word_match else _extract_query_tokens(query)
+    if not magic_word_match and not relevance_tokens:
         return []
     lines: list[str] = []
     for candidate in read_candidate_queue(store.roots)[:5]:
+        if not magic_word_match and _record_body_score(
+            str(candidate.body or ""), relevance_tokens
+        ) < RELEVANCE_FLOOR_MIN_SCORE:
+            # Conservative relevance floor: fewer than 2 distinct token hits
+            # => no line. Never emit an unmatched candidate as filler.
+            continue
         text = _redact(_clip(candidate.body, 180))
         if _is_diagnostic_style_seed(text):
             continue
