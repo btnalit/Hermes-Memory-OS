@@ -334,8 +334,33 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 > **D 的接点已探明**：`recall_facade.py:116` 的 `build_recall_plan(...,
 > current_task_revision=task_revision)` **已经**把当前任务修订号带进 recall plan
 > （由 `prefetch.py:634` 以同一个 `max_age_hours=0` 读出），但那个 plan
-> **没有 `findings` 键**。D 的活就是把 C 产出的 finding 挂进去让 gap_note 渲染，
-> 不需要新建结构。
+> **没有 `findings` 键**（它的键是 `suppressed` / `shadow_findings` / `conflicts`）。
+> D 的活就是把 C 产出的 finding 挂进去让 gap_note 渲染，不需要新建结构。
+>
+> ### ⚠️ 更正 4.1 的一处事实错误（2026-08-04 完成前复核查出）
+>
+> **4.1 写的「全仓没有任何生产代码产出 `owner_conflict_requires_clarification`
+> 或 `stale_task_revision`」——后半句是错的。** `recall_arbitration.py:86` 就在产出
+> `stale_task_revision`。本节初稿与批次 C 的 commit message、PR 正文、两处 docstring
+> 都原样沿用了这个错误说法，均已更正。
+>
+> **正确说法需要四个限定，缺一个都会让后来者误判**（一个 grep 这个码的人会先撞见 86 行）：
+>
+> 1. 它以 **`"reason"`** 为键，而 `gap_note.build_gap_note_candidate` 读 **`"code"`**
+>    —— **结构上** gap_note 看不见它，与它是否运行无关。
+> 2. 语义不同：判的是 STATE_OVERLAY 对象的 `task_revision` 与当前修订号**不相等**
+>    （identity 比对），**不是年龄**。
+> 3. 默认配置下**休眠**：`config.py:53` 的 `recall_arbitration.mode = "off"`
+>    → facade 不构造 → `build_recall_plan` 从不运行。
+> 4. 它的用途是 **suppression**（丢弃该对象）——**正是本节裁定为 continuity 否决的行为**。
+>
+> 因此两者互补而非重复：**arbitration 按修订号相等性抑制，continuity 按年龄披露。**
+> **这给 D 增加了一个必须显式做的决定**：gap_note 的同名码此后有两个可能来源、
+> 语义不同、字段名不同——D 必须选，不能假设只有一个。
+>
+> **并因此纠正本节前文的一处遗漏**：生产时效过滤器不止两个。除 7 天与 48 小时窗口外，
+> `recall_arbitration` 的 freshness guard 是**第三个**（默认 `shadow`；`mode=off` 时休眠）。
+> "不动既有过滤器"这条裁定同样覆盖它。
 
 ### 4.2b `continuity` 原始条目（存档）
 

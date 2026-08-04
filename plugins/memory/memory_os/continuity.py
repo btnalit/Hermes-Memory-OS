@@ -7,12 +7,12 @@ freshness timestamp and a stale_after duration; when the age exceeds
 stale_after the object is graded ``stale``.
 
 **Grading discloses; it never filters.**  A stale grade is published as a
-``stale_task_revision`` finding — the upstream producer Gap Note needs and
-which no production code emitted before — and recorded in a report-only
-diagnostic ledger.  It does not remove anything from recall, and it does not
-touch the production recency filters that already exist (``state_overlay.py``
-7-day owner-eligible candidate window, ``prefetch.py`` 48-hour cross-session
-window).  Those windows were measured against live behaviour;
+``stale_task_revision`` finding — the upstream producer Gap Note needs — and
+recorded in a report-only diagnostic ledger.  It does not remove anything from
+recall, and it does not touch the recency filters that already exist
+(``state_overlay.py`` 7-day owner-eligible candidate window, ``prefetch.py``
+48-hour cross-session window, and ``recall_arbitration``'s freshness guard).
+Those windows were measured against live behaviour;
 ``DEFAULT_STALE_AFTER`` below was written for an "inside one session" model
 this system does not use.  It is therefore a **grading scale, not a gate** —
 substituting its 2-hour open-thread value for the production 7-day window
@@ -33,8 +33,25 @@ CONTINUITY_SCHEMA_VERSION = "memory-os.continuity.v1"
 CONTINUITY_FRESHNESS_SCHEMA_VERSION = "memory-os.continuity_freshness.v0"
 
 # The one reason code this module produces.  Gap Note's ``ELIGIBLE_REASON_CODES``
-# recognises exactly two codes and, before this lane, nothing in production
-# emitted either of them — Gap Note was a renderer with no upstream producer.
+# recognises exactly two codes and, before this lane, Gap Note had no upstream it
+# could actually read.
+#
+# There IS a second emitter of this same string — ``recall_arbitration.py:86`` —
+# and a future reader grepping for the code will find it, so be precise about why
+# it is not the producer Gap Note consumes:
+#
+#   1. It emits under key ``"reason"``; ``gap_note.build_gap_note_candidate``
+#      reads ``"code"``.  Structurally invisible to Gap Note either way.
+#   2. Its semantics differ: a STATE_OVERLAY object whose ``task_revision`` is
+#      unequal to the current one — a *mismatch* test, not an *age* test.
+#   3. It is dormant under default config (``recall_arbitration.mode = "off"``,
+#      so the facade is never constructed and ``build_recall_plan`` never runs).
+#   4. Its use is *suppression* — it drops the object — which is exactly the
+#      behaviour the owner ruling rejects for continuity.
+#
+# So the two are complements, not duplicates: arbitration suppresses on revision
+# identity, this module discloses on age.  Batch D must decide deliberately which
+# one it renders rather than assuming there is only one.
 STALE_TASK_REVISION_REASON_CODE = "stale_task_revision"
 
 
@@ -246,9 +263,13 @@ def build_continuity_findings(
 
     Shape matches what ``gap_note.build_gap_note_candidate`` reads
     (``finding["code"]``), so batch D can consume this without a translation
-    layer.  Only STALE produces a finding: AGING is a warning to the diagnostic
-    ledger, not an owner-facing claim, and UNKNOWN is counted separately
-    because "cannot tell" must never render as "out of date".
+    layer.  Note that ``recall_arbitration``'s same-named finding uses
+    ``"reason"`` instead and is therefore invisible to Gap Note — see the
+    comment on :data:`STALE_TASK_REVISION_REASON_CODE`.
+
+    Only STALE produces a finding: AGING is a warning to the diagnostic ledger,
+    not an owner-facing claim, and UNKNOWN is counted separately because
+    "cannot tell" must never render as "out of date".
     """
     findings: list[dict[str, Any]] = []
     task = state.current_task

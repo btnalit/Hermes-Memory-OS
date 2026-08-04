@@ -779,13 +779,22 @@ def _record_continuity_freshness(store: MemoryOSStore, *, session_id: str = "") 
     **Discloses; never filters.**  This function returns None and is called for
     its side effect only.  It must never influence the assembled context: the
     existing recency filters (``state_overlay.py`` 7-day candidate window,
-    ``_recent_cross_session_lines`` 48-hour window) stay exactly as they are,
-    and the live prefetch string is byte-identical whether or not this runs.
-    A test pins that.
+    ``_recent_cross_session_lines`` 48-hour window, ``recall_arbitration``'s
+    freshness guard) stay exactly as they are, and the live prefetch string is
+    byte-identical whether or not this runs.  A test pins that.
 
-    What it produces is the ``stale_task_revision`` finding, which no
-    production code emitted before — Gap Note is a renderer whose only two
-    eligible reason codes had no upstream producer.
+    What it produces is the ``stale_task_revision`` finding Gap Note can read.
+    ``recall_arbitration.py:86`` emits the same string but under key
+    ``"reason"`` with mismatch (not age) semantics, so it is not the same
+    signal — see the comment on ``continuity.STALE_TASK_REVISION_REASON_CODE``.
+
+    **Deliberately hooked in ``build_prefetch`` only.**
+    ``build_prefetch_with_observability`` (used by
+    ``memory_os_3_200_monitor.py``) does not grade, so there is exactly one
+    writer to this ledger.  Adding a second entry point would put two writers
+    on the same file with different ``session_id`` values and double-count the
+    transitions the dedupe signature exists to collapse.  If grading is ever
+    wanted there, route it through this function rather than adding a call.
 
     Kill switch: ``lane_continuity_freshness_enabled``, default True.  The
     owner ruling removed the *waiting window*, not the ability to turn a lane

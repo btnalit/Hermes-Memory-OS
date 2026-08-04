@@ -2251,15 +2251,53 @@ naive 时间戳分级（2 个测试同时红）、None≠stale、接线调用本
 `build_prefetch` 内嵌 `{age_h}h前` 等 now 派生文本，两次 live 调用可能因与 continuity
 无关的原因不同。
 
+### 完成前复核查出的一处自己的错误陈述（已更正）
+
+**「全仓没有任何生产代码产出 `stale_task_revision`」是错的**——该说法来自方案 §4.1，
+本节初稿原样沿用，并写进了 commit message、PR 正文与两处 docstring。
+实测 `recall_arbitration.py:86` **就在产出这个字符串**。已逐处更正。
+
+正确说法需要四个限定，缺一个都会让后来者误判：
+
+1. 它以 **`"reason"`** 为键，而 `gap_note.build_gap_note_candidate` 读 **`"code"`**
+   ——**结构上** gap_note 看不见它，与它是否运行无关。
+2. 语义不同：判的是 STATE_OVERLAY 对象的 `task_revision` 与当前修订号**不相等**
+   （identity 比对），**不是**年龄。
+3. 默认配置下**休眠**：`config.py:53` 的 `recall_arbitration.mode = "off"`，
+   于是 facade 根本不构造、`build_recall_plan` 从不运行。
+4. 它的用途是 **suppression**（`suppressed.append(finding); continue`，丢弃该对象）
+   ——**正是本裁定为 continuity 否决的那个行为**。
+
+所以两者是互补而非重复：**arbitration 按修订号相等性抑制，本模块按年龄披露。**
+已在 `STALE_TASK_REVISION_REASON_CODE` 上写明这四条，
+并登记为 **D 必须显式选择渲染哪一个**，而不是假设只有一个来源。
+
+**顺带纠正一处遗漏**：本节与方案 §4.2 原先只列了两个生产时效过滤器（7 天 / 48 小时），
+`recall_arbitration` 的 freshness guard 是**第三个**（默认 `shadow`，且 mode=off 时休眠）。
+已补入。
+
+**并已核实 advisor 提出的 revision 单调性疑虑不成立**：`recall_arbitration:85`
+对 `task_revision` 只做**相等性**比较，没有任何消费者把它当锚点计数使用。
+因此 `revision`（＝账本行号，生产里因 `_supersede_active_anchors()` 先写墓碑行
+而每次锚点写入递增 2 以上）出现跳号是无害的——它在本模块里只作为签名的身份成分。
+本节的测试直接写行、未经过墓碑路径，这一点如实声明。
+
 ### 测试数量
 
 3035 → **3070 passed / 13 skipped / 0 failed**（+35：continuity 单元 +15、prefetch 接线 +20）。
 
+> **口径声明**：3070 是本 worktree 实测；**3035 是推断而非实测**
+> （3070 − 本轮新增 35，并与批次 B 当日记录的 3035 相互印证），未在 `main` 上重跑基线。
+
 ### 门
 
 import cycle（`cycles: []`）/ write surface（`unclassified_count=0`）/ static hygiene
-（含 compileall，本 worktree 未复现 BY 的 Windows MAX_PATH 伪影）/ public checkout probe
-`--strict` exit 0 / `git diff --check` —— 全过。
+（含 compileall）/ public checkout probe `--strict` exit 0 / `git diff --check`
+及 `git diff --check origin/main...HEAD`（按区间，非仅工作区）—— 全过。
+
+> **关于 BY 记录的 Windows MAX_PATH 伪影**：本 worktree 的 `compileall` 子项通过，
+> 但这**只说明本 worktree 路径够短**（BY 已诊断该问题按路径长度触发，目标路径 261 字符
+> 超 260 上限一个字符）。**不构成"该问题已消失"的结论。**
 
 ### 未验证项（如实声明）
 
@@ -2601,3 +2639,8 @@ sannai-community 仓库 README。）
   送进 recall plan，但那个 plan 没有 `findings` 键。
   6 项反事实 revert→FAIL→restore→PASS。3035 → **3070 passed / 13 skipped / 0 failed**（+35），
   四门全过。**仅 `local_pass`，未部署 3.200**（按方案裁定等 C→D→E 整链）。
+  完成前复核查出并更正自己的一处错误陈述：「全仓无 `stale_task_revision` 生产者」是错的
+  （沿用方案 §4.1），`recall_arbitration.py:86` 就在产出它——但以 `"reason"` 为键
+  （gap_note 读 `"code"`，结构上看不见）、语义是修订号不相等而非年龄、默认
+  `mode="off"` 休眠、用途是 suppression。两者互补，且 **D 因此多一个必须显式做的选择**。
+  另补记 `recall_arbitration` freshness guard 是**第三个**生产时效过滤器。
