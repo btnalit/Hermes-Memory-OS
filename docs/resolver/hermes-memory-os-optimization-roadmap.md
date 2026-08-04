@@ -309,6 +309,14 @@ observation_days >= configured_gate
 - 保持 `retrieve_called=true`、`format_called=false`、live output 不变。
 - 只有零关键遗漏、零 authority escape、零 stale-body selection 后才提出 bounded apply canary。
 
+> **待修订（2026-08-04，随接线闭环方案批次 D 落地）**：Owner 已裁定 Class 3 三项
+> **不开观察窗口、直接实现**（接线闭环方案第 6 节第 3 条），只保留"默认可关的开关 +
+> 回滚能力"。本节最后一条的 shadow→canary 阶梯因此与该裁定分叉，须在批次 D 一并修订。
+>
+> **批次 C（continuity 分级披露，2026-08-04 已落地）不涉及本分叉**：它是 report-only，
+> live prefetch 输出逐字节不变，正符合本节「保持 live output 不变」。
+> 需要修订本节的是**批次 D**——gap_note 要往 live 输出加一句不确定性披露且不开 shadow 窗口。
+
 ### R1.3 V3 Seed / Wandering
 
 - Seed 未成熟前不调用 wandering inference。

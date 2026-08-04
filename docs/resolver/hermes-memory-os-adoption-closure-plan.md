@@ -185,6 +185,14 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
   与其永远挂在"批次 F"，不如按删除默认处理；真需要时再连同 CI job 一起作为新功能建。
   **待 Owner 一句话确认。**
 
+> **⚠️ 这个删除决定不再是独立的（2026-08-04）。** Owner 提出「很多关键事实没存入记忆，
+> 导致召回漏掉了一些」并要求后续仔细分析——而 `recall_golden` **正是测量召回漏项的仪器**
+> （对 golden set 跑 hit/miss/authority 报告）。那项分析需要"哪些事实该被召回、
+> 实际召回了没有"的可复跑量化，正是它的功能。
+> 上一条自己写着"真需要时再连同 CI job 一起作为新功能建"——这可能就是那个"真需要"。
+> **提请 Owner 在拍 F 之前先看这一条。** 该项分析本身不属于本文档
+> （本文档只覆盖"已实现待接线的 helper"），登记在稳定化清单待办第 8 项。
+
 ### ~~`evidence_gen`~~ → 已删除（见 5.8）  <!-- was 3.4 `evidence_gen` -->
 
 - **具名调用点**：`.github/workflows/ci.yml`（路线图已核实当前未调用）。
@@ -279,6 +287,88 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 4. **目标反事实（一条测试钉死整个设计决策）**：
    一个已过 `stale_after` 的对象**被判为 STALE**，
    **且 live prefetch 输出逐字节不变**。
+
+> **批次 C 执行结果（2026-08-04，已实现）——三处方案与实测不符，逐条记明。**
+>
+> **(1) 数据源不是 overlay。** 方案 4.2 前言写「overlay 对象已带时间戳
+> （`state_overlay.py:281` 的 `last_updated`/`ts`）」。实测：`OverlayEntry` 只有
+> `text`/`source`/`source_kind`，**没有任何时间字段**。281 行读到的候选时间戳在
+> `_read_open_threads_from_candidates` 内部用完即丢（296 行只返回
+> `(summary, candidate_id)`）。**overlay 投影里没有任何可分级的东西。**
+> 真正的源是 `task_state.read_effective_current_task()`：它投影出 `revision`
+> （账本行号即修订号）与 `source_at`，且 `created_at` 由
+> `_active_task_anchor_record` 以 `.isoformat().replace("+00:00","Z")` 机器写入，
+> **写入者可完整追溯**（正是批次 B 裁定要求的条件）。
+> `stale_task_revision` 这个码名与它的 `revision` 字段本来就是对应的。
+>
+> **(2) trap #3 的「必须走 StructuralWriteGate」在这条路径上做不到，已改为 allowlist 登记。**
+> `append_governed_jsonl` 要求一个有效且未使用的 ExecutionGate permit，而 prefetch 是
+> Hermes **每轮**调用的热路径，**不存在 envelope** → 每次调用都 `StoreError`
+> → 诊断记录永远写不出来。那正是 trap #3 想防的静默失败，照字面执行会亲手制造它。
+> 备选方案（改从 heartbeat 写，那里有 envelope）会丢掉「本次 recall 看到了什么」这个
+> 唯一让它有诊断价值的性质。
+> **实际做法**：`append_jsonl_locked` + 在 `ALLOWED_WRITE_SURFACES` 登记为
+> `report_only_continuity_freshness`，与同文件里两个既有的 report-only shadow 写
+> （`_record_substrate_shadow_recall`、`_record_graph_layer_shadow`）**同一契约**。
+> trap #3 的**目的**（`unclassified_count=0`）由此满足，实测 write surface 门
+> `status=pass / unclassified_count=0`；删掉这条登记则该门立刻 FAIL（已实测）。
+> **记在这里而不只是记在代码注释里**：本项目一贯把「文档说 A、代码做 B」当缺陷。
+>
+> **(3) 只做 `current_task`，open_threads 明确不在 C 范围内。**
+> 理由不是没空：open-thread 的时间戳按 (1) 在 overlay 里根本不存在，
+> 而候选的 7 天窗口按本节裁定**不许动**。因此 `active_open_threads()` /
+> `stale_open_threads()` 在 C 之后**仍然是零生产调用**——按第 8 节这正是要防的模式，
+> 所以在此显式登记原因，而不是让它们静默地继续躺着。
+> 若日后要分级 open_threads，前置工作是让 `OverlayEntry` 携带时间戳，那是独立一项。
+>
+> **另外两条实现期决定：**
+>
+> - **账本记录状态迁移，不记轮次。** 反向评审时发现：`current_task` 的 `stale_after`
+>   是 1 小时，而任务锚点**只在意图切换时重写**（defer/resume/cancel/新任务），
+>   于是同一个任务连做超过 1 小时后，**每一轮 prefetch 都会追加一行**——热路径上无界增长。
+>   改为按 `(session_id, object_id, revision, grade, unknown_count)` 签名去重：
+>   一个状态一行。`session_id` 刻意进签名——新会话看到同一个过期对象是新事实，
+>   也是「答案变差时定位到哪个会话」的抓手。
+> - **`max_age_hours=0` 必须硬编码。** 该参数**本身就是一个生产时效过滤器**：任何正值
+>   都会让读取对过期锚点返回 `None`，于是分级只能看到已经通过过滤的东西、永远无法与它
+>   不一致，整条 lane 变成装饰。已用测试在调用边界上断言 `max_age_hours == 0`，
+>   而不是只靠"分级结果对了"间接推断。
+>
+> **与 R1.2 的关系（配套要求）**：C **不违反** R1.2——R1.2 要求
+> 「保持 live output 不变」，而 C 正是 report-only、live 输出逐字节不变。
+> 需要修订 R1.2 的是 **D**（gap_note 要往 live 输出加一句话且不开 shadow 窗口）。
+> 已在路线图 R1.2 就地标注该修订待 D 落地。
+>
+> **D 的接点已探明**：`recall_facade.py:116` 的 `build_recall_plan(...,
+> current_task_revision=task_revision)` **已经**把当前任务修订号带进 recall plan
+> （由 `prefetch.py:634` 以同一个 `max_age_hours=0` 读出），但那个 plan
+> **没有 `findings` 键**（它的键是 `suppressed` / `shadow_findings` / `conflicts`）。
+> D 的活就是把 C 产出的 finding 挂进去让 gap_note 渲染，不需要新建结构。
+>
+> ### ⚠️ 更正 4.1 的一处事实错误（2026-08-04 完成前复核查出）
+>
+> **4.1 写的「全仓没有任何生产代码产出 `owner_conflict_requires_clarification`
+> 或 `stale_task_revision`」——后半句是错的。** `recall_arbitration.py:86` 就在产出
+> `stale_task_revision`。本节初稿与批次 C 的 commit message、PR 正文、两处 docstring
+> 都原样沿用了这个错误说法，均已更正。
+>
+> **正确说法需要四个限定，缺一个都会让后来者误判**（一个 grep 这个码的人会先撞见 86 行）：
+>
+> 1. 它以 **`"reason"`** 为键，而 `gap_note.build_gap_note_candidate` 读 **`"code"`**
+>    —— **结构上** gap_note 看不见它，与它是否运行无关。
+> 2. 语义不同：判的是 STATE_OVERLAY 对象的 `task_revision` 与当前修订号**不相等**
+>    （identity 比对），**不是年龄**。
+> 3. 默认配置下**休眠**：`config.py:53` 的 `recall_arbitration.mode = "off"`
+>    → facade 不构造 → `build_recall_plan` 从不运行。
+> 4. 它的用途是 **suppression**（丢弃该对象）——**正是本节裁定为 continuity 否决的行为**。
+>
+> 因此两者互补而非重复：**arbitration 按修订号相等性抑制，continuity 按年龄披露。**
+> **这给 D 增加了一个必须显式做的决定**：gap_note 的同名码此后有两个可能来源、
+> 语义不同、字段名不同——D 必须选，不能假设只有一个。
+>
+> **并因此纠正本节前文的一处遗漏**：生产时效过滤器不止两个。除 7 天与 48 小时窗口外，
+> `recall_arbitration` 的 freshness guard 是**第三个**（默认 `shadow`；`mode=off` 时休眠）。
+> "不动既有过滤器"这条裁定同样覆盖它。
 
 ### 4.2b `continuity` 原始条目（存档）
 
@@ -449,17 +539,17 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 |---|---|---|
 | **A** | 删除 `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | ✅ 已合并（PR #15，原计划是接线这四项，实测后全部改为删除） |
 | **B** | `timeutil`：修 `allow_naive` 契约违反 + 迁移 1 处已追溯站点 | ✅ 已合并（PR #16，`09c9629`；31 处里只迁 1 处，其余按裁定不迁） |
-| **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | 待做，**下一项** |
-| **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C** |
+| **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | ✅ 已实现（3035→3071 passed，+36；8 项反事实实测；四门全过） |
+| **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C（C 已落地，接点见 4.2 末）** |
 | **E** | `restraint`：接 `low_clue_recall.py:593` 的 `_recent_correction_signal` → `DenialTracker` → `restraint_denials.json` | 待做 |
-| **F** | ~~`recall_golden`~~ | **倾向删除**（见 3.3），待 Owner 一句话确认 |
+| **F** | ~~`recall_golden`~~ | **倾向删除**（见 3.3），待 Owner 一句话确认；**该决定已不独立**，见 3.3 末尾 |
 
 **部署时机**：3.200 的 `/opt` 同步与部署验证**在整条 C→D→E 链落地后一次性做**，
 不逐批部署。删除类改动单独部署没有可验证的行为变化，反而多几轮风险窗口。
+C 已落地但**尚未部署**，按此裁定等 D、E。
 
-A、B 完成后：**9 项已终结**（8 项删除 + 1 项 timeutil 修复与定向迁移）。
-剩余只有 **C→D→E 这一条链**（continuity 产出 → gap_note 披露 → restraint 克制），
-外加待确认删除的 `recall_golden`。
+A、B、C 完成后：**10 项已终结**（8 项删除 + timeutil 修复与定向迁移 + continuity 分级披露）。
+剩余 **D→E**（gap_note 披露 → restraint 克制），外加待确认删除的 `recall_golden`。
 
 这比初版方案设想的小得多——因为大部分"待接线"其实是不该接。
 **初版说「6 项合并即终结」，实测后其中 4 项是删除**；
