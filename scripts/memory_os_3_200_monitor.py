@@ -1342,6 +1342,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     _classify_full_monitor_runtime_contract(runtime_contract, passed, warn)
+
+    raw_continuity_freshness = snapshot.get("continuity_freshness")
+    continuity_freshness: dict[str, Any] = (
+        raw_continuity_freshness if isinstance(raw_continuity_freshness, dict) else {}
+    )
+    if continuity_freshness:
+        # Absence is the normal healthy state (see continuity_freshness_summary()
+        # in the embedded probe script) -- both branches are PASS, never WARN/FAIL,
+        # so a quiet ledger never drags the monitor status down.
+        if continuity_freshness.get("ledger_exists"):
+            passed.append({
+                "code": "continuity_freshness_ledger_present",
+                "value": {
+                    "record_count": continuity_freshness.get("record_count"),
+                    "latest_current_task_grade": continuity_freshness.get("latest_current_task_grade"),
+                },
+            })
+        else:
+            passed.append({"code": "continuity_freshness_ledger_absent_healthy"})
+        unknown_grade_count = int(continuity_freshness.get("total_unknown_grade_count") or 0)
+        stale_task_count = int(continuity_freshness.get("total_stale_task_count") or 0)
+        if unknown_grade_count > 0 or stale_task_count > 0:
+            # INFO, not WARN: an unparseable timestamp (unknown_grade_count) or a
+            # graded-stale current task (stale_task_count) is diagnostic signal
+            # for an operator, not a monitor-health problem -- continuity.py's own
+            # contract is "grading discloses; it never filters."  Routing this
+            # through `info` (unlike `warn`) means it needs no
+            # CLEAN_HOST_WARN_CLASSIFICATIONS entry.
+            info.append({
+                "code": "continuity_freshness_findings",
+                "value": {
+                    "total_unknown_grade_count": unknown_grade_count,
+                    "total_stale_task_count": stale_task_count,
+                    "latest_current_task_grade": continuity_freshness.get("latest_current_task_grade"),
+                    "record_count": continuity_freshness.get("record_count"),
+                },
+            })
+
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
 
@@ -4452,6 +4490,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
+        f"- ContinuityFreshness={_continuity_freshness_summary(snapshot.get('continuity_freshness') or {})}",
         f"- L4Guard={summarize_l4_guard(snapshot)}",
         f"- V7Governance={summarize_v7_governance(snapshot)}",
         f"- FullMonitorRuntime={_full_monitor_runtime_summary(snapshot.get('full_monitor_runtime_contract') or {})}",
@@ -4804,6 +4843,18 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
         "actual_identity_write": status.get("actual_identity_write"),
         "actual_crystallized_approval": status.get("actual_crystallized_approval"),
     }
+
+
+def _continuity_freshness_summary(section: dict[str, Any]) -> str:
+    if not section:
+        return "unavailable"
+    return (
+        f"exists={section.get('ledger_exists')} "
+        f"records={section.get('record_count')} "
+        f"latest_grade={section.get('latest_current_task_grade')} "
+        f"stale={section.get('total_stale_task_count')} "
+        f"unknown={section.get('total_unknown_grade_count')}"
+    )
 
 
 def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
@@ -5789,6 +5840,38 @@ def enrich_memory_sources_stats(stats):
         enriched.get("selected_source_class_distribution") or selected_source_classes
     )
     return enriched
+
+def continuity_freshness_summary():
+    # Report-only ledger written by continuity.py (see its module docstring).
+    # Absence is the normal healthy state: the ledger is bounded by
+    # state-transition dedup (continuity_freshness_record_is_reportable), so an
+    # all-fresh grading pass never appends a line -- an empty/missing file is
+    # not evidence of anything broken. total_unknown_grade_count is the
+    # counter that matters most: an unparseable timestamp grades UNKNOWN, never
+    # STALE, so that is how this lane would fail silently without it.
+    path = os.path.join(_hermes_home, "memory-os/system/continuity_freshness.jsonl")
+    ledger_exists = os.path.exists(path)
+    raw_records = _read_jsonl(path)
+    parse_error_count = sum(1 for r in raw_records if isinstance(r, dict) and r.get("_parse_error"))
+    records = [r for r in raw_records if isinstance(r, dict) and not r.get("_parse_error")]
+    schema_mismatch_count = sum(
+        1 for r in records if str(r.get("schema_version") or "") != "memory-os.continuity_freshness.v0"
+    )
+    graded = [r for r in records if str(r.get("schema_version") or "") == "memory-os.continuity_freshness.v0"]
+    latest = graded[-1] if graded else {}
+    return {
+        "schema_version": "memory-os.continuity_freshness_monitor.v0",
+        "ledger_exists": ledger_exists,
+        "record_count": len(graded),
+        "parse_error_count": parse_error_count,
+        "schema_mismatch_count": schema_mismatch_count,
+        "latest_created_at": str(latest.get("created_at") or ""),
+        "latest_current_task_grade": str(latest.get("current_task_grade") or ""),
+        "latest_current_task_present": bool(latest.get("current_task_present")) if latest else None,
+        "total_stale_task_count": sum(int(r.get("stale_task_count") or 0) for r in graded),
+        "total_unknown_grade_count": sum(int(r.get("unknown_grade_count") or 0) for r in graded),
+        "raw_body_included": False,
+    }
 
 def rh26_probe():
     code = r"""
@@ -8465,6 +8548,7 @@ print(json.dumps({
   "hook_markers": hook_marker_counts(),
   "session_activity": session_activity_stats(),
   "compaction": compaction_stats(),
+  "continuity_freshness": continuity_freshness_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))
