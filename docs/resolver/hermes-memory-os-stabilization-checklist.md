@@ -2650,11 +2650,66 @@ telemetry_degraded_count`（L473-475），后两项皆 0 ⇒ **FAIL 完全由 69
 （新增 `working:`？），以及归因补齐后 `classified_ratio`/`conservation` 语义是否需同步调整。
 这一条与"关键事实漏失"同源——都在 prefetch 披露侧，是批次 C 的邻接面。
 
-#### 五、方法记账
+#### 五、继续追下去：那个门本身只覆盖 2/13 个类，静默跳过 1093 个缺口
 
-本节唯一做对的地方是**先读源码把"不产出"的所有退出路径穷举出来，再设计判别式实测**，
+顾问指出"prefetch 有 bug"只是三种读法之一，还须排除"`working` 本无可引用身份"
+与"该段落是聚合视图"。按 CLAUDE.md「Beyond the Pointed-Out Problem」把调用链读完，
+结论是第一种成立，**但同时发现了一个更大的问题**。
+
+**可引用性已确证**（否决"本无身份"读法）：`_working_lines` 逐条遍历单个 item，
+手上同时握着 `path.stem` 与 item；item 有 `id`（`working.py:350`）；
+规范引用格式 `working:<stem>:<id>` 已在 `deep_reflection.py:639` 生产使用，
+`working:` 前缀在 `v3_body_packet.py:21` 的允许前缀表内，`low_clue_recall.py:478` 也在产出。
+`_working_lines` 只是签名仍为 `list[str]`，而 `_crystallized_lines` 早已扩成三元组带 ID。
+
+**更大的问题**：`section_source_ids` 在 `_build_prefetch_sections` 内**只有一个赋值点**
+（`prefetch.py:614`，crystallized 专属）。于是逐类实测（3.200 只读，复用生产同一判据）：
+
+| source_class | 有 ID | 无 ID | 是否被 `attributable_classes` 统计 |
+|---|---:|---:|---|
+| `crystallized` | **133** | 0 | ✅ |
+| `working` | 0 | **69** | ✅（**唯一驱动 FAIL 的那 69 个**） |
+| `last_session` | 0 | 162 | ❌ 静默跳过 |
+| `foreground` | 0 | 145 | ❌ |
+| `identity` | 0 | 133 | ❌ |
+| `state_overlay` | 0 | 133 | ❌ |
+| `bridge` | 0 | 133 | ❌ |
+| `substrate_recall` | 0 | 133 | ❌ |
+| `event` | 0 | 115 | ❌ |
+| `other` | 0 | 66 | ❌ |
+| `indexed` | 0 | 46 | ❌ |
+| `diagnostic` | 0 | 22 | ❌ |
+| `candidate` | 0 | 5 | ❌ |
+
+**被门统计的缺口 69，被静默跳过的 1093。** 原因是 `attributable_classes`
+（`exposure_rollup.py:509` 硬编码）里 `entity_graph` / `indexed_recall` / `vector` /
+`hindsight` **四个名字全项目无任何生产者**，而生产者实际发出的是
+`indexed` / `graph_layer` / `substrate_recall` / `event` / `candidate` ——
+**名字对不上，门就静默失效**。该集合无任何测试引用，测试夹具还把
+`source_class` 写死成 `"crystallized"`，所以这 12 个类从未被测试触达。
+
+**由此得到本节最重要的一句**：只补 `working` 的 ID 会让
+`schema_era_attribution_gap_count` 归零、`schema_era_health` 转 PASS、**monitor 变绿**，
+而 1093 个真实缺口继续不可见——**靠缩小度量范围换来的绿色**，正是路线图 L43
+明令禁止的。故 16b 必须先于或同时于 16a；修 16b 会让 FAIL 数字先变大，那是正确方向。
+
+#### 六、方法记账
+
+本节做对的地方是**先读源码把"不产出"的所有退出路径穷举出来，再设计判别式实测**，
 而不是从现象直接推断。CA.1 的错误恰恰相反：拿一个没验证过是否被门控的指标去论证结论。
 **顺序是——穷举分支 → 设计判别式 → 取证 → 才下结论。**
+
+**但本节自己又犯了一次同样的错，须记。** §4 定位到"69 个缺口全在 `working`"之后，
+我直接把根因写成"prefetch 有 bug"并把修法写成"新增 `working:` 前缀"——
+**跳过了"这份测量有几种读法"这一步**。至少还有两种：`working` 本无可引用身份
+（则该类根本不该在 `attributable_classes` 里）、或该段落是聚合视图（无 1:1 记录可列）。
+`working` 是 **0/69 从未填过**，而"实现了但有 bug"通常表现为"有时填有时不填"——
+这个 0 本身就是要求换读法的信号，我当时没读出来。
+经顾问点出后按 CLAUDE.md「Beyond the Pointed-Out Problem」把调用链读完，
+才发现真正的量级问题（1093 个静默跳过）与那个"修了反而变绿"的陷阱。
+**教训：定位到根因不是终点；须再问一次"同一组测量还能怎么解释"，
+并且必须验证修法在物理上是否可能（`working` 到底有没有 ID）。**
+本会话这已是第六次"结论跑在证据前面"。
 
 （3.200 全程只读：无部署、无重启、无写入。批次 C 仍未部署，按 Owner 要求全部任务完成后统一部署。）
 
@@ -2759,19 +2814,52 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     压缩一旦移除游标记录即永久静默失败，已并入待办 14 的产出可观测性要求）。
     附带纠正：本条原文（以及路线图 P1-4）都在用 lag 论证，而 monitor 中**并不存在
     lag 门控**，`exposure_rollup_lag_hours` 只计算上报、从不参与判定。
-16. **那个唯一 FAIL 的真实根因：`working` 段落缺 `source_ids` 归因**（CA.2 实测定位，未修）。
+16. **那个唯一 FAIL 的真实根因，以及"修了它反而更糟"的陷阱**（CA.2 §4-§6 实测，未修）。
     **这是代码缺陷、不是数据成熟度问题——再等多久都不会自己好**（BY.1 记的分类率
     `0.6506→0.7018`，本次实测仍精确为 `0.7018`，曲线早已停住）。
     FAIL 码是 `v2_exposure_schema_era_unhealthy`，由 `schema_era_attribution_gap_count = 69`
     单独驱动（conservation 与 telemetry 均为 0，`conservation_total_passes = True`）。
-    按 `source_class` 分组后 **69 个缺口 100% 集中在 `working`**（dropped 41 + selected 28），
-    而 `crystallized` 133 个段落**零缺口**——即 prefetch 披露工作记忆时报了
-    `chars`/`count` > 0 却从不填 `source_ids`。
-    同一缺陷的另一面：`exposure_rollup._extract_record_ids_from_section` 只接受
-    `crystallized:` / `candidate:` 前缀，因此 `working` 记录**即使填了 ID 也无法被分类**，
-    这正是 `schema_era_classified_ratio = 0.7018`（≈30% 处理了但分类不到）的来源。
-    修前须定的设计问题：**工作记忆记录的规范 ID 前缀是什么**（新增 `working:`？），
-    以及归因补齐后 `classified_ratio` 与 `conservation` 的语义是否需同步调整。
+    拆成两条独立缺陷，**且修复顺序有强约束**：
+
+    **16a：prefetch 只为 `crystallized` 一个类填 `source_ids`。**
+    `_build_prefetch_sections` 里 `section_source_ids` 只有**一个赋值点**
+    （`prefetch.py:614`，`section_source_ids[cryst_header] = cryst_ids`），
+    其余段落一律走 `_section_metadata` 的空 `{}` 分支。实测印证：
+    `crystallized` 133 段**全部有 ID**，其他 12 个 content-bearing 类**一个都没有**。
+    `working` 并非"有时漏"而是 **0/69 从未填过**。
+    可行性已核实（否则本条无从修）：`_working_lines` **逐条遍历单个 item**，
+    手上同时握着 `path.stem` 与 item，而 item 有 `id` 字段（`working.py:350`），
+    且规范引用格式 `working:<stem>:<id>` **已在生产代码中使用**
+    （`deep_reflection.py:639`；`working:` 前缀亦在 `v3_body_packet.py:21`
+    的 `_ALLOWED_SEED_PREFIXES` 内，`low_clue_recall.py:478` 也在产出它）。
+    差别只是 `_crystallized_lines` 被扩展成返回三元组带 ID，而 `_working_lines`
+    的签名至今只返回 `list[str]`。
+    配套还需扩 `_extract_record_ids_from_section`（只认 `crystallized:`/`candidate:`），
+    否则 `working` 即使填了 ID 仍无法分类——这也是 `classified_ratio = 0.7018` 的同源解释。
+
+    **16b：`attributable_classes` 有 4 个死名字，导致该门只覆盖 2/13 个实际类。**
+    `exposure_rollup.py:509` 硬编码
+    `{crystallized, working, entity_graph, indexed_recall, vector, hindsight}`，
+    而 `_section_source_class`（`prefetch.py:663-684`）实际产出的是
+    `indexed` / `graph_layer` / `substrate_recall` / `event` / `candidate` / …
+    —— **`entity_graph`、`indexed_recall`、`vector`、`hindsight` 四个名字全项目无任何生产者**
+    （已 grep 确认；`memory_sources.py:516` 的 `source_class` 直接取自上述映射）。
+    实测 3.200：门统计到 **69** 个缺口，**静默跳过 1093 个**同样 content-bearing 且无 ID 的段落。
+    其中至少 4 类是**明确可引用**的（`candidate` 5、`indexed` 46、`event` 115、
+    `substrate_recall` 133 = 299），因为它们的前缀本就在既有 ID 约定里
+    （`candidate:` 甚至已被 `_extract_record_ids_from_section` 接受）；
+    余下 `foreground`/`last_session`/`identity`/`state_overlay`/`bridge`/`diagnostic`/`other`
+    是否属"派生聚合视图、本就不该要求归因"**需逐类裁定**，不得一刀切。
+    该集合是函数内硬编码字面量、**无任何测试引用**；而测试夹具
+    （`test_memory_os_phase1_observability.py:18` 的 `_section`）把
+    `source_class` 写死成 `"crystallized"`，所以 12 个类与 4 个死名字**从未被测试触达**。
+
+    **顺序约束（本条最重要的一句）**：若只修 16a，
+    `schema_era_attribution_gap_count` 归零 → `schema_era_health` 转 PASS →
+    monitor 变绿，而 **1093 个真实缺口继续不可见**。
+    那是**靠缩小度量范围换来的绿色**，正是路线图 L43「不为获得绿色状态而隐藏真实 FAIL」
+    禁止的事。**16b 必须先于或同时于 16a 处理**，且修 16b 会让 FAIL 数字先变大——
+    这是正确方向，不是回归。
     与"关键事实漏失"同源——都发生在 prefetch 披露侧，属批次 C 的邻接面。
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -3129,5 +3217,19 @@ sannai-community 仓库 README。）
   `crystallized` 133 段零缺口——prefetch 披露工作记忆时报了 `chars`/`count` 却从不填
   `source_ids`；且 `_extract_record_ids_from_section` 只认 `crystallized:`/`candidate:` 前缀，
   故 `working` 即使填了 ID 也无法分类，这正是 `classified_ratio = 0.7018` 的同源解释。
-  登记为待办 16（未修，须先定 `working` 记录的规范 ID 前缀）。
-  方法教训：**穷举分支 → 设计判别式 → 取证 → 才下结论**；以及"被计算并上报"≠"会告警"。
+  再按顾问提示追完调用链，发现**量级远大于此**：`section_source_ids` 全函数
+  **只有一个赋值点**（`prefetch.py:614`，crystallized 专属），而
+  `attributable_classes`（`exposure_rollup.py:509`）里 `entity_graph`/`indexed_recall`/
+  `vector`/`hindsight` **四个名字全项目无生产者**，生产者实发的是
+  `indexed`/`graph_layer`/`substrate_recall`/`event`/`candidate` —— 名字对不上，门就静默失效。
+  实测：**门统计 69 个缺口，静默跳过 1093 个**（其中 `candidate`/`indexed`/`event`/
+  `substrate_recall` 共 299 个是明确可引用的）。该集合无测试引用，夹具还把
+  `source_class` 写死成 `crystallized`，12 个类从未被测试触达。
+  **由此得出关键约束并拆成待办 16a/16b：只补 `working` 的 ID 会让 FAIL 归零、monitor 变绿，
+  而 1093 个真实缺口继续不可见——那是靠缩小度量范围换来的绿色**（路线图 L43 明令禁止），
+  故 16b 必须先于或同时于 16a，且修 16b 会让 FAIL 数字先变大，那是正确方向。
+  可行性亦已确证：`working:<stem>:<id>` 规范引用格式已在 `deep_reflection.py:639` 生产使用。
+  方法教训两条：**穷举分支 → 设计判别式 → 取证 → 才下结论**；以及"被计算并上报"≠"会告警"。
+  **另记我在本节自己又犯了第六次"结论跑在证据前面"**：§4 定位到 69 全在 `working` 后
+  直接写成"prefetch 有 bug + 新增 `working:` 前缀"，跳过了"这份测量有几种读法"，
+  而 `0/69 从未填过`本身就是要求换读法的信号。
