@@ -2235,13 +2235,44 @@ PR #10 合并为 `01356df` 后部署。
 recall plan——**但那个 plan 没有 `findings` 键**。也就是说修订号一直在流动、
 从来没人判它是否过期。D 的活是把 C 的 finding 挂进去，不需要新建结构。
 
+### 按 Section W 第 5 条扫同类模式，查出保留策略登记缺口（本轮补上）+ 一个既有缺陷
+
+`metadata_retention.py:62-75` **已经**为两个同类 report-only shadow 账本
+（`graph_layer_shadow`、`substrate_recall_shadow`）登记了保留策略。
+新账本不登记就会无限增长而兄弟被清理——已补登记，共用同一个 `shadow_retention_days`。
+
+**登记之后还差一步，差了就是"登记了但永久空转"**：`_record_created_at()` 只认
+`created_at` / `ts` / `timestamp` 三个键。本模块原本把时间写成 `recorded_at`，
+于是每条记录都被判为"没有时间戳" → 永远 `retained_records` → 登记形同虚设。
+已改名为 `created_at`，并在字段旁写明这个名字是承重的。
+
+**顺带查实两个兄弟账本今天就有这个缺陷**（Section W 第 5 条的"修掉**或记录**每一处"）：
+`graph_layer_shadow` 的记录写的是 `recorded_at`，`substrate_recall_shadow` 的记录
+**根本没有任何时间字段**——两者都已登记保留策略，但**都永远不会老化**。
+**本轮选择记录而不修**：修它等于让两个从未被剪过的生产账本首次开始进入归档计划，
+是超出批次 C 范围的行为变更，应当单独决策。已登记为待办第 9 项。
+
+（实测：`_record_created_at({"recorded_at": ...})` → `None`；
+`_record_created_at({"created_at": ...})` → 正常解析。）
+
 ### 反事实覆盖
 
-**6 项全部 revert→FAIL→restore→PASS 实测**：
+**8 项全部 revert→FAIL→restore→PASS 实测**：
 naive 时间戳分级（2 个测试同时红）、None≠stale、接线调用本身
 （byte-identical 半边会退化成 `assert 0 == 1`）、`max_age_hours=0`
 （改成 24 立即 `assert 24 == 0`）、write-surface 登记（门 `pass`→`fail`）、
-状态迁移去重（5 轮写 5 行而非 1 行）。
+状态迁移去重（5 轮写 5 行而非 1 行）、保留策略登记（`StopIteration`）、
+`created_at` 字段名（改回 `recorded_at` 立即 `assert 2 == 1`）。
+
+> **第 8 项的第一版测试是坏的，值得记下来。** 它的 fixture **手写** `created_at`，
+> 于是生产代码把字段改名后测试照样通过——**它测的是 retention 读得对不对，
+> 不是生产代码写得对不对**。改为用真实的 `build_continuity_freshness_record()`
+> 产出记录后才真正钉住。这正是第 8.0 条的同一个毛病换了个位置出现：
+> 手写 fixture 等于把"我以为它写什么"当成"它写什么"。
+>
+> 修正过程中还踩了一个自己造的坑：记录的 `created_at` 是**分级发生的时间**，
+> 不是被分级任务的年龄。第一版把两者当成一个，于是两条记录的 `created_at` 都是
+> `now`，谁都不满 45 天。
 
 **目标反事实**（一条测试钉死整个设计）：
 `test_continuity_grades_stale_task_without_changing_live_prefetch_output` ——
@@ -2284,10 +2315,10 @@ naive 时间戳分级（2 个测试同时红）、None≠stale、接线调用本
 
 ### 测试数量
 
-3035 → **3070 passed / 13 skipped / 0 failed**（+35：continuity 单元 +15、prefetch 接线 +20）。
+3035 → **3071 passed / 13 skipped / 0 failed**（+36：continuity 单元 +15、prefetch 接线 +20、保留策略 +1）。
 
-> **口径声明**：3070 是本 worktree 实测；**3035 是推断而非实测**
-> （3070 − 本轮新增 35，并与批次 B 当日记录的 3035 相互印证），未在 `main` 上重跑基线。
+> **口径声明**：3071 是本 worktree 实测；**3035 是推断而非实测**
+> （3071 − 本轮新增 36，并与批次 B 当日记录的 3035 相互印证），未在 `main` 上重跑基线。
 
 ### 门
 
@@ -2339,14 +2370,36 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    现文案如实写明"owner 2026-08-02 决定保持停用 / 原始理由未知 / 本条为补记不改变运行状态"，
    owner 可随时替换该文本。
 6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
-7. **`system/continuity_freshness.jsonl` 无 monitor 字段与压实策略**（BZ 登记）。
-   状态迁移去重后体积有界，但没有 monitor 可见性，也没有
-   `memory_projection` 那样的 compaction。C→D→E 链部署前应一并处理。
-8. **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，接线闭环方案 §4.4 已登记，
-   **只登记未开工**）。开工第一步是分离"没入库"与"入库了但没召回"两种成因——
-   前者是捕获率问题（`sync_turn` summary-only 丢弃 / candidate 未生成 / 停在候选态），
-   后者是检索缺陷，修法相反。**并且这一条改变了批次 F 的性质**：
-   `recall_golden` 正是测量召回漏项的仪器，删除决定不再独立，见方案 §4.4 末段。
+7. **`system/continuity_freshness.jsonl` 无 monitor 字段**（BZ 登记）。
+   保留策略已在 BZ 补登记（`metadata_retention` 的 `shadow_retention_days`，
+   与两个兄弟 shadow 账本同等），状态迁移去重后体积有界；**仍缺的是 monitor 可见性**
+   ——没有任何 monitor 字段报告分级结果或 UNKNOWN 计数。C→D→E 链部署前应补。
+9. **两个既有 report-only shadow 账本已登记保留策略但永远不会老化**（BZ 查出，未修）。
+   `metadata_retention._record_created_at()` 只认 `created_at`/`ts`/`timestamp`，而
+   `graph_layer_shadow` 的记录写 `recorded_at`、`substrate_recall_shadow` 的记录
+   **没有任何时间字段** → 两者的每条记录都被判"无时间戳" → 永久 `retained_records`。
+   **本轮刻意只记录不修**：修它等于让两个从未被剪过的生产账本首次进入归档计划，
+   属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
+   `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
+   `recorded_at`（立即覆盖历史行，影响更大）。
+8. **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，**只登记未开工**——
+   「后续要仔细分析」是排序指令）。指 Memory-OS 的写入链
+   `sync_turn` → candidate → owner 批准 → crystallized 漏掉了本该留存的事实。
+
+   **开工第一步是分离两种成因，因为修法相反**：
+
+   | | 成因 | 检验 |
+   |---|---|---|
+   | **A. 没入库** | 写入链丢了它 | 在 `events/` `candidates.jsonl` `crystallized/` 里 grep——**不在** |
+   | **B. 入库了但没召回** | 检索/排序/权威分层漏了它 | grep——**在**，但 prefetch 不返回 |
+
+   Owner 措辞"没存入记忆"指向 A，但"召回漏掉了"与 B 同样相容；分不清就动手，
+   有一半概率修错另一半系统。若确为 A，写入链有三个独立丢弃点须分别量化：
+   `sync_turn` 是 **summary-only** 的（最上游、最易漏——事实没进事件摘要，此后整条链
+   都不可能有它）、candidate 未生成、候选停在候选态未获批准（→ 召回权威层级低）。
+
+   **这一条改变了批次 F 的性质**：`recall_golden` 正是测量召回漏项的仪器，
+   删除决定不再独立——见接线闭环方案 §3.3 末尾。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2637,10 +2690,18 @@ sannai-community 仓库 README。）
   明确不在 C 范围并登记原因。反向评审自查出一处真缺陷：stale 锚点会让账本**每轮追加一行**，
   改为按签名只记状态迁移。顺链查出 D 的接点——`recall_facade` 早已把 `current_task_revision`
   送进 recall plan，但那个 plan 没有 `findings` 键。
-  6 项反事实 revert→FAIL→restore→PASS。3035 → **3070 passed / 13 skipped / 0 failed**（+35），
+  8 项反事实 revert→FAIL→restore→PASS。3035 → **3071 passed / 13 skipped / 0 failed**（+36），
   四门全过。**仅 `local_pass`，未部署 3.200**（按方案裁定等 C→D→E 整链）。
   完成前复核查出并更正自己的一处错误陈述：「全仓无 `stale_task_revision` 生产者」是错的
   （沿用方案 §4.1），`recall_arbitration.py:86` 就在产出它——但以 `"reason"` 为键
   （gap_note 读 `"code"`，结构上看不见）、语义是修订号不相等而非年龄、默认
   `mode="off"` 休眠、用途是 suppression。两者互补，且 **D 因此多一个必须显式做的选择**。
   另补记 `recall_arbitration` freshness guard 是**第三个**生产时效过滤器。
+  同一轮复核按 Section W 第 5 条扫出保留策略登记缺口：新账本已登记进
+  `metadata_retention`（与两个兄弟 shadow 账本同 `shadow_retention_days`），
+  并把记录时间字段从 `recorded_at` 改名 `created_at`——`_record_created_at()` 只认
+  `created_at`/`ts`/`timestamp`，不改名就是"登记了但永久空转"。
+  **顺带查实两个兄弟账本今天就有这个缺陷**（`graph_layer_shadow` 写 `recorded_at`、
+  `substrate_recall_shadow` 完全无时间字段 → 都永远不老化），刻意只记录不修
+  （修它等于让两个从未被剪的生产账本首次进入归档计划），见待办第 9 项。
+  最终 8 项反事实、**3071 passed / 13 skipped / 0 failed**（+36）。

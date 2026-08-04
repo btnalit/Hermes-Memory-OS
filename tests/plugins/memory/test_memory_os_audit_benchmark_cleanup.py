@@ -550,6 +550,86 @@ def test_metadata_retention_plan_is_dry_run_and_keeps_canonical_paths(tmp_path):
     assert [action for action in actions if action["kind"] == "archive_report_dir"][0]["target"].endswith("rh31_old")
 
 
+def test_metadata_retention_ages_out_continuity_freshness_ledger(tmp_path):
+    """The continuity freshness ledger is registered *and* actually ages out.
+
+    Registration alone is not enough. ``_record_created_at`` reads only
+    ``created_at``/``ts``/``timestamp``, so a record whose sole timestamp is
+    named anything else parses as "no timestamp" and is retained forever — the
+    ledger would be registered for retention while never ageing out of it.
+    Both sibling report-only shadow ledgers have that defect today
+    (``graph_layer_shadow`` stamps ``recorded_at``; ``substrate_recall_shadow``
+    carries no timestamp at all), which is why this asserts the archive action
+    rather than just the ledger summary.
+    """
+    from plugins.memory.memory_os.continuity import (
+        ContinuityState,
+        build_continuity_freshness_record,
+        build_current_task_continuity_object,
+    )
+
+    store = _store(tmp_path)
+    now = datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+    def _genuine_record(days_old):
+        """Build the record the production path actually writes, *days_old* ago.
+
+        Deliberately not a hand-written fixture: a literal ``created_at`` in the
+        test would keep passing after the producer renamed the field, which is
+        the whole failure mode being pinned here.
+
+        Two distinct timestamps, easy to conflate: the record's own
+        ``created_at`` is when *grading ran*, which is what retention ages on.
+        The task stamp only has to be far enough behind that grading run to come
+        out STALE and therefore reportable.
+        """
+        graded_at = now - timedelta(days=days_old)
+        task_stamp = (graded_at - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        state = ContinuityState(
+            current_task=build_current_task_continuity_object({
+                "record_id": f"ata_retention{days_old:03d}",
+                "created_at": task_stamp,
+                "source_at": task_stamp,
+                "status": "active",
+                "revision": 1,
+            })
+        )
+        return build_continuity_freshness_record(
+            state, now=graded_at, session_id="s-ret",
+        )
+
+    ledger_path = store.roots.memory_os_root / "system" / "continuity_freshness.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(
+        "\n".join(
+            json.dumps(_genuine_record(days_old), sort_keys=True)
+            for days_old in (45, 2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plan = metadata_retention_plan(
+        store.roots,
+        now=now,
+        policy=MetadataRetentionPolicy(shadow_retention_days=30),
+    )
+
+    summary = next(
+        entry for entry in plan["ledgers"] if entry["ledger"] == "continuity_freshness"
+    )
+    assert summary["exists"] is True
+    assert summary["total_records"] == 2
+    assert summary["retained_records"] == 1
+    assert summary["archive_candidate_records"] == 1
+    assert [
+        action["record_count"]
+        for action in plan["actions"]
+        if action.get("ledger") == "continuity_freshness"
+    ] == [1]
+    assert plan["dry_run"] is True
+
+
 def test_metadata_retention_cli_is_dry_run(tmp_path, monkeypatch, capsys):
     store = _store(tmp_path)
     memory_sources_path(store.roots).parent.mkdir(parents=True, exist_ok=True)

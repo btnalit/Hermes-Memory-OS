@@ -341,7 +341,13 @@ def build_continuity_freshness_record(
     findings = build_continuity_findings(state, now=ref)
     return {
         "schema_version": CONTINUITY_FRESHNESS_SCHEMA_VERSION,
-        "recorded_at": ref.isoformat().replace("+00:00", "Z"),
+        # The field name is load-bearing: metadata_retention._record_created_at
+        # reads only created_at / ts / timestamp. A record whose only timestamp
+        # is named something else parses as "no timestamp", is retained forever,
+        # and the ledger is registered for retention while never ageing out of
+        # it — registered and silently ineffective. (Both sibling report-only
+        # shadow ledgers have exactly that defect today; see the checklist.)
+        "created_at": ref.isoformat().replace("+00:00", "Z"),
         "session_id": str(session_id or ""),
         "mode": "disclose_only",
         "filters_applied": [],

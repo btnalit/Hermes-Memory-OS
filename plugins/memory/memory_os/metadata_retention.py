@@ -73,6 +73,18 @@ def metadata_retention_plan(
             now=current,
             actions=actions,
         ),
+        # Continuity freshness disclosure — the third report-only ledger written
+        # from the prefetch path, so it gets the same shadow retention as the two
+        # above. Registering it here is not optional bookkeeping: an unregistered
+        # ledger is invisible to retention planning and grows without bound while
+        # its siblings are swept.
+        _ledger_plan(
+            ledger="continuity_freshness",
+            path=roots.memory_os_root / "system" / "continuity_freshness.jsonl",
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
     ]
     report_roots = [
         _report_root_plan(
