@@ -1509,6 +1509,21 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_apply.add_argument("--note", default="")
     review_apply.add_argument("--rating", default="")
     review_apply.add_argument("--apply", action="store_true")
+    recall_golden_parser = subs.add_parser("recall-golden")
+    recall_golden_subs = recall_golden_parser.add_subparsers(dest="recall_golden_command", required=True)
+    recall_golden_run = recall_golden_subs.add_parser(
+        "run",
+        help="Evaluate a recall golden set against the live prefetch pipeline; print a hit/miss/authority report as JSON.",
+    )
+    recall_golden_run.add_argument(
+        "--golden-profile", default="default",
+        help="Golden set profile name (default: default). Resolves to "
+        "<memory_os_root>/recall_golden/<profile>.golden.json unless --golden-path is given.",
+    )
+    recall_golden_run.add_argument(
+        "--golden-path", default="",
+        help="Explicit path to a *.golden.json file, overriding profile-based resolution.",
+    )
     eval_parser = subs.add_parser("eval")
     eval_subs = eval_parser.add_subparsers(dest="eval_command", required=True)
     eval_rh31 = eval_subs.add_parser("rh31")
@@ -1713,6 +1728,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _candidate_clusters_command(args, store)
     if command == "review":
         return _review_command(args, store)
+    if command == "recall-golden":
+        return _recall_golden_command(args, store)
     if command == "eval":
         return _eval_command(args)
     if command == "cognitive-loop":
@@ -2363,6 +2380,24 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
             )
             return 0
     return 2
+
+
+def _recall_golden_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    if args.recall_golden_command != "run":
+        return 2
+    from .recall_golden import golden_set_path, run_golden_set_report
+
+    golden_profile = str(getattr(args, "golden_profile", "default") or "default")
+    override_path = str(getattr(args, "golden_path", "") or "").strip()
+    path = Path(override_path) if override_path else golden_set_path(store.roots, profile=golden_profile)
+    report = run_golden_set_report(store, path, profile=golden_profile)
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    if int(report.get("query_count", 0)) == 0:
+        return 0  # nothing to evaluate (missing/empty golden set) is not a failure
+    score = report.get("score") if isinstance(report.get("score"), dict) else {}
+    all_hit = float(score.get("recall_rate", 0.0)) >= 1.0
+    no_errors = int(score.get("total_errors", 0)) == 0
+    return 0 if all_hit and no_errors else 1
 
 
 def _candidate_clusters_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

@@ -264,6 +264,56 @@ def score_from_evaluation(eval_result: RecallEvaluation) -> dict[str, Any]:
     }
 
 
+# ── Reporting ──────────────────────────────────────────────────────────────
+
+
+def run_golden_set_report(
+    store: MemoryOSStore,
+    path: Path,
+    *,
+    profile: str = "default",
+) -> dict[str, Any]:
+    """Load a golden set from ``path``, evaluate it, and return a report dict.
+
+    Convenience composition of ``load_golden_set`` + ``evaluate_recall`` +
+    ``score_from_evaluation`` + ``classify_evaluation_item`` for CLI and
+    automation consumers (see ``memory_os_command`` sub-command
+    ``recall-golden run`` in ``cli.py``).
+
+    Read-only: this only reads the golden set file at ``path`` (missing file
+    yields an empty golden set via ``load_golden_set``, not an error) and
+    evaluates it against the live prefetch pipeline via ``evaluate_recall``.
+    It never writes a golden set, never mutates canonical memory, and never
+    approves or promotes anything.
+    """
+    golden_set = load_golden_set(path)
+    evaluation = evaluate_recall(store, golden_set, profile=profile)
+    score = score_from_evaluation(evaluation)
+    return {
+        "schema_version": GOLDEN_SET_SCHEMA_VERSION,
+        "golden_path": str(path),
+        "profile": profile,
+        "query_count": len(golden_set.queries),
+        "score": score,
+        "items": [
+            {
+                "query": item.query,
+                "recall_type": item.recall_type,
+                "content_pattern": item.content_pattern,
+                "expected_source_ref": item.expected_source_ref,
+                "must_hit": item.must_hit,
+                "matched": item.matched,
+                "matched_source_ref": item.matched_source_ref,
+                "matched_authority": item.matched_authority,
+                "classification": classify_evaluation_item(item),
+                "error": item.error,
+            }
+            for item in evaluation.items
+        ],
+        "executed_at": evaluation.executed_at,
+    }
+
+
 # ── Classification ─────────────────────────────────────────────────────────
 
 
