@@ -3308,6 +3308,201 @@ monitor INFO、以及复审抠出的采集失败静默各一。分三段前台�
 （该分级、该进 INFO、还是该删）。**故意不做**，登记为待办 18，
 而不是顺手扩大改动面。
 
+## CD — 残留待办一轮清扫：18/14/11/9/13/10/2 七项关闭 + 3 部分关闭（2026-08-04）
+
+按待办表的优先级顺序（18 → 14 → 11 → 9 → 13 → 10 → 2/3），每项独立反事实
+（revert→FAIL→restore→PASS 全部实测）。顺链另抓出两个未登记的真缺陷（见 CD.2）。
+
+### CD.1 待办 18 —— `exposure_monitor_stats` 孤儿键逐个定性
+
+不套统一处理，逐键裁定（graded / info / internal / component / 删除）：
+
+- **`schema_era_classified_ratio`**（优先项）→ **INFO**，新条目
+  `v2_exposure_classification_coverage`。刻意不分级：累计比率混合修复前后的
+  rollup，结构上就动得慢，没有证据支撑的阈值。**None 不得压成 0.0**——
+  无样本发布 0.0 会读成"覆盖率灾难"，条目改为不发（与采集失败守卫同一条
+  不造零规则）。
+- **`exposure_rollup_lag_hours` / `latest_window_start` / `latest_window_end` /
+  `exposure_rollup_records_total`** → **INFO**，新条目
+  `v2_exposure_rollup_ledger_state`。lag 刻意不分级——上游安静时 lag 良性增长
+  （待办 15 实测过的形状），分级必然在安静周误报；「跑没跑」已有
+  helper-completion freshness 分级，「为什么没产出」由 CD.2 的 last_run 回答。
+  `snapshot_status` 随行，防止空快照的 lag=0.0 读成"新鲜"。
+- **`legacy_unmarked_rollup_count`** → 并入既有 **migration-debt INFO** 条目
+  （它就是 rollup 侧的迁移债务），并成为该条目的独立触发条件之一。
+- **`rolling_7d_natural_record_count`** → 并入 **recent-window INFO** 条目，
+  注明是自然域流量体量、不是纪元域缺口的分母（CC.2 登记的域错配就此有了
+  就地说明）；natural−era 差值顺便成为部署后验证信号（新行未打
+  `attribution_schema` 时该差值不归零——正是 S266 登记的静默陷阱的探测器）。
+- **四个 `cumulative_*`** → 定性为 `conservation_total_passes` 的 **component**：
+  只在 all-history conservation 破裂（它们的诊断时刻）时随 migration-debt 条目
+  发布分解，平时不刷屏。
+- **`schema_era_natural_record_count`** → **删除**。名字撒谎（算的是全史自然行，
+  不是纪元域），且恒等于 `attribution_era_record_count +
+  legacy_unattributed_record_count`（两者都已 INFO 可见）。零读者经重新 grep 确认。
+- **census 门**：`test_exposure_monitor_stats_key_census_every_key_has_a_disposition`
+  钉死整个键集与每键定性——未来新增键必须先定性才能过测试，
+  "算了没人读"不能再无声出生。
+- **census 意外收获**：抓到 **`attribution_gap_count`** ——一个全项目零引用的
+  `all_history_attribution_gap_count` 重复别名，**手工审计（CC.2）自己也漏掉了它**，
+  因为它的名字是三个有读者键的子串。已删除。方法教训追加：子串键名会骗过
+  逐键 grep，census 的键集等值断言不会。
+
+### CD.2 待办 14 —— completion ≠ output：三个实例全部闭合
+
+- **`exposure_rollup`**：两条字节相同的不产出退出路径（良性跳过 /
+  `source_cursor_not_found`）现在每次运行都往快照写 `last_run` 块——
+  封闭原因码集合 `{produced, no_new_records, source_cursor_not_found,
+  legacy_source_cursor_missing, write_failed}` + 本次 new_records 数 +
+  trigger_class。读者不重跑、不读源码即可区分"无输入"与"永久坏死"。
+  经 `exposure_monitor_stats`（`last_run_outcome/at/new_records` 三键，
+  census 已定性 info）进入 CD.1 的 ledger-state INFO 条目。旧快照无该块时
+  如实报 `unrecorded`，不造真结果。写入放在 envelope 之外是刻意的：
+  观测产物必须恰好在出事的那几条路径上存活，网关失败路径本身仍留在
+  permit 审计轨迹里（代码注释已写明理由）。
+- **`session_mirror`**：`auto_apply_graduated_session_mirror` 的每条退出
+  （policy_not_active / no_matching_pending_session / execution_gate_blocked /
+  produced / produced_zero / blocked）现在原子写
+  `system/session_mirror_auto_apply_last_run.json`（定长状态文件，非账本，
+  写面已登记 `session_mirror_auto_apply_last_run_state`，155/155）。
+  未跑 scan 的路径**省略 counters 而不是填零**。monitor 对该文件的采集接线
+  **显式不做**（与 BV 记录的 recall_facade 采集接线同类，留待下一次 monitor 批次）。
+- **`_call_hermes_runtime_model` 裸 `""` 全调用方清查**（6 个生产调用方）：
+  fact_judge、session_fact_extraction、llm_edge_proposer 本就正确；
+  **`clearance_cycle` 是真缺陷**——逐对跳过使"每次调用都空回"的死判官
+  对每条 provisional 记录**恒返回 `clear`**，恰是该函数 docstring 明令禁止的
+  常量裁决；改为计数 `pairs_evaluated`，有配对却零判定时 fail-closed 返回
+  `unknown/judge_unavailable`（沿用 C3 词表，不新增枚举值；部分判定仍可 clear，
+  测试钉住两侧）。**`llm_contradiction_lane` 的 `""` 裸 continue** 改为记
+  `llm_empty_content` error_record（与其异常路径对称）。
+- **顺链意外收获（本节最重）**：给 contradiction lane 写空回复反事实时，
+  测试在**到达 LLM 调用之前**就崩了——`CLAIM_EXTRACTION_PROMPT` 的 JSON 示例
+  **大括号未转义**，`.format()` 对第一个配对就抛 KeyError 且无人捕获。
+  即：**该 lane 只要找到候选对就必崩，从未在生产上成功跑过判定循环**，
+  而全套件此前没有任何测试触达这个循环（clearance_cycle 早就用
+  `__BODY_A__` replace 风格躲开了同一个坑——同一族缺陷在隔壁文件早有人踩过）。
+  已转义并留注释 + 该反事实测试即回归门。全项目扫描：`llm_edge_proposer`
+  的模板转义正确，无同类。
+
+### CD.3 待办 11 —— `_check_vector_available` 不再执行 torch
+
+`importlib.import_module("sentence_transformers")` 改
+`importlib.util.find_spec()`（spec 查找不执行包）+ 进程级缓存。
+status/doctor 单次 17–29 秒的成本归零；`shell_alias_no_env` 22 条并发探针
+每条都省掉这段载入窗口（待办 3 的疑似成因）。反事实用爆炸 loader
+（find_spec 返回 spec、create/exec 即炸）证明探测"知道装了"而"从不执行"；
+stdout 污染守卫测试迁移到新机制，语义不变。
+
+### CD.4 待办 9 —— 两个 shadow 账本可老化（forward-only）
+
+选低爆炸半径的修法 A：两个 writer 补 `created_at`
+（`graph_layer_shadow` 保留 `recorded_at` 给既有读者；
+`substrate_recall_shadow` 原本无任何时间字段）。历史行仍不可老化——
+**这是 owner 决策，刻意不做**（修法 B 会让两个从未剪过的生产账本立即
+整体进入归档计划）。反事实经真实 producer 构造（吸取
+counterfactuals-must-use-real-producer 教训）+ 未来时钟跑 plan：
+两账本各 1 条 archive_candidate、archive action 成对出现；revert 后
+恒 retained。确认无 signature-dedup 依赖整条记录（不会因新增时变字段
+导致无界增长）。
+
+### CD.5 待办 13 —— session_mirror 一般性队头偏置
+
+机制查实：发现序按 session id / 文件名稳定排序，而 `dedup_key` 含
+`content_sha256`——**活跃会话每次内容变化都以新 dedup_key 重回队头位置**，
+配 per-run 上限后队尾永不露头（637 次运行、积压 1574→1575 的成因形状）。
+修法：`platform_filtered` 稳定排序，**从未被本 lane 导入过的会话优先**；
+"导入过"信号从 mirrored 事件的 `safe_ref.session_id` 派生
+（与 BY 拒绝修复同一理由：存 state 的信号会在 `_rebuild_state()` 时无声消失，
+测试专门断言删掉 state 文件后排序仍成立）。已导入会话的新内容版本仍会导入，
+只是排在积压之后。事件账本从每次 scan 读两遍合并为一遍
+（`_provider_captured_session_ids` 增加可选参数复用）。
+
+### CD.6 待办 10 —— recall_golden authority 维度从死代码到真实现
+
+- `matched_source_ref` 不再从期望值抄——从**实际命中的 section** 派生
+  （`build_prefetch_section_candidates` 的 `metadata.source_ids`）；
+  `matched_authority` = 该 section 的 `source_class`（词表即
+  `prefetch.SECTION_SOURCE_CLASS_BY_TITLE`）。hit/miss 语义逐字不动
+  （仍判预算后文本——agent 实际看到的东西；归因用 section 结构，二者分开判）。
+- `classify_evaluation_item` 补齐语义：期望了 authority/source_ref 而披露
+  **无归因可验** → `context_insufficient`（原先无分支可达）；**验证过且不符**
+  → `source_authority_issue`（原先结构性不可达——反事实实测旧代码对
+  错误 source_ref 期望返回 "hit"，因为比较的两边是同一个回声值）。
+- **`min_score` 删除而非实现**：披露面不存在逐 section 分数，字段只能永远
+  是死重量。loader 改为忽略未知键（生产主机上已部署的 golden 文件带着
+  `min_score`，观测仪器不应因 schema 漂移崩溃），种子 fixture 同步清理。
+- §3.3 退出条件「hit/miss/authority 报告」三项至此全部真实。
+
+### CD.7 待办 2 + 待办 3（部分）
+
+- 待办 2：`install_memory_os_plugin.py` 五处报告字段
+  `str(path.relative_to(...))` → `.as_posix()`（与 BK 修 `plan_deployment()`
+  同病同修）。反事实在本机（Windows）实测：revert 后嵌套路径含反斜杠即红。
+- 待办 3：并发单测覆盖确认已由 CB 批次落地（并发归因 + 并发/串行基线
+  一致性两测）；疑似根因（每条 CLI 探针 17–29s 的 torch 载入放大争用窗口）
+  已由 CD.3 修除。**不宣称并发风险归零**——判定为已缓解 + 有覆盖，
+  生产复核留给下一次部署后的 Full Monitor 观察，届时如再现再升级。
+
+### CD.8 待办 8 登记更新（未开工，如实）
+
+仪器侧本轮补齐：`session_fact_extraction` lane 已实现（CB，待部署）、
+`recall_golden` 三维度已全部真实（CD.6）。A（没入库）/B（入库没召回）
+分离分析仍需两件事：部署后的生产数据 + owner 提供的具体漏失实例。
+不猜测、不预写修复。
+
+### CD 反事实覆盖
+
+12 条新增反事实测试全部 revert→FAIL→restore→PASS 实测（census 键集、
+migration-debt 扩展、ledger-state、classification-coverage、recent-window
+体量键、run-outcome 三态、死判官 fail-closed、空回复 error_record、
+爆炸 loader、shadow 老化、队头排序 + rebuild 存活、authority 三测、
+posix 清单）。另有 2 条守卫型（采集失败不发新 INFO 条目、缓存单次探测）。
+
+### CD.R 独立复审与处置（提交后复审，fold 回同一提交）
+
+独立复审 agent 对 `28dbf8a..4dd64b6` 的结论：无 Critical、3 Important、3 Minor，
+"With fixes"。逐条核实后的处置：
+
+1. **快照 `status` 与 `last_run.outcome` 矛盾（两处）——半接受**。
+   write_failed 路径成立且已修：该路径 ledger append 没发生，快照的
+   `latest_window_*` 描述了 ledger 中不存在的窗口，硬编码 `"ok"` 是双重撒谎，
+   改为按 `report["status"]` 取值，反事实实测（revert 后断言
+   `'ok' == 'error'` 红）。第二处（`_record_last_run_outcome` 的
+   `setdefault` 保留旧 status）**推回**：那是有意语义——`status` 描述
+   快照内容可用性（ok/empty/error），不是 lane 健康度；produced 后
+   cursor 错误留下的 "ok"+`source_cursor_not_found` 是自洽组合
+   （"累计数据有效；最近一次运行失败"）。语义已写进 helper docstring，
+   并新增 produced→压缩→cursor 错误的实测断言把这对组合钉死。
+2. **session_mirror last-run 文件无 monitor 读者——推回**：
+   CD.2 与待办 14 更新中已显式登记"monitor 采集接线显式不做，
+   与 BV 的 recall_facade 接线同类"；复审要求的"explicit stated follow-up"
+   在复审前已存在。
+3. **monitor 测试文件拼接错位——接受已修**：CD 的测试插入点误落在
+   `test_attribution_recent_window_stays_silent_when_collection_failed`
+   函数体中间，其 remote-projection / quiet-zero 两块被缝进新测试尾部
+   （断言仍全部执行，无覆盖损失，但 docstring 与函数体不符）。
+   纯代码搬移归位。**流程教训**：在测试文件中段插入时必须先读到
+   函数真正的结尾，"看见一个完整断言块"不等于"看见函数结束"。
+4. **Minor（原子性不对称）——接受**：`_record_last_run_outcome` 改用
+   `write_json_atomic`（与 session_mirror 的同类 recorder 对齐；消除
+   monitor 并发读到半写快照的窗口），新写面登记
+   `exposure_rollup_last_run_snapshot_state`。其余 Minor 均为 pre-existing
+   格式问题，不动。
+
+### CD 测试与门
+
+**3130 → 3153 passed / 13 skipped / 0 failed（+23，单次全量前台跑，11m27s）**，
+增量与新增测试逐文件对账吻合（census 1、monitor 4、rollup 4、clearance 1、
+contradiction 1、cli 2、shadow-aging 1、session_mirror 2、recall_golden 6、
+installer 1）。复审处置 fold 后受影响三文件定向重跑 260 passed，
+全量复跑 **3153 passed / 13 skipped / 0 failed**（8m58s，计数不变——
+处置只加断言、搬移代码，不增测试函数）。
+四门全过：import cycle 无环、write surface **154→156** /
+`unclassified_count=0`（新登记 `session_mirror_auto_apply_last_run_state`、
+`exposure_rollup_last_run_snapshot_state`）、static hygiene pass、
+public checkout probe --strict exit 0、`git diff --check` 干净。
+证据级别：**仅 `local_pass`**，未部署、未推送。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -3321,8 +3516,9 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    比原记录更严重：未注册的 WARN 码在 clean-host 会落 `clean_host_warn_unclassified` 即 **FAIL**，
    与 `deploy_memory_os.py` 是否接入 cron onboarding 无关。五个码（含 BY 新增的
    `..._disabled_without_audit_record`）全部按 `warn_if_production` 注册，生产行为不变。
-2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
-   `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
+2. ~~`install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
+   `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。~~ ——
+   **CD 已修**（五处全改 `.as_posix()`，Windows 本机反事实实测）。
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险（BM 记录，`review_reply` 使用假 token
    探针本身已确认安全）。**BY.3 首次拿到实测复现**：BY 部署后紧接着跑的那次 Full Monitor
@@ -3330,7 +3526,11 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    同一次运行还带 `full_monitor_runtime_over_target`；随即原样重跑**不复现**
    （`shell_alias_no_env_ok` 回到 PASS、false 键为空），且逐条手工复现探针条件
    （12 条 CLI 命令、不带 env 前缀）全部 rc=0。判定为**主机负载下的瞬时争用**，
-   非 BY 引入的回归——但这条待办从此不再是"无实测复现"。仍缺并发单测覆盖。
+   非 BY 引入的回归——但这条待办从此不再是"无实测复现"。
+   **CD 部分关闭**：并发单测覆盖已由 CB 批次落地（并发归因 + 并发/串行基线
+   一致性）；疑似成因（每条 CLI 探针 17–29s 的急切 torch 载入，见待办 11）
+   已由 CD.3 修除。保留观察点：下一次部署后的 Full Monitor 如再现
+   `shell_alias_no_env_failed` 再升级，否则视为关闭。
 4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
 5. ~~在 3.200 补写 `expression_feedback_request` 的停用审计记录~~ —— **BY.3 已写入并验证**
    （见 BY.3 节）。`reason` 字段刻意**没有编造原始停用理由**：主机上从来没有记录过它，
@@ -3359,7 +3559,13 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 
    **这一条改变了批次 F 的性质**：`recall_golden` 正是测量召回漏项的仪器，
    删除决定不再独立——见接线闭环方案 §3.3 末尾。
-9. **两个既有 report-only shadow 账本已登记保留策略但永远不会老化**（BZ 查出，未修）。
+   **CD.8 状态更新**：仪器侧已齐（session_fact_extraction 已实现待部署、
+   recall_golden 三维度已全部真实）；A/B 分离分析仍待部署后的生产数据
+   与 owner 提供的具体漏失实例，不预写修复。
+9. ~~**两个既有 report-only shadow 账本已登记保留策略但永远不会老化**~~ ——
+   **CD.4 已修（forward-only）**：两个 writer 补 `created_at`，新记录正常老化；
+   历史行仍不可老化，处置留 owner 决策（修法 B 会让两个从未剪过的生产账本
+   立即整体进入归档计划）。原始记录保留备查（BZ 查出）。
    `metadata_retention._record_created_at()` 只认 `created_at`/`ts`/`timestamp`，而
    `graph_layer_shadow` 的记录写 `recorded_at`、`substrate_recall_shadow` 的记录
    **没有任何时间字段** → 两者的每条记录都被判"无时间戳" → 永久 `retained_records`。
@@ -3367,13 +3573,18 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
    `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
    `recorded_at`（立即覆盖历史行，影响更大）。
-10. **`recall_golden` 的 authority 维度是死代码**（CA 查出，未修）。
+10. ~~**`recall_golden` 的 authority 维度是死代码**~~ —— **CD.6 已修**：
+    matched_source_ref/matched_authority 从实际命中 section 派生、
+    `source_authority_issue` 与 `context_insufficient` 均可达且经反事实实测、
+    `min_score` 删除（无生产者）+ loader 容忍未知键。§3.3 三项退出条件全部真实。
+    原始诊断保留备查（CA 查出）。
     `evaluate_recall` 的 `matched_source_ref` 从**期望值**抄，`matched_authority` 从不赋值，
     `authority_class`/`min_score` 从不被读，`"context_insufficient"` 无分支返回。
     后果：方案 §3.3 的退出条件「hit/miss/**authority** 报告」只满足前两项，
     **不得据现状声称该项达标**。hit/miss 经反事实实测为真。
-11. **`cli.py::_check_vector_available()` 急切 import `sentence_transformers`/`torch`**
-    （CA 查出，未修）。单次 `status`/`doctor` 耗时 **17–29 秒**；而
+11. ~~**`cli.py::_check_vector_available()` 急切 import `sentence_transformers`/`torch`**~~
+    —— **CD.3 已修**：`find_spec` + 进程缓存，status/doctor 不再执行 torch；
+    爆炸 loader 反事实钉死"从不执行"。（CA 查出。）单次 `status`/`doctor` 耗时 **17–29 秒**；而
     `shell_alias_no_env()` 并发跑 22 条 CLI 探针——**很可能是待办 3 那个生产 flake 的成因**。
     这条同时也是 `full_monitor_runtime_over_target` 的候选成因之一。
     修法方向：把 vector 可用性探测改为惰性/缓存，不在 `status`/`doctor` 路径上加载模型。
@@ -3385,10 +3596,17 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     `memory-os/system/memory_os_cron_registry.json` 快照，否则
     `cron_group_runner._load_group` 会返回旧的 `tick_evidence` 成员并
     **无任何报错地跳过本 lane**（详见 CB 节"部署要求"）。
-13. **`session_mirror` 一般性队头偏置未修**（CA 实测）。
-    `selected_sessions = platform_filtered[:limit]`，BY 只修了被拒会话饿死后队那一半。
-    与待办 12 相关但独立：即使①另建 lane，这条仍使 `session_mirror` 自身永远追不上积压。
-14. **monitor 只观测"跑过了"，不观测"产出了"**（CA.1 查出，未修——**本轮最重要的一条**）。
+13. ~~**`session_mirror` 一般性队头偏置未修**~~ —— **CD.5 已修**：
+    从未导入的会话优先（稳定排序），信号从 mirrored 事件派生、
+    经删 state 重建测试证明存活；活跃会话不再以新内容版本反复霸占队头。
+    （CA 实测；机制查实为 dedup_key 含 content_sha256 + 稳定发现序。）
+14. ~~**monitor 只观测"跑过了"，不观测"产出了"**~~ —— **CD.2 已修**：
+    exposure_rollup 快照 `last_run` 封闭原因码（monitor INFO 可见）、
+    session_mirror auto-apply 每条退出落盘原因、`_call_hermes_runtime_model`
+    六个调用方清查（clearance 死判官恒 clear 改 fail-closed、contradiction lane
+    空回复记 `llm_empty_content`，顺链修掉后者从未被触达的模板必崩缺陷）。
+    session_mirror last-run 文件的 monitor 采集接线显式不做（登记，与 BV 的
+    recall_facade 接线同类）。原始诊断保留备查（CA.1 查出）。
     helper completion 只判 ExecutionGate envelope，`completion ≠ output`。三个同型实例：
     `exposure_rollup` 的两条不产出退出路径（良性跳过 / `source_cursor_not_found`
     永久错误）在产物侧证据完全相同；`session_mirror` 637 次运行 findings=0 且积压在涨；
@@ -3473,7 +3691,11 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     ——CC.1 已用这个方法查出两个新键无读者并当场修掉，
     但**未对既有键做全面普查**。
 
-18. **`exposure_monitor_stats` 仍有一批键"算了却无人分级、无人读"**（CC.2 普查查出，未修）。
+18. ~~**`exposure_monitor_stats` 仍有一批键"算了却无人分级、无人读"**~~ ——
+    **CD.1 已修**：逐键定性（3 个新 INFO 条目 + component 定性 + 2 键删除），
+    census 测试钉死键集，未来键必须先定性；census 另抓到手工审计漏掉的
+    未读别名 `attribution_gap_count`（子串键名骗过逐键 grep）。
+    原始清单保留备查（CC.2 普查查出）。
     扣除内部驱动 `freeze_reasons`/`schema_health` 的 4 个（`telemetry_degraded_count`、
     `initial_natural_cycle_count`、`production_observation_days`、
     `budget_pressure_streak_days`）后，真正的孤儿键：
@@ -4019,3 +4241,28 @@ sannai-community 仓库 README。）
   `rolling_7d_natural_record_count` 仍是自然域，配对当「缺口/分母」会算错，
   正确分母是新增的 `rolling_7d_attribution_era_record_count`（登记在待办 18）。
   3127 → **3130 passed / 13 skipped / 0 failed**（+3），四门全过。
+- `28dbf8a..（CD，本节）`：残留待办一轮清扫，按优先级 18→14→11→9→13→10→2/3 七项
+  关闭 + 一项部分关闭。18：孤儿键逐个定性（3 个新 INFO 条目 + component 定性 +
+  删 2 键），census 测试钉死键集使"算了没人读"不能再无声出生，且当场抓到
+  手工审计漏掉的未读别名 `attribution_gap_count`（子串键名骗过逐键 grep）。
+  14：exposure_rollup 每次运行落盘 `last_run` 封闭原因码（两条字节相同的
+  不产出退出从此可区分）、session_mirror auto-apply 每条退出落盘原因
+  （无 scan 的路径省略 counters 而非填零）、`_call_hermes_runtime_model`
+  六个调用方清查——clearance_cycle 死判官恒 `clear` 改 fail-closed
+  `judge_unavailable`，contradiction lane 空回复记 `llm_empty_content`；
+  **顺链抓到未登记真缺陷**：contradiction lane 的 prompt 模板大括号未转义，
+  找到候选对就必崩 KeyError，该循环此前从未被任何测试触达。
+  11：`_check_vector_available` 改 `find_spec`+缓存，status/doctor 不再执行
+  torch（17–29s 归零，待办 3 疑似成因随之消除）。9：两个 shadow 账本
+  writer 补 `created_at`（forward-only，历史行留 owner）。13：session_mirror
+  改"从未导入优先"稳定排序，信号从 mirrored 事件派生、删 state 重建后仍存活，
+  活跃会话不再以新内容版本反复霸占队头。10：recall_golden authority 维度
+  真实现（归因从实际命中 section 派生，`source_authority_issue`/
+  `context_insufficient` 均可达；`min_score` 删除 + loader 容忍未知键）。
+  2：安装器五处 `.as_posix()`（Windows 本机反事实实测）。
+  12 条反事实全部 revert→FAIL→restore→PASS。3130 → **3153 passed /
+  13 skipped / 0 failed**（+23，逐文件对账吻合），四门全过
+  （write surface 154→156 / unclassified 0）。提交后独立复审：无 Critical，
+  3 Important 中 1 修（write_failed 时快照 status 不再谎报 ok）、2 推回
+  （status 语义有意、monitor 接线已显式登记），拼接错位的测试归位，
+  recorder 改原子写；全部 fold 回同一提交。仅 `local_pass`，未部署、未推送。

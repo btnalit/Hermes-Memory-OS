@@ -23,6 +23,30 @@ from .execution_gate import (
 SCHEMA_VERSION = "memory-os.exposure_rollup.v0"
 SNAPSHOT_SCHEMA_VERSION = "memory-os.exposure_rollup_snapshot.v0"
 
+# ── Run-outcome contract (backlog 14: completion is not output) ─────────
+# The lane's two no-write exits (benign "no new records" skip, and the
+# source_cursor_not_found fail-closed error) used to leave byte-identical
+# evidence: neither touched exposure_rollup.jsonl nor the snapshot, so from
+# the artifacts alone a permanently-broken lane looked exactly like an idle
+# one -- distinguishing them required re-running the lane and reading source.
+# Every run now records WHY it produced (or did not produce) output in the
+# snapshot's last_run block, using this closed set of reason codes.
+RUN_OUTCOME_PRODUCED = "produced"                       # rollup record appended
+RUN_OUTCOME_NO_NEW_RECORDS = "no_new_records"           # benign: nothing eligible upstream
+RUN_OUTCOME_SOURCE_CURSOR_NOT_FOUND = "source_cursor_not_found"  # compaction removed cursor; fail-closed
+RUN_OUTCOME_LEGACY_CURSOR_MISSING = "legacy_source_cursor_missing"  # pre-cursor rollup head; fail-closed
+RUN_OUTCOME_WRITE_FAILED = "write_failed"               # eligible input existed, ledger append failed
+# Sentinel for snapshots written before outcome recording existed; never
+# written by this module, only reported by exposure_monitor_stats.
+RUN_OUTCOME_UNRECORDED = "unrecorded"
+EXPOSURE_ROLLUP_RUN_OUTCOMES = frozenset({
+    RUN_OUTCOME_PRODUCED,
+    RUN_OUTCOME_NO_NEW_RECORDS,
+    RUN_OUTCOME_SOURCE_CURSOR_NOT_FOUND,
+    RUN_OUTCOME_LEGACY_CURSOR_MISSING,
+    RUN_OUTCOME_WRITE_FAILED,
+})
+
 # ── Attribution contract (backlog item 16b) ─────────────────────────────
 # Which prefetch disclosure sections must name the canonical records they drew
 # from. This vocabulary MUST match what prefetch._section_source_class()
@@ -153,7 +177,9 @@ def run_exposure_rollup_cycle(
     to ``system/exposure_rollup.jsonl``.
 
     Conservation invariant: eligible == selected + dropped_by_budget + dropped_by_rank.
-    Idempotent: same window re-run produces zero-side-effect skip.
+    Idempotent: same window re-run appends no rollup record. The skip itself
+    is still recorded in the snapshot's ``last_run`` block (backlog 14) so a
+    no-output run leaves durable evidence of WHY it produced nothing.
     """
     from .jsonl_io import append_jsonl_locked
     from .memory_sources import read_memory_source_records
@@ -188,11 +214,32 @@ def run_exposure_rollup_cycle(
             "severity": "error",
             "recoverable": False,
         })
+        # Backlog 14: this fail-closed exit used to leave evidence
+        # byte-identical to the benign skip below. Record the distinguishing
+        # outcome durably (cursor_error is already one of the closed set).
+        report["run_outcome"] = cursor_error
+        _record_last_run_outcome(
+            store,
+            outcome=cursor_error,
+            new_records=0,
+            at=current.isoformat().replace("+00:00", "Z"),
+            trigger_class=trigger_class,
+            report=report,
+        )
         return report
     new_records = ms_records[source_offset_start:]
 
     if not new_records:
         report["skipped"] = True
+        report["run_outcome"] = RUN_OUTCOME_NO_NEW_RECORDS
+        _record_last_run_outcome(
+            store,
+            outcome=RUN_OUTCOME_NO_NEW_RECORDS,
+            new_records=0,
+            at=current.isoformat().replace("+00:00", "Z"),
+            trigger_class=trigger_class,
+            report=report,
+        )
         return report
 
     window_start = _latest_rollup_watermark(store)
@@ -348,6 +395,7 @@ def run_exposure_rollup_cycle(
 
     try:
         append_jsonl_locked(_rollup_path(store), rollup_record)
+        report["run_outcome"] = RUN_OUTCOME_PRODUCED
     except Exception as exc:
         report["error_records"].append({
             "component": "exposure_rollup",
@@ -357,13 +405,21 @@ def run_exposure_rollup_cycle(
             "recoverable": False,
         })
         report["status"] = "error"
+        # Backlog 14: eligible input existed but the ledger append failed --
+        # a third state that must not masquerade as either "produced" or
+        # "nothing to do".
+        report["run_outcome"] = RUN_OUTCOME_WRITE_FAILED
 
     # ── Update snapshot ────────────────────────────────────────────────
     try:
         all_rollups = _read_rollup_records(store)
         snapshot = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
-            "status": "ok",
+            # On the write_failed path the ledger append did NOT happen, so
+            # latest_window_* below describe a window the ledger does not
+            # contain -- "ok" beside last_run.outcome=write_failed would lie
+            # twice (review finding CD-R1).
+            "status": "ok" if report["status"] == "ok" else "error",
             "latest_window_start": window_start,
             "latest_window_end": window_end,
             "latest_created_at": current.isoformat().replace("+00:00", "Z"),
@@ -371,6 +427,12 @@ def run_exposure_rollup_cycle(
             "cumulative_selected": sum(int(row.get("selected") or 0) for row in all_rollups),
             "cumulative_dropped_by_budget": sum(int(row.get("dropped_by_budget") or 0) for row in all_rollups),
             "cumulative_dropped_by_rank": sum(int(row.get("dropped_by_rank") or 0) for row in all_rollups),
+            "last_run": {
+                "at": current.isoformat().replace("+00:00", "Z"),
+                "outcome": str(report["run_outcome"]),
+                "new_records": len(new_records),
+                "trigger_class": trigger_class,
+            },
         }
         sp = _snapshot_path(store)
         sp.parent.mkdir(parents=True, exist_ok=True)
@@ -415,6 +477,59 @@ def exposure_rollup_snapshot(store: Any) -> dict[str, Any]:
         }
 
 
+def _record_last_run_outcome(
+    store: Any,
+    *,
+    outcome: str,
+    new_records: int,
+    at: str,
+    trigger_class: str,
+    report: dict[str, Any],
+) -> None:
+    """Durably record why this run produced (or did not produce) output.
+
+    Merges a ``last_run`` block into the best-effort snapshot file, preserving
+    every other snapshot field. Runs on the pre-envelope exits too: the
+    snapshot is a rebuildable, non-canonical observation artifact (the same
+    class of state as the group runner's due bookkeeping), and the whole point
+    of the outcome record is to survive precisely when the interesting exits
+    fire -- gating it on envelope availability would blind it to the runs a
+    reader most needs to distinguish (backlog 14). The gate-failure exits stay
+    report-only: their evidence lives in the permit audit trail already.
+
+    The snapshot's top-level ``status`` is deliberately NOT rewritten here:
+    it describes snapshot-content availability (ok / empty / error), not lane
+    health. After a produced run, a cursor-error exit leaves ``status: "ok"``
+    beside ``last_run.outcome: "source_cursor_not_found"`` -- a consistent
+    pair meaning "the snapshot's cumulative data is valid; the most recent
+    run failed". Lane health lives in ``last_run`` alone.
+    """
+    from .jsonl_io import write_json_atomic
+
+    try:
+        snapshot = exposure_rollup_snapshot(store)
+        snapshot.setdefault("schema_version", SNAPSHOT_SCHEMA_VERSION)
+        # A fresh file created by a no-output exit must keep reading as "no
+        # rollup produced yet", so status stays "empty" unless a success path
+        # already wrote "ok".
+        snapshot.setdefault("status", "empty")
+        snapshot["last_run"] = {
+            "at": at,
+            "outcome": outcome,
+            "new_records": new_records,
+            "trigger_class": trigger_class,
+        }
+        write_json_atomic(_snapshot_path(store), snapshot)
+    except Exception as exc:
+        report["error_records"].append({
+            "component": "exposure_rollup",
+            "operation": "record_last_run_outcome",
+            "error_code": type(exc).__name__,
+            "severity": "warning",
+            "recoverable": True,
+        })
+
+
 def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Return monitor-facing V2 exposure telemetry without mutating state."""
     from datetime import timedelta, timezone as _tz
@@ -427,6 +542,8 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
 
     current = (now or datetime.now(_tz.utc)).astimezone(_tz.utc)
     snapshot = exposure_rollup_snapshot(store)
+    raw_last_run = snapshot.get("last_run")
+    last_run: dict[str, Any] = raw_last_run if isinstance(raw_last_run, dict) else {}
 
     lag_hours = 0.0
     latest_end = str(snapshot.get("latest_window_end") or "")
@@ -560,15 +677,25 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     )
     return {
         "schema_version": "memory-os.exposure_monitor_stats.v1",
+        # Ledger-state context: surfaced by the monitor's
+        # v2_exposure_rollup_ledger_state INFO entry (backlog 18). lag_hours is
+        # deliberately never graded -- an idle upstream inflates it benignly
+        # (backlog 15 measured exactly that), and "ran recently" is already
+        # graded by helper-completion freshness.
         "exposure_rollup_lag_hours": round(lag_hours, 1),
         "exposure_rollup_records_total": len(rollup_records),
         "legacy_unmarked_rollup_count": legacy_unmarked_rollup_count,
+        # Components of conservation_total_passes below. Not independent
+        # signals: their reader is the monitor's migration-debt INFO entry,
+        # which publishes the breakdown when all-history conservation breaks.
         "cumulative_eligible": total_eligible,
         "cumulative_selected": total_selected,
         "cumulative_dropped_by_budget": total_budget,
         "cumulative_dropped_by_rank": total_rank,
         "conservation_total_passes": total_eligible == total_selected + total_budget + total_rank,
-        "attribution_gap_count": all_history_gap,
+        # attribution_gap_count (an unread duplicate alias of the key below)
+        # was removed here (backlog 18); the census tool had missed it because
+        # its name is a substring of three read keys.
         "all_history_attribution_gap_count": all_history_gap,
         "schema_era_attribution_gap_count": schema_gap,
         # Pre-fix natural rows: real debt, surfaced, never gated (see item 16a).
@@ -579,8 +706,22 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         # is NOT the same as "recent traffic was clean" (item 17).
         "rolling_7d_attribution_era_record_count": len(rolling_era_records),
         "schema_era_conservation_failure_count": conservation_failures,
-        "schema_era_natural_record_count": len(natural_records),
+        # schema_era_natural_record_count was removed here (backlog 18): it was
+        # misnamed (it counted ALL natural history, not the schema era) and
+        # exactly equal to attribution_era_record_count +
+        # legacy_unattributed_record_count, both of which already ride the
+        # monitor's migration-debt INFO entry.
+        # Recent natural traffic volume. NOT the denominator for
+        # rolling_7d_attribution_gap_count (that is the era-scoped count above;
+        # the domains differ). The natural-minus-era difference is the
+        # deploy-verification signal: recent rows the producer failed to stamp
+        # with attribution_schema.
         "rolling_7d_natural_record_count": len(rolling_records),
+        # classified/processed over schema-era rollup rows. INFO-surfaced by the
+        # monitor (v2_exposure_classification_coverage), deliberately ungraded:
+        # the cumulative ratio mixes pre-fix and post-fix rollups, so it moves
+        # slowly by construction and no evidence-backed threshold exists. None
+        # means "no rows processed yet" and must never be coerced to 0.
         "schema_era_classified_ratio": None if classified_ratio is None else round(classified_ratio, 4),
         "schema_era_health": schema_health,
         "telemetry_degraded_count": telemetry_degraded_count,
@@ -593,6 +734,12 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         "latest_window_start": snapshot.get("latest_window_start", ""),
         "latest_window_end": snapshot.get("latest_window_end", ""),
         "snapshot_status": snapshot.get("status", "ok" if snapshot.get("schema_version") == SNAPSHOT_SCHEMA_VERSION else "unknown"),
+        # Backlog 14: why the last run produced (or did not produce) output.
+        # "unrecorded" means the snapshot predates outcome recording -- an
+        # honest legacy marker, never fabricated as a real outcome.
+        "last_run_outcome": str(last_run.get("outcome") or RUN_OUTCOME_UNRECORDED),
+        "last_run_at": str(last_run.get("at") or ""),
+        "last_run_new_records": int(last_run.get("new_records") or 0),
     }
 
 

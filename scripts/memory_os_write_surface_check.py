@@ -201,6 +201,12 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_state::atomic_json_replace_call::self._state_path": "memory_os_runtime_projection_state",
     "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_heartbeat_error_fallback::atomic_json_replace_call::self.store.roots.memory_os_root / 'runtime' / 'heartbeat_error_fallback.json'": "runtime_error_fallback_projection",
     "plugins/memory/memory_os/session_mirror.py::SessionMirror._write_state::atomic_json_replace_call::self.state_path": "session_mirror_projection_state",
+    # Backlog 14: auto-apply run-outcome record (why the last run produced or
+    # did not) -- fixed-size observational state, not a ledger.
+    "plugins/memory/memory_os/session_mirror.py::_record_auto_apply_last_run::atomic_json_replace_call::store.roots.memory_os_root / 'system' / 'session_mirror_auto_apply_last_run.json'": "session_mirror_auto_apply_last_run_state",
+    # Backlog 14: exposure_rollup's run-outcome recorder merges last_run into
+    # the best-effort snapshot (same file the success path writes).
+    "plugins/memory/memory_os/exposure_rollup.py::_record_last_run_outcome::atomic_json_replace_call::_snapshot_path(store)": "exposure_rollup_last_run_snapshot_state",
     "plugins/modules/governance/provisional_sweep.py::ProvisionalSweepModule.run_once::atomic_json_replace_call::p": "provisional_sweep_projection_report",
     "plugins/memory/memory_os/store.py::MemoryOSStore.append_event::append_jsonl_locked_call::path": "canonical_event_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore.write_working_document::atomic_json_replace_call::path": "working_document_store",

@@ -507,6 +507,13 @@ def _judge_against_permanents(
         "__BODY_B__"
     )
 
+    # Backlog 14 (completion is not output): count pairs the judge actually
+    # judged. _call_hermes_runtime_model reports most failures as "" (27.5%
+    # measured on fact_judge), so with per-pair skips alone a dead judge falls
+    # through every pair and returns "clear" -- exactly the constant verdict
+    # this function's docstring forbids.
+    pairs_evaluated = 0
+
     for pair in pairs:
         perm = pair["permanent"]
         prompt = (
@@ -551,6 +558,10 @@ def _judge_against_permanents(
         claim_a = parsed.get("claim_a") if isinstance(parsed.get("claim_a"), dict) else {}
         claim_b = parsed.get("claim_b") if isinstance(parsed.get("claim_b"), dict) else {}
 
+        # A parsed reply is a judgment, even when the claims are unusable:
+        # the judge responded and found no comparable claims.
+        pairs_evaluated += 1
+
         if not claim_a or not claim_b:
             continue
 
@@ -569,6 +580,13 @@ def _judge_against_permanents(
                     if e not in checked_entity_set:
                         checked_entity_set.append(e)
         return ("conflict", conflict_refs, checked_entity_set, invalidation_mode, "")
+
+    if pairs and pairs_evaluated == 0:
+        # Every pair's call raised, returned "", or was unparseable: the judge
+        # never actually judged this record. "clear" here would clear a
+        # provisional record on the strength of a dead judge. Fail closed,
+        # same as the availability-probe path above (C3: judge_unavailable).
+        return ("unknown", [], checked_entity_set, invalidation_mode, "judge_unavailable")
 
     return ("clear", [], checked_entity_set, invalidation_mode, "")
 

@@ -864,3 +864,68 @@ def test_retention_apply_revalidates_prune_event_line_actions(tmp_path):
     assert result["applied"] is False
     assert result["skipped_count"] == 1
     assert "evt_forged_foreground" in remaining_ids
+
+def test_metadata_retention_ages_out_both_prefetch_shadow_ledgers(tmp_path):
+    """Backlog 9: graph_layer_shadow stamped only ``recorded_at`` and
+    substrate_recall_shadow carried no timestamp at all, so every record
+    parsed as "no timestamp" and was retained forever -- two registered
+    ledgers that could never age out of the plan they were registered in.
+
+    Records are produced via the REAL producers (a hand-written created_at
+    would keep passing after a producer field rename), then aged by running
+    the plan with a future ``now``.
+
+    Counterfactual: without the producer stamps, both ledgers report
+    archive_candidate_records == 0 and no archive action, at any horizon.
+    Forward-only by design: historical rows remain unaged; that disposition
+    stays with the owner.
+    """
+    from plugins.memory.memory_os.prefetch import (
+        _record_graph_layer_shadow,
+        _record_substrate_shadow_recall,
+    )
+
+    store = _store(tmp_path)
+    _record_graph_layer_shadow(
+        store,
+        ["crystallized:anchor_a"],
+        [{
+            "relation_type": "refines",
+            "from_record_type": "crystallized_record",
+            "from_record_id": "a",
+            "to_record_type": "crystallized_record",
+            "to_record_id": "b",
+            "weight": 0.8,
+        }],
+    )
+    _record_substrate_shadow_recall(
+        store=store,
+        query="what is the deployment status",
+        report={
+            "facts": [{"provider": "local_artifact", "body": "advisory"}],
+            "query_class": "low_clue",
+            "selected_provider": "local_artifact",
+            "authoritative": False,
+            "local_first_authority_preserved": True,
+        },
+    )
+
+    future = datetime.now(timezone.utc) + timedelta(days=45)
+    plan = metadata_retention_plan(
+        store.roots,
+        now=future,
+        policy=MetadataRetentionPolicy(shadow_retention_days=30),
+    )
+
+    for ledger in ("graph_layer_shadow", "substrate_recall_shadow"):
+        summary = next(entry for entry in plan["ledgers"] if entry["ledger"] == ledger)
+        assert summary["exists"] is True, ledger
+        assert summary["total_records"] == 1, ledger
+        assert summary["archive_candidate_records"] == 1, (
+            f"{ledger}: record written by the real producer must age out"
+        )
+        assert summary["retained_records"] == 0, ledger
+    assert sorted(
+        action["ledger"] for action in plan["actions"]
+        if action.get("ledger") in {"graph_layer_shadow", "substrate_recall_shadow"}
+    ) == ["graph_layer_shadow", "substrate_recall_shadow"]

@@ -1023,3 +1023,107 @@ def test_owner_rejected_session_is_never_imported_by_a_real_apply(tmp_path):
     assert applied["skipped_by_owner_rejection_count"] == 1
     assert head not in applied["selected_session_fingerprints"]
     assert applied["new_event_count"] == 1
+
+
+def _write_session_json(sessions_root, name, session_id, content):
+    (sessions_root / name).write_text(
+        json.dumps({
+            "id": session_id,
+            "platform": "telegram",
+            "updated_at": "2026-08-01T00:00:00+00:00",
+            "messages": [
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "回答：" + content},
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_scan_orders_never_imported_sessions_before_reimports(tmp_path):
+    """Backlog 13: dedup_key embeds the content hash, so an active session
+    re-enters the pending queue on every content change -- and discovery
+    order is stable, so pure head-of-queue selection with a per-run cap keeps
+    re-importing the same low-position active sessions while the tail starves
+    (measured on production: 637 runs, backlog 1574 -> 1575).
+
+    Counterfactual: without the never-imported-first ordering, the active
+    session (session_a.json sorts first) is selected again and the
+    never-imported one behind it is not reachable at any horizon.
+    """
+    store = _store(tmp_path)
+    sessions_root = store.roots.hermes_home / "sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+
+    _write_session_json(sessions_root, "session_a.json", "s-active", "第一版内容")
+    mirror = SessionMirror(store)
+    discovered = mirror._discover_sessions()
+    assert [item["session_id"] for item in discovered] == ["s-active"]
+    # Import A's first content version via the real event producer, so the
+    # "imported before" signal comes from the artifact production writes.
+    store.append_event(mirror._event_for_session(discovered[0]))
+
+    # A grows new content (new dedup_key -> pending again); B has never been
+    # imported and sits behind A in queue order.
+    _write_session_json(sessions_root, "session_a.json", "s-active", "第二版内容，追加了新消息")
+    _write_session_json(sessions_root, "session_b.json", "s-tail", "从未被导入的会话")
+
+    report = mirror.scan(dry_run=True, max_sessions=1)
+    assert report["candidate_session_count"] == 2
+    assert [item["source_group_id"] for item in report["selected_sessions"]] == ["s-tail"]
+
+    # And the signal survives a state rebuild: it derives from events, not
+    # from SessionMirror state (same rationale as the owner-rejection fix).
+    state_path = mirror.state_path
+    if state_path.exists():
+        state_path.unlink()
+    report = mirror.scan(dry_run=True, max_sessions=1)
+    assert [item["source_group_id"] for item in report["selected_sessions"]] == ["s-tail"]
+
+    # Guard the dual: with no prior imports at all, queue order is untouched.
+    fresh_store = _store(tmp_path / "fresh")
+    fresh_root = fresh_store.roots.hermes_home / "sessions"
+    fresh_root.mkdir(parents=True, exist_ok=True)
+    _write_session_json(fresh_root, "session_a.json", "s-one", "内容一")
+    _write_session_json(fresh_root, "session_b.json", "s-two", "内容二")
+    fresh_report = SessionMirror(fresh_store).scan(dry_run=True, max_sessions=1)
+    assert [item["source_group_id"] for item in fresh_report["selected_sessions"]] == ["s-one"]
+
+
+def test_auto_apply_records_durable_last_run_reason(tmp_path, monkeypatch):
+    """Backlog 14 (completion is not output): every auto-apply exit before the
+    real scan returned a typed reason and persisted NOTHING, so a lane that
+    ran hundreds of times producing nothing left no artifact a reader could
+    consult.
+
+    Counterfactual: without the recorder the last-run file does not exist on
+    either path below.
+    """
+    store = _store(tmp_path)
+
+    result = auto_apply_graduated_session_mirror(store)
+    assert result["status"] == "skipped"
+    last_run_path = store.roots.memory_os_root / "system" / "session_mirror_auto_apply_last_run.json"
+    record = json.loads(last_run_path.read_text(encoding="utf-8"))
+    assert record["status"] == "skipped"
+    assert record["reason"] == result["reason"]
+    assert record["written_event_ids_count"] == 0
+    # No scan ran on this path: counters must be OMITTED, not zero-filled --
+    # a missing measurement must never read as a real zero.
+    assert "counters" not in record
+
+    # Graduated lane, empty queue: the scan really ran, so its zeros are real
+    # measurements and travel with the reason code.
+    import plugins.memory.memory_os.session_mirror as session_mirror_module
+
+    monkeypatch.setattr(
+        session_mirror_module,
+        "session_mirror_graduation_policy",
+        lambda _store: {"status": "active", "max_sessions_per_run": 1, "platform_allowlist": []},
+    )
+    result = session_mirror_module.auto_apply_graduated_session_mirror(store)
+    assert result["reason"] == "no_matching_pending_session"
+    record = json.loads(last_run_path.read_text(encoding="utf-8"))
+    assert record["reason"] == "no_matching_pending_session"
+    assert record["counters"]["candidate_session_count"] == 0
+    assert record["counters"]["selected_session_count"] == 0

@@ -786,6 +786,12 @@ def _record_substrate_shadow_recall(
         return  # fail-open: shadow loss must not break prefetch
     record = {
         "schema_version": "memory-os.substrate_recall_shadow.v0",
+        # The field name is load-bearing: metadata_retention._record_created_at
+        # reads only created_at/ts/timestamp. Without it every record parsed as
+        # "no timestamp" and was retained forever (backlog 9). Forward-only:
+        # historical rows still carry no timestamp and stay retained -- their
+        # disposition is an owner decision recorded in the backlog.
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "query_class": str(report.get("query_class") or ""),
         "query_sha256": _safe_query_hash(query),
         "selected_provider": str(report.get("selected_provider") or ""),
@@ -2060,12 +2066,18 @@ def _record_graph_layer_shadow(
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         return  # fail-open: shadow loss must not break prefetch
+    _now_stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     record = {
         "schema_version": "memory-os.graph_layer_shadow.v0",
         "phase": "1",
         "anchor_count": len(anchor_ids),
         "edge_count": len(edges),
-        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        # created_at is the name metadata_retention._record_created_at ages on
+        # (backlog 9); recorded_at stays for existing readers of this ledger.
+        # Forward-only: historical recorded_at-only rows remain unaged -- an
+        # owner decision, recorded in the backlog.
+        "created_at": _now_stamp,
+        "recorded_at": _now_stamp,
         "edges": [
             {
                 "relation_type": str(edge.get("relation_type", "unknown")),

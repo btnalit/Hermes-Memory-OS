@@ -421,3 +421,71 @@ def test_rolling_attribution_window_is_era_scoped_and_has_a_reader(tmp_path):
     # And it still drives the real gate, so the rolling number stays diagnostic.
     assert stats["schema_era_attribution_gap_count"] == 1
     assert stats["schema_era_health"] == "FAIL"
+
+
+def test_exposure_monitor_stats_key_census_every_key_has_a_disposition(tmp_path):
+    """Backlog 18: every key exposure_monitor_stats returns must have a
+    conscious disposition. A key that is merely computed and returned alerts
+    nobody (the schema_era_classified_ratio lesson: a number can be cited as
+    evidence for months while feeding no decision). Pinning the exact key set
+    forces the next added key to be triaged at birth instead of joining the
+    orphan list this backlog item drained.
+
+    Dispositions:
+      graded    -- feeds a PASS/WARN/FAIL decision in the monitor
+      info      -- surfaced by a monitor INFO entry (visible, never alerting)
+      internal  -- consumed inside the producer (freeze_reasons/schema_health)
+      component -- published inside another entry's diagnostic breakdown
+      identity  -- schema/version bookkeeping
+
+    Counterfactual: before this census, attribution_gap_count (an unread
+    duplicate alias) and schema_era_natural_record_count (misnamed, and exactly
+    attribution_era_record_count + legacy_unattributed_record_count) sat in the
+    dict for no reader; both are asserted absent below.
+    """
+    store = _store(tmp_path)
+    stats = exposure_monitor_stats(store)
+
+    dispositions = {
+        "schema_version": "identity",
+        "exposure_rollup_lag_hours": "info",       # v2_exposure_rollup_ledger_state
+        "exposure_rollup_records_total": "info",   # v2_exposure_rollup_ledger_state
+        "legacy_unmarked_rollup_count": "info",    # migration-debt entry
+        "cumulative_eligible": "component",        # conservation_total_passes
+        "cumulative_selected": "component",
+        "cumulative_dropped_by_budget": "component",
+        "cumulative_dropped_by_rank": "component",
+        "conservation_total_passes": "graded",     # migration-debt conservation issue
+        "all_history_attribution_gap_count": "graded",
+        "schema_era_attribution_gap_count": "graded",
+        "legacy_unattributed_record_count": "info",
+        "attribution_era_record_count": "info",
+        "rolling_7d_attribution_gap_count": "info",
+        "rolling_7d_attribution_era_record_count": "info",
+        "schema_era_conservation_failure_count": "graded",
+        "rolling_7d_natural_record_count": "info", # recent-window entry
+        "schema_era_classified_ratio": "info",     # v2_exposure_classification_coverage
+        "schema_era_health": "graded",
+        "telemetry_degraded_count": "internal",
+        "initial_natural_cycle_count": "internal",
+        "production_observation_days": "internal",
+        "budget_pressure_streak_days": "internal",
+        "v2c_unfreeze_ready": "graded",
+        "downstream_clearance_closure_frozen": "graded",
+        "freeze_reasons": "graded",
+        "latest_window_start": "info",             # v2_exposure_rollup_ledger_state
+        "latest_window_end": "info",               # v2_exposure_rollup_ledger_state
+        "snapshot_status": "info",                 # v2_exposure_rollup_ledger_state
+        # Backlog 14: run-outcome contract (completion is not output).
+        "last_run_outcome": "info",                # v2_exposure_rollup_ledger_state
+        "last_run_at": "info",                     # v2_exposure_rollup_ledger_state
+        "last_run_new_records": "info",            # v2_exposure_rollup_ledger_state
+    }
+
+    assert set(stats.keys()) == set(dispositions), (
+        "exposure_monitor_stats key set changed; give the new/removed key a "
+        "conscious disposition here (graded / info / internal / component) "
+        "and, for graded/info, a real monitor reader -- see backlog 18"
+    )
+    assert "attribution_gap_count" not in stats
+    assert "schema_era_natural_record_count" not in stats

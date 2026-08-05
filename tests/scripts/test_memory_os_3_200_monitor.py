@@ -7770,6 +7770,10 @@ def test_attribution_recent_window_stays_silent_when_collection_failed():
     assert any(
         item["code"] == "v2_exposure_monitor_collection_failed" for item in failed["warn"]
     )
+    # Backlog 18: the ledger-state and classification-coverage entries obey the
+    # same rule -- a failed collection publishes no fabricated measurements.
+    for code in ("v2_exposure_rollup_ledger_state", "v2_exposure_classification_coverage"):
+        assert not any(item["code"] == code for item in failed["info"]), code
 
     # Remote-projection failure uses a different sentinel; same rule applies.
     remote_failed = monitor.classify_snapshot({
@@ -7800,3 +7804,190 @@ def test_attribution_recent_window_stays_silent_when_collection_failed():
         if item["code"] == "v2_exposure_attribution_recent_window"
     )
     assert entry["value"]["rolling_7d_attribution_era_record_count"] == 0
+
+
+def test_migration_debt_surfaces_rollup_side_debt_and_conservation_components():
+    """Backlog 18: legacy_unmarked_rollup_count was cited as the precedent for
+    the attribution era boundary while itself having no reader. It joins the
+    migration-debt INFO entry, including as the entry's sole trigger; and the
+    cumulative_* components of conservation_total_passes are published exactly
+    when their aggregate breaks, which is the only moment a reader needs them.
+
+    Counterfactual: without the monitor change, the rollup-debt-only snapshot
+    emits no migration-debt entry at all (the trigger never looked at rollup
+    rows), and the conservation breakdown does not exist anywhere.
+    """
+    rollup_debt_only = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "legacy_unattributed_record_count": 0,
+            "attribution_era_record_count": 12,
+            "legacy_unmarked_rollup_count": 7,
+        },
+    })
+    entry = next(
+        item for item in rollup_debt_only["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["legacy_unmarked_rollup_count"] == 7
+    # Conservation is fine here, so the component breakdown must NOT pad the
+    # entry -- components appear at their diagnostic moment, not always.
+    assert "conservation_components" not in entry["value"]
+
+    # All-history conservation break (schema era clean): the breakdown appears.
+    conservation_break = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": False,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "cumulative_eligible": 100,
+            "cumulative_selected": 60,
+            "cumulative_dropped_by_budget": 30,
+            "cumulative_dropped_by_rank": 9,
+        },
+    })
+    entry = next(
+        item for item in conservation_break["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["conservation_components"] == {
+        "cumulative_eligible": 100,
+        "cumulative_selected": 60,
+        "cumulative_dropped_by_budget": 30,
+        "cumulative_dropped_by_rank": 9,
+    }
+
+
+def test_rollup_ledger_state_is_surfaced_as_info_and_never_graded():
+    """Backlog 18: exposure_rollup_lag_hours had no reader since its birth (the
+    CLAUDE.md example of a computed-and-ignored metric). It gets one as INFO,
+    with the window bounds and snapshot_status riding along so an empty
+    snapshot's lag of 0.0 cannot read as "fresh".
+
+    Deliberately ungraded: an idle upstream inflates lag benignly (backlog 15
+    measured exactly that), so a lag threshold would false-alarm on quiet weeks.
+
+    Counterfactual: without the monitor change this entry does not exist
+    (StopIteration) -- the metric goes back to alerting nobody.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "exposure_rollup_lag_hours": 68.0,
+            "exposure_rollup_records_total": 988,
+            "latest_window_start": "2026-08-01T00:00:00Z",
+            "latest_window_end": "2026-08-02T00:00:00Z",
+            "snapshot_status": "ok",
+            "last_run_outcome": "no_new_records",
+            "last_run_at": "2026-08-03T00:05:00Z",
+            "last_run_new_records": 0,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_rollup_ledger_state"
+    )
+    assert entry["value"] == {
+        "exposure_rollup_lag_hours": 68.0,
+        "exposure_rollup_records_total": 988,
+        "latest_window_start": "2026-08-01T00:00:00Z",
+        "latest_window_end": "2026-08-02T00:00:00Z",
+        "snapshot_status": "ok",
+        # Backlog 14: a 68h lag plus outcome no_new_records reads as "idle
+        # upstream", not "broken lane" -- the disambiguation the lag metric
+        # alone could never provide.
+        "last_run_outcome": "no_new_records",
+        "last_run_at": "2026-08-03T00:05:00Z",
+        "last_run_new_records": 0,
+    }
+    for bucket in ("warn", "fail"):
+        assert not any(
+            item["code"] == "v2_exposure_rollup_ledger_state"
+            for item in snapshot[bucket]
+        ), f"ledger state is diagnostic context and must never alert via {bucket}"
+
+
+def test_classification_coverage_gets_a_reader_and_never_fabricates_a_zero():
+    """Backlog 18, priority entry: schema_era_classified_ratio is the number
+    BY.1 cited as maturity evidence (0.6506 -> 0.7018) while no code read it --
+    a number can be load-bearing in argument while feeding no decision. It gets
+    a reader as INFO.
+
+    None means "no schema-era rollup rows processed yet"; coercing it to 0.0
+    would publish catastrophic-looking coverage for a no-sample state, so the
+    entry is omitted instead (the no-fabricated-zeros rule).
+
+    Counterfactual: without the monitor change the ratio has no reader
+    (StopIteration on the first block); with a naive `or 0` guard the None
+    snapshot emits a 0.0 entry (second block fails).
+    """
+    base = {
+        "schema_era_health": "PASS",
+        "conservation_total_passes": True,
+        "schema_era_conservation_failure_count": 0,
+        "all_history_attribution_gap_count": 0,
+        "schema_era_attribution_gap_count": 0,
+    }
+    with_ratio = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {**base, "schema_era_classified_ratio": 0.7018},
+    })
+    entry = next(
+        item for item in with_ratio["info"]
+        if item["code"] == "v2_exposure_classification_coverage"
+    )
+    assert entry["value"] == {"schema_era_classified_ratio": 0.7018}
+
+    no_sample = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {**base, "schema_era_classified_ratio": None},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_classification_coverage"
+        for item in no_sample["info"]
+    ), "a no-sample ratio must be omitted, not published as 0.0"
+
+
+def test_recent_window_carries_natural_traffic_volume_alongside_era_denominator():
+    """Backlog 18: rolling_7d_natural_record_count joins the recent-window
+    entry as traffic VOLUME. It is natural-domain while the gap count is
+    era-domain -- pairing them as gap/denominator computes a wrong ratio, which
+    is why the era-scoped denominator stays present. The natural-minus-era
+    difference is the post-deploy verification signal: recent rows the producer
+    failed to stamp with attribution_schema.
+
+    Counterfactual: without the monitor change the volume key is absent
+    (KeyError) and a reader cannot see recent unstamped traffic at all.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 3,
+            "rolling_7d_natural_record_count": 5,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_natural_record_count"] == 5
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 3

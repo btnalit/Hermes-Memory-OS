@@ -13,8 +13,7 @@
           "content_pattern": "hermes-media",
           "source_ref": "",
           "authority_class": "",
-          "must_hit": true,
-          "min_score": 0.0
+          "must_hit": true
         }
       ]
     },
@@ -27,8 +26,7 @@
           "content_pattern": "password is",
           "source_ref": "",
           "authority_class": "",
-          "must_hit": false,
-          "min_score": 0.0
+          "must_hit": false
         }
       ]
     },
@@ -41,8 +39,7 @@
           "content_pattern": "hermes-media|hermes-feiniu",
           "source_ref": "",
           "authority_class": "",
-          "must_hit": true,
-          "min_score": 0.0
+          "must_hit": true
         }
       ]
     },
@@ -55,8 +52,7 @@
           "content_pattern": "67\\.3%",
           "source_ref": "",
           "authority_class": "",
-          "must_hit": true,
-          "min_score": 0.0
+          "must_hit": true
         }
       ]
     },
@@ -69,8 +65,7 @@
           "content_pattern": "19\\.0%",
           "source_ref": "",
           "authority_class": "",
-          "must_hit": true,
-          "min_score": 0.0
+          "must_hit": true
         }
       ]
     }

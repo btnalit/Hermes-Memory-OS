@@ -128,12 +128,41 @@ class TestClassifyEvaluationItem:
         assert classify_evaluation_item(item) == "error"
 
     def test_source_authority_issue(self):
+        # matched_authority present = attribution was available, so the
+        # source_ref mismatch is a VERIFIED mismatch (backlog 10 separates
+        # this from context_insufficient, where nothing could be verified).
         item = RecallEvaluationItem(
             query="test", recall_type="crystallized", content_pattern="test",
             expected_source_ref="expected-source", must_hit=True, matched=True,
-            matched_source_ref="wrong-source",
+            matched_source_ref="wrong-source", matched_authority="crystallized",
         )
         assert classify_evaluation_item(item) == "source_authority_issue"
+
+    def test_authority_class_mismatch_is_authority_issue(self):
+        item = RecallEvaluationItem(
+            query="test", recall_type="crystallized", content_pattern="test",
+            expected_source_ref="", expected_authority="crystallized",
+            must_hit=True, matched=True, matched_authority="working",
+        )
+        assert classify_evaluation_item(item) == "source_authority_issue"
+
+    def test_unverifiable_expectation_is_context_insufficient(self):
+        # Verification requested but the matched disclosure carries no
+        # attribution at all: not a hit, not a verified mismatch.
+        no_attribution = RecallEvaluationItem(
+            query="test", recall_type="crystallized", content_pattern="test",
+            expected_source_ref="", expected_authority="crystallized",
+            must_hit=True, matched=True, matched_authority="",
+        )
+        assert classify_evaluation_item(no_attribution) == "context_insufficient"
+
+        # Section known but it exposes no source_ids to check the ref against.
+        no_ids = RecallEvaluationItem(
+            query="test", recall_type="crystallized", content_pattern="test",
+            expected_source_ref="crystallized:some_id", must_hit=True,
+            matched=True, matched_authority="crystallized", matched_source_ref="",
+        )
+        assert classify_evaluation_item(no_ids) == "context_insufficient"
 
 
 class TestScoreFromEvaluation:
@@ -320,3 +349,101 @@ class TestEvaluateRecallCounterfactual:
         assert after.false_negatives == 1
         assert after_score["recall_rate"] == 0.0
         assert after_score["recall_rate"] < before_score["recall_rate"]
+
+def test_loader_ignores_min_score_and_unknown_keys(tmp_path: Path):
+    """Backlog 10: min_score was removed as unimplementable dead schema (no
+    per-section score exists at the disclosure surface). Golden files already
+    deployed on hosts still carry the key; the loader must ignore it -- and
+    any future unknown key -- instead of crashing the instrument."""
+    import json
+
+    path = tmp_path / "legacy.golden.json"
+    path.write_text(json.dumps({
+        "schema_version": "memory-os.recall_golden_set.v1",
+        "profile": "legacy",
+        "queries": [{
+            "query": "q",
+            "expected": [{
+                "recall_type": "crystallized",
+                "content_pattern": "pattern",
+                "min_score": 0.5,
+                "future_unknown_key": True,
+            }],
+        }],
+    }), encoding="utf-8")
+
+    gs = load_golden_set(path)
+    assert len(gs.queries) == 1
+    assert gs.queries[0].expected[0].content_pattern == "pattern"
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+class TestAuthorityDimensionEndToEnd:
+    """Backlog 10 counterfactual: the authority dimension must be judged from
+    the section that ACTUALLY carried the match. Before the fix,
+    matched_source_ref was copied from the expected value and
+    matched_authority was never assigned, so source_authority_issue was
+    structurally unreachable and every wrong-authority expectation
+    classified as a clean "hit"."""
+
+    def _seed_fact(self, tmp_path):
+        store = _init_store(tmp_path)
+        frontmatter = build_crystallized_frontmatter(seed=77, kind="moment")
+        body = "The authority marker fact GOLDEN_AUTHORITY_7741 is confirmed true."
+        store.append_crystallized_record("authority.md", frontmatter.__dict__, body)
+        return store, frontmatter.id
+
+    @staticmethod
+    def _golden(expected: GoldenResult) -> GoldenSet:
+        return GoldenSet(
+            profile="authority",
+            queries=[GoldenQuery(query="authority marker fact", expected=[expected])],
+        )
+
+    def test_correct_authority_is_a_verified_hit(self, tmp_path: Path):
+        store, record_id = self._seed_fact(tmp_path)
+
+        evaluation = evaluate_recall(store, self._golden(GoldenResult(
+            recall_type="crystallized",
+            content_pattern="GOLDEN_AUTHORITY_7741",
+            authority_class="crystallized",
+            source_ref=f"crystallized:{record_id}",
+        )), profile="authority")
+
+        item = evaluation.items[0]
+        assert item.matched is True
+        # The authority is derived from the matching section, not echoed.
+        assert item.matched_authority == "crystallized"
+        assert item.matched_source_ref == f"crystallized:{record_id}"
+        assert classify_evaluation_item(item) == "hit"
+
+    def test_wrong_authority_class_is_flagged_not_a_hit(self, tmp_path: Path):
+        store, _record_id = self._seed_fact(tmp_path)
+
+        evaluation = evaluate_recall(store, self._golden(GoldenResult(
+            recall_type="working",
+            content_pattern="GOLDEN_AUTHORITY_7741",
+            authority_class="working",
+        )), profile="authority")
+
+        item = evaluation.items[0]
+        assert item.matched is True
+        assert item.matched_authority == "crystallized"
+        # Counterfactual: before the fix this returned "hit".
+        assert classify_evaluation_item(item) == "source_authority_issue"
+
+    def test_wrong_source_ref_is_flagged_not_a_hit(self, tmp_path: Path):
+        store, _record_id = self._seed_fact(tmp_path)
+
+        evaluation = evaluate_recall(store, self._golden(GoldenResult(
+            recall_type="crystallized",
+            content_pattern="GOLDEN_AUTHORITY_7741",
+            source_ref="crystallized:someone_else_entirely",
+        )), profile="authority")
+
+        item = evaluation.items[0]
+        assert item.matched is True
+        assert item.matched_source_ref != "crystallized:someone_else_entirely"
+        # Counterfactual: before the fix matched_source_ref echoed the
+        # expected value, making this mismatch undetectable.
+        assert classify_evaluation_item(item) == "source_authority_issue"

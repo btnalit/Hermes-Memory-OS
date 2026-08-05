@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -133,19 +134,32 @@ from .working import WorkingMemoryService
 
 _PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_body", "raw_transcript"}
 
+# Process-lifetime cache for _check_vector_available (backlog 11). CLI
+# invocations are short-lived processes, so this mostly guards against
+# repeated probes inside one status/doctor run.
+_vector_available_cache: bool | None = None
+
 
 def _check_vector_available() -> bool:
-    """Check whether sentence-transformers is importable (import-only, no model load).
+    """Report whether the optional vector stack is installed (spec lookup only).
 
-    Returns False when sentence-transformers is not installed.
-    Avoids loading the full ~420MB SentenceTransformer model.
+    Never imports the package: importing sentence_transformers executes torch
+    and cost a measured 17-29s per CLI status/doctor call on production
+    (backlog 11), multiplied by shell_alias_no_env's 22 concurrent CLI probes
+    (the suspected cause of backlog 3's production flake). A find_spec lookup
+    answers "installed?" from metadata without executing anything; full
+    embedder readiness remains the provider tool_status's job.
     """
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            importlib.import_module("sentence_transformers")
-        return True
-    except ImportError:
-        return False
+    global _vector_available_cache
+    if _vector_available_cache is None:
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                _vector_available_cache = importlib.util.find_spec("sentence_transformers") is not None
+        except (ImportError, ValueError):
+            # find_spec raises instead of returning None for some broken
+            # installs (missing parent package, __spec__ unset).
+            _vector_available_cache = False
+    return _vector_available_cache
 
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:

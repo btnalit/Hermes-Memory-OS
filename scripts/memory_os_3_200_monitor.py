@@ -1418,27 +1418,50 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     # INFO channel: visible, never driving FAIL/WARN on its own.
     legacy_unattributed_count = int(v2_exposure.get("legacy_unattributed_record_count") or 0)
     attribution_era_count = int(v2_exposure.get("attribution_era_record_count") or 0)
+    # Backlog 18: legacy_unmarked_rollup_count is the rollup-side twin of
+    # legacy_unattributed_record_count (rows written before trigger_class
+    # existed). It was cited as the precedent for the attribution era boundary
+    # while itself having no reader -- right in design, invisible in practice.
+    legacy_unmarked_rollup_count = int(v2_exposure.get("legacy_unmarked_rollup_count") or 0)
     if v2_exposure and (
         migration_debt_gap_count > 0
         or migration_debt_conservation_issue
         or legacy_unattributed_count > 0
+        or legacy_unmarked_rollup_count > 0
     ):
         # All-history migration debt (pre-schema-era data) is visible but must
         # never drive FAIL/WARN on its own (Fix 2c).
+        migration_debt_value = {
+            "migration_debt_attribution_gap_count": migration_debt_gap_count,
+            "all_history_attribution_gap_count": all_history_gap_count,
+            "schema_era_attribution_gap_count": schema_era_gap_count,
+            "conservation_total_passes": all_history_conservation_ok,
+            # Pre-attribution-era natural rows, and how much real attributed
+            # evidence exists to judge. attribution_era_record_count == 0
+            # means schema_era_health is healthy_no_sample rather than a
+            # green earned on evidence.
+            "legacy_unattributed_record_count": legacy_unattributed_count,
+            "attribution_era_record_count": attribution_era_count,
+            "legacy_unmarked_rollup_count": legacy_unmarked_rollup_count,
+        }
+        if migration_debt_conservation_issue:
+            # The cumulative_* keys are the components of
+            # conservation_total_passes; their diagnostic moment is exactly an
+            # all-history conservation break, so the breakdown is published
+            # only then (backlog 18: a component's reader is the person
+            # debugging the aggregate it feeds).
+            migration_debt_value["conservation_components"] = {
+                key: int(v2_exposure.get(key) or 0)
+                for key in (
+                    "cumulative_eligible",
+                    "cumulative_selected",
+                    "cumulative_dropped_by_budget",
+                    "cumulative_dropped_by_rank",
+                )
+            }
         info.append({
             "code": "v2_exposure_all_history_migration_debt",
-            "value": {
-                "migration_debt_attribution_gap_count": migration_debt_gap_count,
-                "all_history_attribution_gap_count": all_history_gap_count,
-                "schema_era_attribution_gap_count": schema_era_gap_count,
-                "conservation_total_passes": all_history_conservation_ok,
-                # Pre-attribution-era natural rows, and how much real attributed
-                # evidence exists to judge. attribution_era_record_count == 0
-                # means schema_era_health is healthy_no_sample rather than a
-                # green earned on evidence.
-                "legacy_unattributed_record_count": legacy_unattributed_count,
-                "attribution_era_record_count": attribution_era_count,
-            },
+            "value": migration_debt_value,
         })
     # Item 17: rolling_7d_attribution_gap_count was computed, returned, and read
     # by nothing -- the same defect as exposure_rollup_lag_hours. It gets a
@@ -1474,9 +1497,61 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "rolling_7d_attribution_era_record_count": int(
                     v2_exposure.get("rolling_7d_attribution_era_record_count") or 0
                 ),
+                # Backlog 18: recent natural traffic VOLUME. Not the gap
+                # denominator (the era-scoped count above is; the domains
+                # differ). natural minus era = recent rows the producer failed
+                # to stamp with attribution_schema -- the post-deploy
+                # verification signal: it should trend to zero once the
+                # attribution-complete producer is live.
+                "rolling_7d_natural_record_count": int(
+                    v2_exposure.get("rolling_7d_natural_record_count") or 0
+                ),
                 "schema_era_attribution_gap_count": schema_era_gap_count,
             },
         })
+        # Backlog 18: rollup ledger state gets its READER here, as INFO and
+        # deliberately ungraded. lag_hours grows benignly whenever the upstream
+        # is idle (backlog 15 measured exactly that state), so grading it would
+        # false-alarm on quiet weeks; "ran recently" is already graded by
+        # helper-completion freshness, and WHY a run produced nothing is the
+        # production/reason-code contract (backlog 14). snapshot_status rides
+        # along so an empty snapshot's lag of 0.0 cannot read as "fresh".
+        info.append({
+            "code": "v2_exposure_rollup_ledger_state",
+            "value": {
+                "exposure_rollup_lag_hours": float(
+                    v2_exposure.get("exposure_rollup_lag_hours") or 0.0
+                ),
+                "exposure_rollup_records_total": int(
+                    v2_exposure.get("exposure_rollup_records_total") or 0
+                ),
+                "latest_window_start": str(v2_exposure.get("latest_window_start") or ""),
+                "latest_window_end": str(v2_exposure.get("latest_window_end") or ""),
+                "snapshot_status": str(v2_exposure.get("snapshot_status") or ""),
+                # Backlog 14: the reason-code answer to "did the last run
+                # produce, and if not, why" -- readable here without re-running
+                # the lane or reading its source. "unrecorded" = snapshot
+                # predates outcome recording.
+                "last_run_outcome": str(v2_exposure.get("last_run_outcome") or "unrecorded"),
+                "last_run_at": str(v2_exposure.get("last_run_at") or ""),
+                "last_run_new_records": int(v2_exposure.get("last_run_new_records") or 0),
+            },
+        })
+        # Backlog 18 (priority entry): schema_era_classified_ratio is the
+        # number BY.1 cited as maturity evidence (0.6506 -> 0.7018) while no
+        # code read it. It gets a reader here, ungraded: the cumulative ratio
+        # mixes pre-fix and post-fix rollups so it moves slowly by
+        # construction, and no evidence-backed threshold exists. None means
+        # "no schema-era rollup rows processed yet" -- emitting a fabricated
+        # 0.0 for that state would read as catastrophic coverage, so the entry
+        # is omitted instead (same no-fabricated-zeros rule as the collection
+        # guard above).
+        classified_ratio = v2_exposure.get("schema_era_classified_ratio")
+        if isinstance(classified_ratio, (int, float)) and not isinstance(classified_ratio, bool):
+            info.append({
+                "code": "v2_exposure_classification_coverage",
+                "value": {"schema_era_classified_ratio": float(classified_ratio)},
+            })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:
         passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
 
