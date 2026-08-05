@@ -45,6 +45,8 @@ SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
 SOURCE_INDEX_SYNC_GATE = REPO_ROOT / "scripts" / "memory_os_cron_index_sync_gate.py"
 SOURCE_FACT_JUDGE_LANE = REPO_ROOT / "scripts" / "memory_os_fact_judge_lane.py"
 SOURCE_FACT_JUDGE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_fact_judge_gate.py"
+SOURCE_SESSION_FACT_EXTRACTION_LANE = REPO_ROOT / "scripts" / "memory_os_session_fact_extraction_lane.py"
+SOURCE_SESSION_FACT_EXTRACTION_GATE = REPO_ROOT / "scripts" / "memory_os_cron_session_fact_extraction_gate.py"
 SOURCE_CLEANUP_EXPIRED_WORKING = REPO_ROOT / "scripts" / "cleanup_expired_working.py"
 SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
@@ -1146,6 +1148,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "candidate_aggregation_gate": SOURCE_CANDIDATE_AGGREGATION_GATE,
         "fact_judge_lane": SOURCE_FACT_JUDGE_LANE,
         "fact_judge_gate": SOURCE_FACT_JUDGE_GATE,
+        "session_fact_extraction_lane": SOURCE_SESSION_FACT_EXTRACTION_LANE,
+        "session_fact_extraction_gate": SOURCE_SESSION_FACT_EXTRACTION_GATE,
         "index_sync": SOURCE_INDEX_SYNC,
         "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
         "cleanup_expired_working": SOURCE_CLEANUP_EXPIRED_WORKING,

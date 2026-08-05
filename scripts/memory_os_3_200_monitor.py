@@ -4250,6 +4250,7 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "provisional",
     "provisional_sweep",
     "runtime",
+    "session_fact_extraction",
     "session_mirror",
     "shadow_recall",
     "sqlite",

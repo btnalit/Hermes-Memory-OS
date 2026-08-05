@@ -2720,6 +2720,259 @@ telemetry_degraded_count`（L473-475），后两项皆 0 ⇒ **FAIL 完全由 69
 
 ---
 
+### CB — ①会话事实抽取 lane 实现（2026-08-04，未部署）
+
+关闭待办 12。`sync_turn` 只把 `_turn_summary` 的每侧 140 字符摘要写进事件队列，
+`inner_drive.py:294` 又从那个已截断的摘要构造候选体，因此**任何写在消息第 140 字符
+之后的持久事实永远进不了记忆**——这正是 Owner 报告的"关键事实漏失"的 A 类成因。
+完整消息体在主机上以原始会话转录形式留存，故新增一条**离线** cron lane 去回收它们。
+
+#### 落地文件
+
+新增 `plugins/modules/cognition/session_fact_extraction.py`（核心）、
+`scripts/memory_os_session_fact_extraction_lane.py`（lane helper，CLI/env 契约照
+`memory_os_fact_judge_lane.py`）、`scripts/memory_os_cron_session_fact_extraction_gate.py`
+（2 行 gate shim）、两个测试文件。
+改 `cron_registry.py`（lane def + `tick_evidence` 成员，lane 数 21→22，
+active-closure 覆盖 19→20 条，**不新增 cron job**）、`knob_overrides.py`（6 个 knob）、
+`test_memory_os_cron_registry.py`（派生 job 数断言仍为 8，lane 数 19→20）。
+`write_surface_check.py` **无需改动**：本 lane 的写入全部走既有
+`append_governed_jsonl` / `append_candidate_queue` 包装，`surface_count` 保持 154、
+`unclassified_count=0`（已实跑确认，非推断）。
+
+#### 关键设计决定
+
+- **只处理 >140 字符的消息**（`MESSAGE_ELIGIBILITY_THRESHOLD_CHARS`，注释绑定到
+  `_turn_summary` 的 clip 长度）。≤140 的消息本就完整存活，重抽是纯重复劳动。
+  这条把语料裁掉一大半，是"有界"的主要来源。
+- **先脱敏再判长度**，与 `_turn_summary` 的 redact-then-clip 同序；脱敏后的文本才
+  送 LLM。这一点比 `inner_drive` 更需要：后者的候选来自**已脱敏的 140 字摘要**，
+  而本 lane 读的是**原始转录体**。
+- **持久指纹账本**（`system-modules/session_fact_extraction/processed_sessions.jsonl`，
+  指纹 = 文件名+size+mtime）+ **最新未处理优先**。**刻意不照搬**
+  `session_mirror` 的纯队头选择（`platform_filtered[:limit]`，其代码注释自承偏置）,
+  否则积压永远排不空（待办 13）。
+- **三重有界**：每 tick 最多 2 个会话、每会话最多 20 条合格消息、最多 5 条事实；
+  每条消息送模型前截到 4000 字符（生产实测单条消息可达 97 万字符，而回复预算
+  `max_tokens=1024`——不设输入上界必然失败）。合格性筛选**放在每会话消息上限之前**，
+  避免一串短"好的/谢谢"把实质消息挤出窗口。
+- **只产出未批准候选**，走既有 `append_candidate_queue`；从不结晶、不批准、不外发；
+  对会话文件**只读**。
+
+#### LLM 复用（不重复造车）
+
+照 `fact_judge` 模板：同样从 `low_clue_recall` 私有导入
+`_call_hermes_runtime_model` / `_extract_json_object`，provider `hermes_default`，
+同样的重试循环与**分类失败码**（`llm_exception` / `llm_empty_content` /
+`llm_parse_failed` / `llm_missing_key`），以及**fail-closed** 的确定性回退
+（仅在命中 `_DURABLE_MARKERS` 时产出，绝不无条件产出）。
+`_call_hermes_runtime_model` 任何失败都返回 `""` 且与成功不可区分，生产实测
+`llm_empty_content` 占比 27.5%——**绝不继承那个裸 `""`**。
+
+#### 产出可观测性：本 lane 是待办 14 的正面样板
+
+每次运行都落盘 `runs.jsonl`，含
+`sessions_scanned / sessions_eligible / sessions_processed /
+sessions_skipped_already_processed / messages_considered /
+messages_eligible_over_threshold / facts_extracted / candidates_written /
+llm_calls / llm_failures_by_reason / fallback_used_count`，
+外加封闭原因码集 `SKIPPED_REASON_CODES`
+（`sessions_dir_absent` / `no_session_files_found` / `no_unprocessed_sessions`）。
+**三条 skip 路径全部在 return 之前写 run report**，因此
+"无合格输入" / "有输入但模型失败" / "有输入且产出了" 三者**从产物即可区分，
+不必重跑、不必读源码**——正是 CA.2 §5 指出 `exposure_rollup` 缺的那件事。
+
+#### 整合评审中我改掉的两个缺陷（子 agent 未发现，均补了反事实测试）
+
+1. **`candidate_id` 含 mtime → 活跃会话每次追加都产生重复候选。**
+   原实现 `material = f"{fingerprint}|{message_index}|{fact_text}"`，而指纹含 mtime。
+   会话被追加 → 指纹变 → 会话重新入选（这是**设计意图**）→ 未变的第 0 条消息被重抽 →
+   因指纹已变而**得到新的 candidate_id** → 绕开 `append_candidate_queue` 的
+   candidate_id 去重（`crystallized.py:1116`）→ 候选队列被同一事实反复灌入，
+   且每个副本都是 resolver 可自动批准的。
+   改为 `f"{session_id}|{message_index}|{fact_text}"`（三者跨追加均稳定）。
+   反事实实测：还原旧实现后队列 3 行而非 2 行（`assert 3 == 2`），已确认会失败。
+2. **`sessions_skipped_already_processed` 重复扣减。**
+   原式 `sessions_scanned - sessions_eligible - _unreadable_count(...)`，而
+   `sessions_scanned = len(pairs)`，`_discover_session_files` **已经**把 stat 失败的
+   文件排除在 `pairs` 之外——再扣一次即重复扣减，且 `max(...,0)` 把负数夹掉、
+   掩盖了症状。改为 `sessions_scanned - sessions_eligible`，并删掉随之失去调用方的
+   `_unreadable_count`。反事实实测：还原旧式后报 0 而非 1（`assert 0 == 1`），已确认会失败。
+
+#### 全量测试套件另外抓出 3 个回归（子 agent 只跑了定向测试，全部漏掉）
+
+子 agent 的定向测试全绿（38/38），但**全量套件 3 failed**。这正是
+「Definition of Done — 绝不在只跑自己新增/改动的测试后就推送」那条规则的实证。
+三者全部落在**子 agent 白名单之外的文件**，它无权修（已在其报告中如实上报了相邻风险，
+但没预见到这三处会 FAIL）：
+
+1. `test_error_record_emitting_components_constant_matches_source` ——
+   新组件名 `session_fact_extraction` 发了 `error_record` 却未登记进
+   `memory_os_3_200_monitor.py::ERROR_RECORD_EMITTING_COMPONENTS`。
+   该测试**从源码正则反推真实发射者清单**再比对常量，所以"新增发射者却不分类"
+   会响亮失败而不是静默扩大盲区——设计得很好，正好抓到我们。已按字典序补入。
+   注：该常量同时喂给 `_error_record_component_coverage`，而
+   `unaggregated_component_count` 本就 > 0（headline 聚合只覆盖 runtime /
+   memory_projection / session_mirror / prefetch 四个），是一个诚实的盲区计量而非门；
+   已确认无测试钉住其具体数值（只断言 `> 0` 与自一致），故补入是安全且更诚实的。
+2. `test_installer_can_run_owner_cron_onboarding_with_auto_channel`（`blocked` ≠ `applied`）
+3. `test_installer_can_run_full_owner_cron_profile_when_requested`（`0` ≠ `9` 个 job）
+
+2、3 同一个根因：`memory_os_owner_cron_onboarding.py:222-225` 要求
+**group 的每一个成员 helper 都必须存在于 `<hermes_home>/scripts/`**
+（其代码注释写明理由：「a group tick whose helper is absent would fail that lane on
+every tick with no install-time signal」）。而 `install_memory_os_plugin.py`
+的 `_write_operational_helper_scripts` 是**逐个列举**源文件的，新 lane 的两个脚本
+不在其中 ⇒ 安装后 helper 缺失 ⇒ onboarding 直接 blocked ⇒ 一个 job 都不建。
+已补 `SOURCE_SESSION_FACT_EXTRACTION_LANE` / `_GATE` 两个常量与 copy map 两项。
+（`plugins/` 树是整体拷贝的，故模块文件本身无需登记；已核实
+`_validate_system_module_source` 只是源树抽检清单，不是拷贝清单。）
+
+**这三处的反事实就是它们本身**：三个测试在修复前实测 FAIL、修复后 PASS，
+无需再另写——既有守卫已经承担了反事实职责。
+
+**由此补一条"新增 lane 的登记清单"**（Section W 规则 5：同类问题全项目排查）。
+加一条 lane 至少要动：① `cron_registry.py` lane def；② 该 group 的 `member_keys`；
+③ `knob_overrides.py`（若有 knob）；④ `install_memory_os_plugin.py` 的
+`SOURCE_*` 常量 + `_write_operational_helper_scripts` copy map；
+⑤ `memory_os_3_200_monitor.py::ERROR_RECORD_EMITTING_COMPONENTS`（若发 error_record）；
+⑥ 部署时重新生成 registry 快照。
+**不需要**动 `LEGACY_PER_LANE_CRON_JOBS`——已核实该表只登记**合并前**就存在于
+已 onboarding 主机上的旧单 lane job（用于 pause 而非删除，是回滚路径）；
+新 lane 直接诞生在 `tick_evidence` 内，从未有过独立 job，加进去是惰性条目
+且会误导 onboarding 去 pause 一个从不存在的 job。子 agent 这个判断是对的（已复核）。
+**也不需要**动 `write_surface_check.py`（已实跑确认 `surface_count` 仍 154、
+`unclassified_count=0`）。
+
+另补一条**脱敏防漂移测试**：断言本 lane 的 `_SECRET_PATTERNS` 与
+`memory_os.__init__._TASK_SECRET_PATTERNS` 的正则字符串逐条相等。
+两者当前完全一致（同 4 条、同序）；该测试的作用是——若日后规范集新增一条模式，
+这里**失败**而不是静默漏掉那一类秘密（本 lane 读原始转录，脱敏不得弱于捕获路径）。
+
+#### 生产形状已实测核对（不是假设）
+
+子 agent 自陈"会话文件形状未对生产核实"。已核实：
+`session_mirror.py:306` 的 `sessions_root` 就是 `hermes_home / "sessions"`、
+`:613` glob 的就是 `session_*.json`，与本 lane 一致；3.200 上该 glob 命中 **141 个**
+文件，顶层键含 `messages`/`platform`/`session_id`，`messages[0]` 含 `content`/`role`
+——**与实现假设完全一致**。（同目录另有 42 个 `2026*.jsonl` 新格式与若干
+`request_dump_*.json` 错误转储，两者都不匹配该 glob，与 `session_mirror` 自身口径相同。）
+
+**排空速率**（据此可算，非估计）：`tick_evidence` cron 为每小时，
+lane `due_interval_minutes=360` ⇒ 每天 4 次 × 每次 2 个会话 = **8 个/天**，
+141 个文件约需 **18 天**排空。最新优先意味着召回价值立刻开始体现；
+若要更快，`session_fact_extraction_max_sessions_per_tick` 可直接调大（上界 20）。
+
+#### 部署要求（**遗漏则静默失效**，须写进统一部署清单）
+
+`cron_group_runner._load_group` **优先读**
+`<hermes_home>/memory-os/system/memory_os_cron_registry.json`，且只要快照里该 group 的
+`member_keys` 解析出非空成员就**直接返回、不回退**编译内注册表。
+已 onboarding 的主机上，快照里 `tick_evidence` 仍是旧的 5 个成员 ⇒
+**新 lane 根本不会被 tick 调用，且没有 `unknown_registry_key`、没有 error record、
+没有 WARN**——tick 照常关闭一个干净的 envelope，只是从未执行它。
+（`execution_gate_runner._load_spec` 确实会回退到编译内注册表，所以失效点精确地
+在 group 成员解析，而非 permit 签发；子 agent 报的"会报 `unknown_registry_key`"
+不准确，实际比那更隐蔽。）
+⇒ **统一部署时必须重新生成该快照**（归口
+`install_memory_os_plugin.py` / `memory_os_owner_cron_onboarding.py`），
+并**在部署后核对快照里确有 `session_fact_extraction`**，不得假定注册即生效。
+已同步写入 CLAUDE.md cron 小节。
+
+#### 测试与门
+
+- 新增 20 个测试（`test_memory_os_session_fact_extraction.py` 17 +
+  `test_memory_os_session_fact_extraction_lane.py` 3，均为子 agent 所写）
+  ＋ 整合评审中我补的 3 个（两个反事实 + 脱敏防漂移）= **+23**。
+- **3089 → 3112 passed / 13 skipped / 0 real failed。** 数字对得上：3089 + 23 = 3112。
+- 全量套件最后一跑报 `1 failed, 3111 passed`，那一条是
+  `test_completion_append_and_sidecar_are_idempotent_under_concurrency`
+  的 **已知 Windows 文件锁 flake**（`PermissionError: access is denied`）：
+  单独重跑立即 PASS，且上一次全量跑它是绿的，与本批改动无关
+  （execution_gate sidecar 并发，与 session_fact_extraction 无交集）。
+- 四门全过：`write_surface_check`（`surface_count` 154 不变、`unclassified_count=0`）、
+  `import_cycle_check`（`cycle_count=0`）、`static_hygiene`、
+  `public_checkout_probe --strict`（`PASS`）；`git diff --check` 干净；无 CRLF。
+- 证据级别：**仅 `local_pass`**。未部署、未在 3.200 上跑过本 lane。
+
+#### CB.1 — 顾问复审又抓出 3 处（含一个会让整条 lane 失去意义的缺陷）
+
+`f4a3ccf` 提交后请顾问复审，抓出 3 处我逐行评审时漏掉的问题。第一处严重：
+**它会让 lane 在自己最可能的失败模式下永久丢失事实——正是 lane 存在的理由。**
+
+**1（严重）：LLM 失败后仍把会话指纹记为已处理 ⇒ 事实永久丢失。**
+`newly_processed_fingerprints.append(fingerprint)` 原本在**每会话循环末尾无条件执行**
+（在每消息循环之外）。于是模型不可用的那一 tick：每条消息 `llm_empty_content` →
+`has_durable_fact=False` → 0 候选 → **会话仍被标记已处理、此后永不重访**
+（除非文件本身变化）。而生产实测该失败率是 **27.5%**——不是边缘情况。
+
+同时暴露出与回退策略的耦合：`_heuristic_extract_fact` 用
+`_clip(message_text, 500)` 当"事实"，是当时唯一挡在"模型故障"与"全丢"之间的东西。
+但**这个耦合是我在派单里指定照抄 `fact_judge` 才带进来的，是我的指令错了**：
+`fact_judge` 判的是"已存在内容"的一个**布尔**，marker 启发式是合理的降级答案；
+本 lane 必须**生成**一条摘要，而**没有任何启发式能做摘要**。
+marker 命中的 500 字符原文切片不是"恢复出的事实"，
+它恰恰是本 lane 要消除的那种截断。更糟的是 `_DURABLE_MARKERS` 里含 **`"用"`**
+（实测确认），几乎任何长中文消息都含它 ⇒ 该门几乎必然命中，而非罕见命中；
+且候选 `bridge_state` 在 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内 ⇒
+这些原文切片可被 resolver 自动提升为**临时结晶**。这是治理问题，不只是噪声。
+
+**改法（两半必须一起改，顾问明确指出"不许只改一半"）**：
+- **失败即延后，绝不臆造**：LLM 失败返回
+  `reason="llm_unavailable_extraction_deferred"`、不产候选；删除
+  `_heuristic_extract_fact` 与 `_DURABLE_MARKERS` 导入。
+- **延后有界**：指纹账本增加 `status`（`processed` / `deferred` / `abandoned`）
+  与 `attempt`；只有 `processed`/`abandoned` 是**终态**、才抑制重跑。
+  `MAX_EXTRACTION_ATTEMPTS=3` 之后记 `abandoned`——**终态但与 `processed` 可区分**，
+  使"放弃"在账本里看得见，而不是长得像成功。
+  （若无此上限，一条永远解析失败的消息会每 tick 重复占用预算、饿死其他会话。）
+- 新增计数器 `sessions_deferred_llm_failure` / `sessions_abandoned_after_max_attempts`
+  ——否则"模型故障"与"这批确实没事实"都读作 `facts_extracted=0`。
+- 反事实实测（还原为无条件指纹）：
+  `assert 0 == 1`（延后未被记录）与 `assert False`（永不放弃）**双双失败**，已确认。
+
+**2：两个新账本重复了待办 9 的老毛病。**
+指纹账本原本写 `processed_at`，而 `metadata_retention._record_created_at()`
+只认 `created_at`/`ts`/`timestamp` ⇒ 每条都被判"无时间戳" ⇒ **永久 `retained_records`**。
+且两个账本**根本没在 `metadata_retention` 注册**（未注册＝对保留计划不可见＝无界增长）。
+增长不是理论问题：被追加的会话**按设计**会产生新指纹，故活跃会话每 tick 加一行，
+而 `read_processed_session_fingerprints` 每次运行都读整个文件。
+已改为 `created_at` 并把两个账本都注册进 `metadata_retention_plan`。
+反事实实测（改回 `processed_at`）：`assert None is not None` 失败，已确认；
+且该测试**经真实生产者取证**（断言的是 lane 实跑写出的行，不是手写夹具）。
+
+**3：推送前的空白检查必须按推送区间做，而非逐提交。**
+我此前每次提交只跑了 `git diff --cached --check`，而 CI 检查的是整个推送区间
+（记忆条目 `ci-whitespace-gate-checks-pushed-range` 记的就是这条）。已按区间复核。
+
+**方法记账**：这三处我逐行读完 785 行仍然漏掉。第 1 处漏掉的原因值得记——
+我把注意力放在"这段代码做了什么"，而没问"**LLM 失败时这段代码做什么**"。
+`fingerprint_outcomes` 的赋值点在循环末尾、语法上毫不显眼，
+但它与失败路径的交互决定了整条 lane 有没有意义。
+**教训：读一个有外部依赖的循环时，必须专门再走一遍"依赖失效"那条路径。**
+
+#### 下游治理事实（须 Owner 知情，本轮不改）
+
+候选 `bridge_state="inner_drive_candidate"`，是既有受治理路径（与 `inner_drive` 同）。
+但该值在 `resolver_gate.py:33` 的 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内，因此
+`candidate_aggregation` 的 resolver 自动批准**可以**把这些候选提升为**临时**
+（provisional）结晶记录，条件是通过 `is_reversible`（无身份信号、非敏感、无副作用）。
+本 lane 自身从不结晶；但"LLM 从原始转录抽出的事实"经此路径可在无 Owner 逐条批准的
+情况下进入临时结晶态。**这是既有设计的既有行为，不是本 lane 新增的**，
+但因为本 lane 的来源是原始转录而非已脱敏摘要，性质上比 `inner_drive` 更值得 Owner
+明示确认是否接受。
+
+**CB.1 之后此项风险已显著下降**：删除臆造回退后，候选体**只可能**是 LLM 产出的摘要，
+不再可能是 marker 命中的 500 字符原文切片。原先那条路径才是真正的问题所在——
+`_DURABLE_MARKERS` 含 `"用"`，模型故障期间几乎每条长中文消息都会变成一条
+原文切片候选，且同样 resolver 可自动提升。现在模型故障只会**延后**，不产候选。
+剩余待 Owner 裁定的只有一个干净问题：**"LLM 从原始转录摘出的事实"
+是否可以像 `inner_drive` 候选一样被 resolver 自动提升为临时结晶**，
+还是应当为本 lane 引入一个不在 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内的新 `bridge_state`
+以强制逐条 Owner 批准。**本轮不改，等 Owner 裁定。**
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -2789,10 +3042,14 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     `shell_alias_no_env()` 并发跑 22 条 CLI 探针——**很可能是待办 3 那个生产 flake 的成因**。
     这条同时也是 `full_monitor_runtime_over_target` 的候选成因之一。
     修法方向：把 vector 可用性探测改为惰性/缓存，不在 `status`/`doctor` 路径上加载模型。
-12. **①会话事实抽取 lane 未实现**（CA 定案设计，见 CA 节末）。
-    按 `fact_judge` 模板建新 cron lane，复用 `_call_hermes_runtime_model`。
-    两个必须避开的坑：不得照搬 `session_mirror` 的纯队头选择（1575 积压排不空）；
-    默认 `max_tokens=1024`/`timeout_ms=15000` 对 97 万字消息远远不够，须分块+per-tick 上限。
+12. ~~**①会话事实抽取 lane 未实现**~~ —— **已实现（CB 节），但未部署**。
+    按 `fact_judge` 模板建成新 cron lane，复用 `_call_hermes_runtime_model`；
+    两个坑都已避开（持久指纹账本 + 最新优先，而非 `session_mirror` 的纯队头；
+    三重有界 + 每条消息 4000 字符入参上限）。
+    **剩余动作只有部署**，且有一个静默失效点必须照做：统一部署时须重新生成
+    `memory-os/system/memory_os_cron_registry.json` 快照，否则
+    `cron_group_runner._load_group` 会返回旧的 `tick_evidence` 成员并
+    **无任何报错地跳过本 lane**（详见 CB 节"部署要求"）。
 13. **`session_mirror` 一般性队头偏置未修**（CA 实测）。
     `selected_sessions = platform_filtered[:limit]`，BY 只修了被拒会话饿死后队那一半。
     与待办 12 相关但独立：即使①另建 lane，这条仍使 `session_mirror` 自身永远追不上积压。
@@ -3233,3 +3490,29 @@ sannai-community 仓库 README。）
   **另记我在本节自己又犯了第六次"结论跑在证据前面"**：§4 定位到 69 全在 `working` 后
   直接写成"prefetch 有 bug + 新增 `working:` 前缀"，跳过了"这份测量有几种读法"，
   而 `0/69 从未填过`本身就是要求换读法的信号。
+- `（CB，本节）`：实现①会话事实抽取 lane，关闭待办 12（**仅 `local_pass`，未部署**）。
+  新增 `plugins/modules/cognition/session_fact_extraction.py` + lane helper + 2 行 gate shim
+  + 2 个测试文件；改 `cron_registry.py`（lane 21→22，`tick_evidence` 成员，active-closure
+  覆盖 19→20，**不新增 cron job**）、`knob_overrides.py`（6 个 knob）、
+  `install_memory_os_plugin.py`、`memory_os_3_200_monitor.py`。
+  设计要点：**只处理 >140 字符的消息**（≤140 本就完整存活，绑定 `_turn_summary` 的 clip）、
+  先脱敏再判长度、持久指纹账本 + 最新未处理优先（**刻意不照搬 `session_mirror` 的纯队头**）、
+  三重有界 + 每条消息 4000 字符入参上限（生产单条消息可达 97 万字符）、
+  只产出未批准候选。LLM 全程照 `fact_judge`：同一私有导入、分类失败码、fail-closed 回退，
+  **绝不继承那个裸 `""`**。每次运行落盘 11 项产出计数器 + 封闭 `SKIPPED_REASON_CODES`，
+  三条 skip 路径**都在 return 前写 run report** ⇒ 本 lane 是待办 14 的正面样板。
+  **整合评审我改掉子 agent 的 2 个缺陷**（均补反事实并实测确认会失败）：
+  ① `candidate_id` 含 mtime ⇒ 活跃会话每次追加都绕开
+  `append_candidate_queue` 的去重、把同一事实反复灌入候选队列（旧实现实测 3 行 vs 应为 2 行）；
+  ② `sessions_skipped_already_processed` 重复扣减 stat 失败数（旧式实测报 0 而应为 1）。
+  **全量套件另抓出 3 个回归，全在子 agent 白名单之外**：新组件未登记进
+  `ERROR_RECORD_EMITTING_COMPONENTS`；以及安装器 `_write_operational_helper_scripts`
+  逐个列举 helper、漏登记 ⇒ onboarding 直接 `blocked`、**一个 job 都不建**（0 vs 9）。
+  由此补出"新增 lane 的六处登记清单"并写入 CLAUDE.md
+  （含"不需要动 `LEGACY_PER_LANE_CRON_JOBS`"的理由，已复核子 agent 该判断为对）。
+  **另核实并记下一个静默失效点**：`cron_group_runner._load_group` 优先读已安装的 registry
+  快照且**成员非空就不回退**，故已 onboarding 主机上新 lane 会**无任何报错地不被 tick 调用**
+  ——统一部署必须重新生成快照并事后核对；子 agent 报的"会报 `unknown_registry_key`"不准确，
+  实际比那更隐蔽。生产形状已实测核对（3.200 上 `session_*.json` 命中 141 个，
+  `messages[0]` 含 `content`/`role`，与实现假设一致），排空速率 8 个/天 ⇒ 约 18 天。
+  3089 → **3112 passed / 13 skipped / 0 real failed**（+23），四门全过。

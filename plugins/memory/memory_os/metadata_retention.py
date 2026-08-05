@@ -85,6 +85,32 @@ def metadata_retention_plan(
             now=current,
             actions=actions,
         ),
+        # session_fact_extraction's two bookkeeping ledgers. Registering them is
+        # the same non-optional step as above, and the growth is not theoretical:
+        # an appended-to session mints a NEW fingerprint by design, so an active
+        # session adds a row per tick and the whole file is read every run.
+        # Both use `created_at` so _record_created_at() can actually age them --
+        # see backlog item 9 for the two sibling ledgers that cannot.
+        _ledger_plan(
+            ledger="session_fact_extraction_processed_sessions",
+            path=(
+                roots.memory_os_root / "system-modules" / "session_fact_extraction"
+                / "processed_sessions.jsonl"
+            ),
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
+        _ledger_plan(
+            ledger="session_fact_extraction_runs",
+            path=(
+                roots.memory_os_root / "system-modules" / "session_fact_extraction"
+                / "runs.jsonl"
+            ),
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
     ]
     report_roots = [
         _report_root_plan(

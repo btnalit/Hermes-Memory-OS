@@ -145,16 +145,16 @@ Fast probe PASS is not a substitute for full live monitor PASS.
 
 `cron_registry.py` holds **two tables**, and the distinction is load-bearing:
 
-- **Lanes** (`MEMORY_OS_CRON_LANES`, 21) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
+- **Lanes** (`MEMORY_OS_CRON_LANES`, 22) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
 - **Groups** (`MEMORY_OS_CRON_GROUPS`, 9) — the Hermes scheduling surface: what `hermes cron create` actually creates.
 
-Default profile `active-closure` installs **8 Hermes cron jobs** covering 19 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` activation is deferred):
+Default profile `active-closure` installs **8 Hermes cron jobs** covering 20 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` activation is deferred):
 
 | Group job | Schedule | Members |
 |---|---|---|
 | `memory-os-tick-derived` | `2,17,32,47 * * * *` | event_stats_refresh, index_sync, state_overlay_refresh, entity_index_refresh |
 | `memory-os-tick-governance` | `7,37 * * * *` | proposal_followups_opsgate (+ clearance_cycle when enabled) |
-| `memory-os-tick-evidence` | `12 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering |
+| `memory-os-tick-evidence` | `12 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering, session_fact_extraction |
 | `memory-os-tick-daily` | `5 0 * * *` | exposure_rollup, v3_seed_evidence, v3_journal_sweep, working_cleanup, hindsight_advisory_digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | owner_review_digest |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory_sources_feedback_request |
@@ -165,6 +165,8 @@ Rules that follow from this:
 
 - Tick minutes are **staggered** (`:02/:17/:32/:47`, `:07/:37`, `:12`, `00:05`) so no two group jobs start in the same minute. Aligned expressions (`*/15`, `*/30`, `0 * * * *`) all fire at `:00`, which reintroduces exactly the same-minute contention on `execution_gate_index.json` that consolidation exists to remove. Staggering changes no lane's cadence.
 - A group's cron cadence is its **finest** member's. Each lane keeps its own effective rate via `due_interval_minutes`; `scripts/memory_os_cron_group_runner.py` skips members that aren't due. Adding a lane means adding it to a group, **not** creating a cron job.
+- **Adding a lane touches six places.** ① the `cron_registry.py` lane def; ② that group's `member_keys`; ③ `knob_overrides.py` if it has knobs; ④ `install_memory_os_plugin.py` — both a `SOURCE_*` constant and an entry in `_write_operational_helper_scripts`, which enumerates helpers individually (miss this and `owner_cron_onboarding` returns `blocked`, creating **zero** jobs, because it requires every group member's helper to exist under `<hermes_home>/scripts/`); ⑤ `memory_os_3_200_monitor.py::ERROR_RECORD_EMITTING_COMPONENTS` if the lane emits `error_record`s; ⑥ regenerating the deployed registry snapshot (next bullet). Do **not** add it to `LEGACY_PER_LANE_CRON_JOBS` — that table lists only pre-consolidation standalone jobs already present on onboarded hosts so onboarding can pause them as a rollback path; a lane born inside a tick never had one, and an entry there would tell onboarding to pause a job that never existed. `write_surface_check.py` needs nothing as long as writes go through `append_governed_jsonl` / `append_candidate_queue`.
+- **Registering a new lane is not enough to make it run on a host — the installed registry snapshot must be regenerated, and forgetting is SILENT.** `cron_group_runner._load_group` prefers `<hermes_home>/memory-os/system/memory_os_cron_registry.json` and returns the snapshot's `member_keys` without falling back to the compiled-in registry whenever that member list is non-empty. So on an already-onboarded host a newly registered lane is simply absent from its tick: no `unknown_registry_key`, no error record, no WARN — the tick closes a clean envelope having never invoked it. (`execution_gate_runner._load_spec` *does* fall back to the compiled-in registry, so the failure is specifically at group-membership resolution, not permit issuance.) Regenerating the snapshot is owned by `install_memory_os_plugin.py` and `memory_os_owner_cron_onboarding.py`; treat it as a required deployment step for any lane addition, and verify the new `lane_id` appears in the snapshot post-deploy rather than assuming registration sufficed.
 - `due_policy="calendar"` exists for date-partitioned lanes (`v3_seed_evidence`), which must run at most once per UTC day rather than on elapsed time.
 - **The monitor's completion-freshness window must come from the lane's `due_interval_minutes`, never from the group job's cron expression** — deriving it from the schedule collapses a weekly lane sharing a daily tick to a 54h window and reports it permanently stale.
 - Owner-facing lanes keep dedicated single-member jobs: each renders a distinct owner message with its own agent prompt and deliver channel. `full_monitor_refresh` stays alone because it is the heavyweight (≤180s) monitor and would block co-tenants.
