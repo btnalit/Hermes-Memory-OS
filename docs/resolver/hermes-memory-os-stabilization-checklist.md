@@ -4316,3 +4316,51 @@ PR #19 合并为 `53880cd` 后统一部署（含此前未部署的 BZ/CA/CB/CC/C
   长期唯一 FAIL 按纪元边界设计转 `healthy_no_sample` 且清算闸门保持冻结；
   attribution_schema 端到端验证如实登记为待 Gateway 重载。
   证据级别 `deploy_pass` + `live_monitor_pass`。纯文档记录。
+
+### CD.E — 披露断流四天的根因、修复与归因链首次全绿（2026-08-05）
+
+部署验证的最后一步（等待 Gateway 重载后的首条真实流量）暴露了一个**部署之外
+的既有生产缺陷**：owner 08-04/08-05 明明在与 agent 对话（事件链正常），而
+`memory_sources.jsonl` 停在 988 行 / `2026-08-01T07:51Z`——**披露写入断流四天**。
+
+**根因链（备份考古 + 代码机制互证）**：
+
+1. `config.json.bak.20260609`：`memory_sources.enabled: true`（988 行披露的来源时代）；
+2. 07-14 的两个 v3 备份里已是 `false`——v3 启用操作期间被 config 重写翻掉，
+   **不是 owner 明示决策**；
+3. 但披露一直写到 08-01：provider 的 config 在 `initialize` 时**读一次并缓存**
+   （`__init__.py:111`），6 月启动的 Gateway 老进程带着 true 的内存副本继续写；
+4. **08-01 07:51 ≈ 一次 Gateway 重启**——false 生效，披露即断，且
+   `_record_memory_sources` 的开关短路是**无记录静默跳过**（配置性静默，
+   与 backlog 14 的缺陷性静默同形不同义——正因如此四天无人察觉）；
+5. **CA.2 的误判须更正**：当时把 exposure_rollup 四天空转归因"上游安静、
+   良性空转"。上游不是安静，是被关掉了。教训：判定"上游无输入是良性"之前，
+   必须先核对输入端的启用开关与最近一次进程重启时间——"没有数据"与
+   "数据被配置关掉"在下游产物上不可区分，正是 completion-is-not-output
+   的配置变体。
+
+**修复（owner 授权）**：备份
+`config.json.bak.memory-sources-reenable-20260805T103918Z` 后经
+`save_config` 归一化把 `enabled` 翻回 `true`（注意签名是
+`save_config(values, hermes_home)`，首次调用参数顺序写反报
+TypeError——工具坑记录）。owner 再次重启 Gateway 使缓存刷新。
+
+**端到端闭合证据（陷阱②关闭）**：重启后 owner 首条对话即产出第 989 行披露：
+`attribution_schema = memory-os.memory_sources_attribution.v1`、6 个 section
+中可归因两类（event/indexed）均带 `source_ids`、派生类按 16b 词表正确豁免。
+`exposure_monitor_stats` 实测：**`schema_era_health = PASS`（era 记录 1 / 缺口 0）
+——该门自诞生以来第一次靠真实样本与零缺口变绿**（此前要么 FAIL 69 缺口、
+要么 healthy_no_sample）；`attribution_era_no_sample` 从 freeze_reasons 消失，
+剩余两项时间性冻结（observation_days 22.3/30、budget_pressure_streak 0/7）
+按设计推进；legacy 债务 170 仍如实可见。
+
+**残留观察项**：`rolling_7d_natural(6) − rolling_7d_era(1) = 5` 为断流期前旧行，
+随窗口滚动应归零；`session_fact_extraction` 首跑 `llm_empty_content` 47.5%
+（高于 fact_judge 的 27.5% 实测）——defer 机制正确兜住无事实丢失，
+但主机模型服务质量值得关注。
+- `（CD.E，本节）`：查实并修复披露断流四天——7 月 v3 配置操作把
+  `memory_sources.enabled` 翻成 false，config 进程级缓存把生效推迟到 08-01
+  的 Gateway 重启，CA.2 的"上游安静"实为"上游被关"；owner 授权翻回 true
+  并重启后，首条对话即写出带 `attribution_schema` 的披露行，
+  **`schema_era_health` 历史首次靠真实样本 PASS**（era 1 / 缺口 0）。纯配置
+  修复 + 文档记录。
