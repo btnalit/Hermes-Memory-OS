@@ -3616,11 +3616,35 @@ CE 部署后的 Full Monitor 出现新 FAIL
   必须冒顶"，按新契约反转为"必须不冒顶 + failed 完成记录仍在 +
   error_record 上报"（断言集为旧测试的严格超集减去传播）。
 
-### 生产处置（代码合并部署后执行）
+### 生产处置（部署后实测更正原方案）
 
-5 个存量坏候选 demote（理由记 missing_source_event_ids）+ 从
-`processed_sessions.jsonl` 移除对应会话指纹 ⇒ 修复后的 lane 下个 due tick
-重抽这些会话，事实以带溯源形态重生，**不丢失**。
+**原拟"demote + 清指纹重抽"经查证不可行，如实更正**：
+`append_candidate_queue` 写时按 `candidate_id` 去重（crystallized.py，
+锁内成员检查），而 sfe 的 id 由 (session_id, message_index, fact_text)
+稳定派生——重抽产出的同 id 新行会被去重拒绝，旧的空溯源行永远是队列身份。
+且 demote 属 OwnerGate 永久边界（BR 刚堵过伪造 demote），不可自授权。
+
+**实际处置（全部在治理面内）**：CF 部署后手动触发一次聚合 lane
+（gate helper，正常 envelope）——lane 不再崩（status ok、envelope ok），
+全部存量 sfe 候选（含部署前后续 tick 又产出的 2 条，共 7 条）被资格门
+安全改道 **owner_eligible**，同 tick 还恢复了对其他积压候选的正常
+resolver 批准。存量候选的终局处置留给 owner 三选一：
+digest 里 reject（累积 3 次自动 demote）／owner 权威 demote（之后
+compact 会归档 demoted 行）／对 agent 直接口述这些事实走正常捕获链
+重新入库（新对话事件 → 带完整溯源的新候选）。
+
+### CF 部署与生产验证（2026-08-05）
+
+- 备份 `memory-os-pre-cf-20260805T162127Z.tar.gz`（45M，excl. WAL/SHM——
+  上一次备份被活跃 `db-wal` 打断的教训）；`/opt` ff `9ac2c79 → d08dc90`；
+  deploy production-safe apply 全程 `fail=[]`。
+- 手动聚合 tick：`status ok`、envelope `ok`、7 条 sfe 候选全部
+  `owner_eligible` triage——三层修复生产实证。
+- Full Monitor 首跑出现瞬时 `doctor_not_ok` + `index_not_healthy_in_production`
+  （采集撞上 16:12Z tick 与手动 lane 的索引写；status 随即报 healthy、
+  原样复跑不复现——待办 3/BY.3 同族瞬时争用，如实登记不改判）。
+  复跑 **100 PASS / 4 已知 WARN / 0 FAIL**。
+- 证据级别：`deploy_pass` + `live_monitor_pass`（0 FAIL）。
 
 ### CF 反事实覆盖与测试
 
@@ -4461,8 +4485,10 @@ PR #19 合并为 `53880cd` 后统一部署（含此前未部署的 BZ/CA/CB/CC/C
   修：惰性铸造 `session_fact_extracted` 溯源事件（先于候选写入）、
   `_resolver_verdict` 溯源资格门（三通道一处覆盖）、
   `_try_write_resolver_provisional` 隔离边界（error_record + owner review 改道）。
-  4 反事实 revert 全红实测 + 1 语义反转测试更新。存量 5 坏候选
-  demote+指纹清理重抽（部署后执行），事实不丢失。
+  4 反事实 revert 全红实测 + 1 语义反转测试更新。存量候选处置经实测更正：
+  重抽被写时 id 去重挡死、demote 属 OwnerGate——实际以资格门改道
+  owner review 收口（7 条全部 owner_eligible，lane 复活并恢复批准积压），
+  终局三选一留 owner。部署后 Full Monitor 复跑 100 PASS / 0 FAIL。
 
 ### CD.E — 披露断流四天的根因、修复与归因链首次全绿（2026-08-05）
 
