@@ -708,7 +708,16 @@ def test_installer_can_write_memory_sources_test_host_preset(tmp_path):
     assert config["session_mirror"]["production_apply_owner_ref_required"] is True
 
 
-def test_installer_memory_sources_production_safe_preset_is_explicitly_off(tmp_path):
+def test_installer_memory_sources_production_safe_preset_enables_metadata_only(tmp_path):
+    """CE semantics change: production-safe ENABLES the disclosure ledger.
+
+    "Safe" lives in mode=metadata_only (no raw bodies), not in switching the
+    recorder off — this preset was the only one shipping it dark, and a
+    production-safe install could silently flip a live host's recorder off
+    (the four-day outage of CD.E). Counterfactual: with the old preset table
+    this asserts False and the whole attribution chain starves on any host
+    installed with this preset.
+    """
     report = install_plugin(
         hermes_home=tmp_path / "home",
         memory_sources_preset="production-safe",
@@ -716,7 +725,8 @@ def test_installer_memory_sources_production_safe_preset_is_explicitly_off(tmp_p
 
     config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
     assert report["memory_sources_config_written"] is True
-    assert config["memory_sources"]["enabled"] is False
+    assert config["memory_sources"]["enabled"] is True
+    assert config["memory_sources"]["mode"] == "metadata_only"
     assert config["memory_sources"]["record_live_prefetch"] is True
     assert report["session_mirror_preset"] == "production-safe"
     assert report["session_mirror_config_written"] is True

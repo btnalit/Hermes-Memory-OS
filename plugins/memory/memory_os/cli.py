@@ -78,6 +78,7 @@ from .memory_projection import (
     memory_projection_status,
 )
 from .memory_sources import (
+    memory_sources_enabled,
     memory_sources_feedback_history_report,
     memory_sources_feedback_last_report,
     memory_sources_history_report,
@@ -227,6 +228,15 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "recent_event_summaries": recent_summaries,
         "hindsight_adapter_enabled": bool(config.get("hindsight_adapter_enabled")),
         "hindsight_substrate": hindsight_status_report(store),
+        # Whether the disclosure ledger is recording. This switch was flipped
+        # off by a July config rewrite and nothing surfaced it for four days
+        # (CE); the monitor's memory_sources_recording_disabled check reads
+        # this block, so the state finally has an alarmed reader.
+        "memory_sources_recording": {
+            "enabled": memory_sources_enabled(config.get("memory_sources")),
+            "raw_enabled": bool((config.get("memory_sources") or {}).get("enabled")),
+            "mode": str((config.get("memory_sources") or {}).get("mode") or ""),
+        },
         "low_clue_recall": {
             "enabled": bool((config.get("low_clue_recall") or {}).get("enabled"))
             if isinstance(config.get("low_clue_recall"), dict)
