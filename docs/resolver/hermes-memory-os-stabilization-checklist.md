@@ -3576,6 +3576,64 @@ public checkout probe --strict）、`git diff --check` 干净。
 证据级别：`local_pass`；monitor 双检查的 `live_monitor_pass` 待下一次
 统一部署后取得。
 
+## CF — 生产首个 FAIL 的根因修复：无溯源候选与聚合 lane 崩溃（2026-08-05）
+
+CE 部署后的 Full Monitor 出现新 FAIL
+`execution_gate_memory_os_cron_helper_completion_error`（lane =
+`candidate_aggregation`，12:12Z 起 rc=1 无 helper 报告）。手动复现拿到实锤：
+`CrystallizedApprovalError: crystallized records require source_event_ids`。
+
+### 根因链（三层，各自都是真缺陷）
+
+1. **产出侧**：`session_fact_extraction` 首跑写入的 5 个候选
+   `source_event_ids=[]`——事实来自会话而非事件，CB 实现时留空。但结晶
+   写门在**所有**批准路径（含 Owner）都要求非空溯源 ⇒ 这些事实**永远
+   无法结晶**，缺陷在候选出生时就注定。
+2. **通道侧**：sfe 候选带 durable_fact 裁决，走聚合 lane 的
+   durable-fact 单条 bypass 被 resolver 自动批准——自动批准一个结构上
+   不可能写入的候选，唯一可能的结局就是撞门。
+3. **隔离侧**：`_write_resolver_provisional` 失败后 re-raise 无人接住，
+   单个坏候选把整条聚合 tick 打崩（rc=1），且每次 due 都在同一候选上
+   重复崩——**队头卡死家族的聚合版**：一个坏候选永久饿死其后所有候选。
+
+### 修复（三层各修 + 反事实）
+
+- **产出侧**：lane 为每个产出事实的会话惰性铸造一个
+  `session_fact_extracted` 溯源事件（每会话每 tick 一个、metadata-only、
+  `candidate_allowed=False` 防止 heartbeat 二次造候选——形制照
+  session_mirror 事件），事件**先于**候选写入（反序会造出无锚候选），
+  所有该会话事实候选共享引用。溯源链自此完整：crystallized → event → session。
+- **通道侧**：`_resolver_verdict` 头部新增资格判定——空 `source_event_ids`
+  即 `approve=False / missing_source_event_ids`，三条通道（cluster、
+  durable bypass、no_keyword singleton）一处全覆盖，候选改道 owner review。
+- **隔离侧**：新 `_try_write_resolver_provisional` 边界——写失败记
+  `provisional_write_failed` error_record（进 lane 报告的
+  `suppressed_error_count`，monitor error observability 既有读者）、
+  候选 triage 为 `owner_eligible`、tick 继续。
+  `_write_resolver_provisional` 内部的 failed envelope 闭合语义保持不变。
+- **语义变更测试更新**：既有
+  `test_resolver_write_exception_records_failure_completion` 原钉"写异常
+  必须冒顶"，按新契约反转为"必须不冒顶 + failed 完成记录仍在 +
+  error_record 上报"（断言集为旧测试的严格超集减去传播）。
+
+### 生产处置（代码合并部署后执行）
+
+5 个存量坏候选 demote（理由记 missing_source_event_ids）+ 从
+`processed_sessions.jsonl` 移除对应会话指纹 ⇒ 修复后的 lane 下个 due tick
+重抽这些会话，事实以带溯源形态重生，**不丢失**。
+
+### CF 反事实覆盖与测试
+
+4 条新反事实全部 revert→FAIL 实测且失败模式各自精确（verdict 反转、
+生产同款 CrystallizedApprovalError、TypeError、空 source_event_ids）+
+1 条语义反转测试。定向 102 passed（聚合两文件 + sfe 两文件 + 新文件），
+四门全过。**全量首跑抓到定向漏网的一个真回归**：新的
+`candidate_aggregation` error_record 发射点未登记
+`ERROR_RECORD_EMITTING_COMPONENTS`（守卫测试
+`..._constant_matches_source` 当场红，即该登记的现成反事实）——
+再一次证明"定向绿≠全量绿"（BV/CC 同款教训）。登记后
+monitor 文件 235 passed，全量 3162+1 → **3163 passed / 13 skipped**。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -4396,6 +4454,15 @@ PR #19 合并为 `53880cd` 后统一部署（含此前未部署的 BZ/CA/CB/CC/C
   monitor 新增 `memory_sources_recording_disabled` + `memory_sources_disclosure_outage`
   两红线（CD.E 那四天的形状今后活不过一次 monitor）。cron 注册链核查为已有
   兜底，不改。6+1 反事实实测，四门全过。
+- `（CF，本节）`：CE 部署后 monitor 抓到的生产 FAIL 根因三层修复——
+  sfe 候选出生即无溯源（结晶写门在所有批准路径都会拒，事实永远无法结晶）、
+  durable bypass 自动批准结构上不可能写入的候选、写失败 re-raise 让单个
+  坏候选每个 due tick 重复打崩整条聚合 lane（队头卡死的聚合版）。
+  修：惰性铸造 `session_fact_extracted` 溯源事件（先于候选写入）、
+  `_resolver_verdict` 溯源资格门（三通道一处覆盖）、
+  `_try_write_resolver_provisional` 隔离边界（error_record + owner review 改道）。
+  4 反事实 revert 全红实测 + 1 语义反转测试更新。存量 5 坏候选
+  demote+指纹清理重抽（部署后执行），事实不丢失。
 
 ### CD.E — 披露断流四天的根因、修复与归因链首次全绿（2026-08-05）
 

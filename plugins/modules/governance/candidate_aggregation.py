@@ -57,6 +57,7 @@ from plugins.memory.memory_os.crystallized import (
     resolve_candidate_effective_state,
 )
 from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.jsonl_io import build_error_record
 from plugins.memory.memory_os.store import MemoryOSStore
 
 # V3a: knob override resolution (imported here; resolve_knob called at runtime)
@@ -304,6 +305,44 @@ def _write_resolver_provisional(
     return path
 
 
+def _try_write_resolver_provisional(
+    store: MemoryOSStore,
+    candidate: CrystallizedCandidate,
+    decision: Any,
+    *,
+    error_records: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Write a resolver provisional; on failure record and contain, never raise.
+
+    CE.2 isolation: one candidate that the crystallized write gate rejects
+    must not kill the whole aggregation tick -- before this, a single bad
+    candidate re-crashed the lane on every due tick (rc=1, no helper report),
+    permanently starving every other candidate behind it. The envelope inside
+    _write_resolver_provisional already closes itself as failed; this boundary
+    turns the re-raise into a bounded error record so the caller can route the
+    candidate to owner review and keep going.
+    """
+    try:
+        _write_resolver_provisional(store, candidate, decision)
+        return True
+    except Exception as exc:
+        record = build_error_record(
+            component="candidate_aggregation",
+            operation="write_resolver_provisional",
+            error_code="provisional_write_failed",
+            severity="error",
+            recoverable=True,
+            details={
+                "candidate_id": candidate.candidate_id,
+                "error_type": type(exc).__name__,
+                "message": str(exc)[:200],
+            },
+        )
+        if error_records is not None:
+            error_records.append(record)
+        return False
+
+
 # Auto-demote candidates that have been rejected N+ times by owner
 _REJECTION_THRESHOLD = 3
 
@@ -393,7 +432,7 @@ def run_candidate_aggregation_lane(
     processed_ids: set[str] = set()
 
     rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
-    promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, error_records=candidate_error_records)
     demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
     fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
 
@@ -536,6 +575,7 @@ def _cluster_and_promote(
     envelope_id: str = "",
     now: datetime | None = None,
     min_cluster_size: int | None = None,
+    error_records: list[dict[str, Any]] | None = None,
     _override_store_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Cluster pending candidates by theme, promote high-signal clusters.
@@ -730,8 +770,13 @@ def _cluster_and_promote(
                     expires_at=_default_provisional_expires_at(member, _now),
                     recurrence=0,
                 )
-                _write_resolver_provisional(store, member, decision)
-                provisional_write_count += 1
+                if _try_write_resolver_provisional(
+                    store, member, decision, error_records=error_records,
+                ):
+                    provisional_write_count += 1
+                else:
+                    target_state = "owner_eligible"
+                    reason = f"{reason}; provisional_write_failed (kept for owner review)"
             else:
                 target_state = "owner_eligible"
                 if verdict.get("approve"):
@@ -886,8 +931,13 @@ def _cluster_and_promote(
                     expires_at=_default_provisional_expires_at(c, _now),
                     recurrence=0,
                 )
-                _write_resolver_provisional(store, c, decision)
-                provisional_write_count += 1
+                if _try_write_resolver_provisional(
+                    store, c, decision, error_records=error_records,
+                ):
+                    provisional_write_count += 1
+                else:
+                    target_state = "owner_eligible"
+                    reason = f"{reason}; provisional_write_failed (kept for owner review)"
             else:
                 target_state = "owner_eligible"
                 if verdict.get("approve"):
@@ -1018,8 +1068,13 @@ def _cluster_and_promote(
                 expires_at=_default_provisional_expires_at(c, _now),
                 recurrence=0,
             )
-            _write_resolver_provisional(store, c, _decision2)
-            provisional_write_count += 1
+            if _try_write_resolver_provisional(
+                store, c, _decision2, error_records=error_records,
+            ):
+                provisional_write_count += 1
+            else:
+                target_state = "owner_eligible"
+                reason = f"{reason}; provisional_write_failed (kept for owner review)"
         else:
             target_state = "owner_eligible"
             if verdict.get("approve"):
@@ -1206,6 +1261,16 @@ def _resolver_verdict(
     behavior (default approve for gate-passing candidates).
     """
     from plugins.memory.memory_os.resolver_gate import resolver_eligible
+
+    # CE.2: crystallized writes require event provenance -- the write gate
+    # (`_ensure_crystallized_approval`) raises on empty source_event_ids, for
+    # Owner approvals as much as resolver ones. Auto-approving a provenance-less
+    # candidate therefore cannot succeed; it can only crash the lane (measured
+    # on production: session_fact_extraction's first five candidates took the
+    # durable-fact bypass and killed every candidate_aggregation tick from
+    # 12:12Z on). Route such candidates to owner review instead of the cliff.
+    if not list(candidate.source_event_ids or []):
+        return {"approve": False, "reason": "missing_source_event_ids"}
 
     if not resolver_eligible(candidate, store=store):
         return {"approve": False, "reason": "failed_resolver_gate"}

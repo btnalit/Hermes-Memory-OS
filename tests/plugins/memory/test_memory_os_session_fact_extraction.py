@@ -891,3 +891,50 @@ def test_new_ledgers_are_retention_registered_and_timestamp_readable(tmp_path, m
                 "registered but zero records counted -- the planned path does not "
                 "match where the lane actually writes"
             )
+
+
+def test_candidates_cite_a_real_provenance_event(tmp_path, monkeypatch):
+    """CE.2: the crystallized write gate requires non-empty source_event_ids on
+    EVERY approval path (owner included), so a candidate born without event
+    provenance can never be crystallized. The lane's first five production
+    candidates shipped with source_event_ids=[] and crashed every
+    candidate_aggregation tick from 12:12Z on.
+
+    Counterfactual: without the fix, candidates[0].source_event_ids == [] and
+    no session_fact_extracted event exists.
+    """
+    envelope_id = "xgate_test_sfe_provenance"
+    store = _store_with_gate(tmp_path, envelope_id)
+    _write_session_file(
+        store.roots.hermes_home,
+        "session_prov.json",
+        messages=[
+            {"role": "user", "content": _LONG_MARKER_TEXT},
+            {"role": "user", "content": _LONG_NO_MARKER_TEXT},
+        ],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        _fake_llm_always_durable,
+    )
+
+    report = run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
+
+    assert report["candidates_written"] == 2
+    candidates = read_candidate_queue(store)
+    assert len(candidates) == 2
+
+    events = {event.id: event for event in store.read_events()}
+    provenance_events = [
+        event for event in events.values() if event.kind == "session_fact_extracted"
+    ]
+    # One provenance event per session per tick, shared by both facts.
+    assert len(provenance_events) == 1
+    provenance = provenance_events[0]
+    for candidate in candidates:
+        assert candidate.source_event_ids == [provenance.id], (
+            "every fact candidate must cite the session provenance event"
+        )
+    # The anchor must not itself spawn a second candidate generation pass.
+    assert provenance.safe_ref.get("candidate_allowed") is False
+    assert provenance.source == "session_fact_extraction"
