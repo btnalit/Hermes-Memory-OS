@@ -45,6 +45,8 @@ SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
 SOURCE_INDEX_SYNC_GATE = REPO_ROOT / "scripts" / "memory_os_cron_index_sync_gate.py"
 SOURCE_FACT_JUDGE_LANE = REPO_ROOT / "scripts" / "memory_os_fact_judge_lane.py"
 SOURCE_FACT_JUDGE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_fact_judge_gate.py"
+SOURCE_SESSION_FACT_EXTRACTION_LANE = REPO_ROOT / "scripts" / "memory_os_session_fact_extraction_lane.py"
+SOURCE_SESSION_FACT_EXTRACTION_GATE = REPO_ROOT / "scripts" / "memory_os_cron_session_fact_extraction_gate.py"
 SOURCE_CLEANUP_EXPIRED_WORKING = REPO_ROOT / "scripts" / "cleanup_expired_working.py"
 SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
@@ -596,14 +598,17 @@ def install_plugin(
         "source": str(source),
         "target": str(target),
         "copied_file_count": len(copied_files),
-        "copied_files": [str(path.relative_to(target)) for path in copied_files],
+        # .as_posix() on every relative listing below: these report fields are
+        # compared across hosts (the plan_deployment() lesson from BK) and a
+        # Windows-side install must not serialize them with backslashes.
+        "copied_files": [path.relative_to(target).as_posix() for path in copied_files],
         "agent_os_shell": AGENT_OS_SHELL_PLUGIN_NAME,
         "agent_os_shell_install_requested": install_shell,
         "agent_os_shell_installed": bool(shell_files) and not dry_run,
         "agent_os_shell_source": str(shell_source),
         "agent_os_shell_target": str(shell_target),
         "agent_os_shell_file_count": len(shell_files),
-        "agent_os_shell_files": [str(path.relative_to(shell_target)) for path in shell_files],
+        "agent_os_shell_files": [path.relative_to(shell_target).as_posix() for path in shell_files],
         "agent_os_shell_enable_requested": enable_shell,
         "agent_os_shell_enabled": shell_enabled,
         "agent_os_shell_enable_action": shell_enable_action,
@@ -611,13 +616,13 @@ def install_plugin(
         "system_modules_installed": bool(system_module_files) and not dry_run,
         "system_module_target": str(system_module_target),
         "system_module_file_count": len(system_module_files),
-        "system_module_files": [str(path.relative_to(system_module_target)) for path in system_module_files],
+        "system_module_files": [path.relative_to(system_module_target).as_posix() for path in system_module_files],
         "agent_runtime_target": str(agent_runtime_target),
         "agent_runtime_file_count": len(agent_runtime_files),
-        "agent_runtime_files": [str(path.relative_to(agent_runtime_target)) for path in agent_runtime_files],
+        "agent_runtime_files": [path.relative_to(agent_runtime_target).as_posix() for path in agent_runtime_files],
         "eval_runtime_target": str(eval_runtime_target),
         "eval_runtime_file_count": len(eval_runtime_files),
-        "eval_runtime_files": [str(path.relative_to(eval_runtime_target)) for path in eval_runtime_files],
+        "eval_runtime_files": [path.relative_to(eval_runtime_target).as_posix() for path in eval_runtime_files],
         "enable_requested": enable,
         "enabled": enabled,
         "enable_command": enable_command,
@@ -1146,6 +1151,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "candidate_aggregation_gate": SOURCE_CANDIDATE_AGGREGATION_GATE,
         "fact_judge_lane": SOURCE_FACT_JUDGE_LANE,
         "fact_judge_gate": SOURCE_FACT_JUDGE_GATE,
+        "session_fact_extraction_lane": SOURCE_SESSION_FACT_EXTRACTION_LANE,
+        "session_fact_extraction_gate": SOURCE_SESSION_FACT_EXTRACTION_GATE,
         "index_sync": SOURCE_INDEX_SYNC,
         "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
         "cleanup_expired_working": SOURCE_CLEANUP_EXPIRED_WORKING,

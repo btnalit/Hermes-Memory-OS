@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -133,19 +134,32 @@ from .working import WorkingMemoryService
 
 _PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_body", "raw_transcript"}
 
+# Process-lifetime cache for _check_vector_available (backlog 11). CLI
+# invocations are short-lived processes, so this mostly guards against
+# repeated probes inside one status/doctor run.
+_vector_available_cache: bool | None = None
+
 
 def _check_vector_available() -> bool:
-    """Check whether sentence-transformers is importable (import-only, no model load).
+    """Report whether the optional vector stack is installed (spec lookup only).
 
-    Returns False when sentence-transformers is not installed.
-    Avoids loading the full ~420MB SentenceTransformer model.
+    Never imports the package: importing sentence_transformers executes torch
+    and cost a measured 17-29s per CLI status/doctor call on production
+    (backlog 11), multiplied by shell_alias_no_env's 22 concurrent CLI probes
+    (the suspected cause of backlog 3's production flake). A find_spec lookup
+    answers "installed?" from metadata without executing anything; full
+    embedder readiness remains the provider tool_status's job.
     """
-    try:
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            importlib.import_module("sentence_transformers")
-        return True
-    except ImportError:
-        return False
+    global _vector_available_cache
+    if _vector_available_cache is None:
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                _vector_available_cache = importlib.util.find_spec("sentence_transformers") is not None
+        except (ImportError, ValueError):
+            # find_spec raises instead of returning None for some broken
+            # installs (missing parent package, __spec__ unset).
+            _vector_available_cache = False
+    return _vector_available_cache
 
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
@@ -1509,6 +1523,21 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_apply.add_argument("--note", default="")
     review_apply.add_argument("--rating", default="")
     review_apply.add_argument("--apply", action="store_true")
+    recall_golden_parser = subs.add_parser("recall-golden")
+    recall_golden_subs = recall_golden_parser.add_subparsers(dest="recall_golden_command", required=True)
+    recall_golden_run = recall_golden_subs.add_parser(
+        "run",
+        help="Evaluate a recall golden set against the live prefetch pipeline; print a hit/miss/authority report as JSON.",
+    )
+    recall_golden_run.add_argument(
+        "--golden-profile", default="default",
+        help="Golden set profile name (default: default). Resolves to "
+        "<memory_os_root>/recall_golden/<profile>.golden.json unless --golden-path is given.",
+    )
+    recall_golden_run.add_argument(
+        "--golden-path", default="",
+        help="Explicit path to a *.golden.json file, overriding profile-based resolution.",
+    )
     eval_parser = subs.add_parser("eval")
     eval_subs = eval_parser.add_subparsers(dest="eval_command", required=True)
     eval_rh31 = eval_subs.add_parser("rh31")
@@ -1713,6 +1742,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _candidate_clusters_command(args, store)
     if command == "review":
         return _review_command(args, store)
+    if command == "recall-golden":
+        return _recall_golden_command(args, store)
     if command == "eval":
         return _eval_command(args)
     if command == "cognitive-loop":
@@ -2363,6 +2394,24 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
             )
             return 0
     return 2
+
+
+def _recall_golden_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    if args.recall_golden_command != "run":
+        return 2
+    from .recall_golden import golden_set_path, run_golden_set_report
+
+    golden_profile = str(getattr(args, "golden_profile", "default") or "default")
+    override_path = str(getattr(args, "golden_path", "") or "").strip()
+    path = Path(override_path) if override_path else golden_set_path(store.roots, profile=golden_profile)
+    report = run_golden_set_report(store, path, profile=golden_profile)
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    if int(report.get("query_count", 0)) == 0:
+        return 0  # nothing to evaluate (missing/empty golden set) is not a failure
+    score = report.get("score") if isinstance(report.get("score"), dict) else {}
+    all_hit = float(score.get("recall_rate", 0.0)) >= 1.0
+    no_errors = int(score.get("total_errors", 0)) == 0
+    return 0 if all_hit and no_errors else 1
 
 
 def _candidate_clusters_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

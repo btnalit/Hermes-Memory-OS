@@ -1197,3 +1197,30 @@ def _enabled_plugins_from_config_text(config_text: str) -> list[str]:
 
     config = yaml.safe_load(config_text) or {}
     return list((config.get("plugins") or {}).get("enabled") or [])
+
+
+def test_report_file_listings_are_posix_on_every_platform(tmp_path):
+    """Backlog 2: five report fields serialized nested paths with
+    str(relative_to(...)), the exact pattern BK fixed in plan_deployment() --
+    on Windows they come out backslash-separated and any cross-host
+    comparison of the listings silently mismatches.
+
+    Counterfactual (Windows-only, like BK's): without .as_posix() the nested
+    entries below contain backslashes and this fails; on POSIX hosts both
+    spellings coincide.
+    """
+    report = install_plugin(hermes_home=tmp_path / "home", install_system_modules=True)
+
+    fields = (
+        "copied_files",
+        "agent_os_shell_files",
+        "system_module_files",
+        "agent_runtime_files",
+        "eval_runtime_files",
+    )
+    for field in fields:
+        assert not any("\\" in entry for entry in report[field]), field
+    # Nested paths prove the separator was actually exercised somewhere (the
+    # shell listing may legitimately be flat or empty).
+    assert any("/" in entry for field in fields for entry in report[field])
+    assert report["system_module_files"], "system modules listing must not be empty"

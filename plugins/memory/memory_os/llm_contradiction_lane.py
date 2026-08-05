@@ -40,10 +40,10 @@ For each record, output a JSON object with:
 If a record does not contain a clear factual claim, set confidence to 0.
 
 Return ONLY a JSON object with keys "claim_a" and "claim_b":
-{
-  "claim_a": {"subject": "...", "predicate": "...", "object": "...", "confidence": 0.0},
-  "claim_b": {"subject": "...", "predicate": "...", "object": "...", "confidence": 0.0}
-}
+{{
+  "claim_a": {{"subject": "...", "predicate": "...", "object": "...", "confidence": 0.0}},
+  "claim_b": {{"subject": "...", "predicate": "...", "object": "...", "confidence": 0.0}}
+}}
 
 Record A ({kind_a}):
 {body_a}
@@ -51,6 +51,10 @@ Record A ({kind_a}):
 Record B ({kind_b}):
 {body_b}
 """
+# The JSON example above must keep its braces {{-escaped: this template goes
+# through str.format(), and a bare brace makes every run that reaches the LLM
+# loop crash with KeyError before the first call. No test exercised the loop
+# until backlog 14's empty-reply test, which is how the crash stayed latent.
 
 
 # ── Claim conflict detection ─────────────────────────────────────────────
@@ -700,6 +704,19 @@ def run_contradiction_lane(
             continue
 
         if not response or not response.strip():
+            # Backlog 14: "" is how _call_hermes_runtime_model reports most
+            # failures (see Completion Is Not Output). A bare continue makes a
+            # run where every call came back empty indistinguishable from
+            # "genuinely no contradictions", so the empty reply is recorded
+            # like the exception path above.
+            error_records.append(_build_error_record(
+                component="llm_contradiction_lane",
+                operation="hermes_runtime_call",
+                error_code="llm_empty_content",
+                severity="warning",
+                recoverable=True,
+                details={"record_a": pair["a"]["id"], "record_b": pair["b"]["id"]},
+            ))
             continue
 
         # Parse LLM response

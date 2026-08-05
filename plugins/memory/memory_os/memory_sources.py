@@ -17,6 +17,16 @@ from .source_ids import filter_safe_source_id_values
 
 
 SCHEMA_VERSION = "memory-os.memory_sources.v0"
+# Marks a record as written by a producer that populates `source_ids` for every
+# attributable section class (backlog item 16a). Records without it predate that
+# fix and CANNOT be attributed retroactively -- the disclosure already happened
+# and the IDs were never captured. exposure_monitor_stats therefore gates the
+# attribution health check on marked records only and surfaces the rest as
+# `legacy_unattributed_record_count`, mirroring how `legacy_unmarked_rollup_count`
+# handles rollup rows written before `trigger_class` existed. Without this
+# boundary, fixing the producer could never clear the FAIL: on production all 69
+# gapped rows are natural rows, so they sit inside the gated era forever.
+ATTRIBUTION_SCHEMA_VERSION = "memory-os.memory_sources_attribution.v1"
 LAST_SCHEMA_VERSION = "memory-os.memory_sources_last.v0"
 HISTORY_SCHEMA_VERSION = "memory-os.memory_sources_history.v0"
 STATS_SCHEMA_VERSION = "memory-os.memory_sources_stats.v0"
@@ -192,6 +202,7 @@ def build_memory_source_record(
     policy_ref = _policy_ref(policy)
     return {
         "schema_version": SCHEMA_VERSION,
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
         "record_id": _new_record_id(created_at),
         "created_at": created_at.isoformat().replace("+00:00", "Z"),
         "profile": roots.profile or "default",

@@ -8,16 +8,82 @@ from plugins.memory.memory_os.cli import _check_vector_available, _ensure_system
 
 
 def test_vector_availability_probe_never_contaminates_structured_stdout(monkeypatch, capsys):
-    def noisy_optional_import(_name):
-        print("optional dependency import noise")
-        raise ImportError("broken optional dependency")
+    import importlib.util as importlib_util
 
-    monkeypatch.setattr(importlib, "import_module", noisy_optional_import)
+    from plugins.memory.memory_os import cli as cli_module
+
+    def noisy_spec_lookup(_name, *args, **kwargs):
+        print("optional dependency probe noise")
+        raise ValueError("broken spec lookup")
+
+    monkeypatch.setattr(cli_module, "_vector_available_cache", None)
+    monkeypatch.setattr(importlib_util, "find_spec", noisy_spec_lookup)
 
     assert _check_vector_available() is False
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_vector_probe_never_executes_the_vector_stack(monkeypatch):
+    """Backlog 11: importing sentence_transformers executes torch and cost a
+    measured 17-29s per CLI status/doctor call, multiplied by
+    shell_alias_no_env's 22 concurrent CLI probes (backlog 3's suspected
+    production flake). The probe must answer "installed?" from spec metadata
+    without EXECUTING the package.
+
+    Counterfactual: the old importlib.import_module probe trips the exploding
+    loader below (AssertionError, uncaught by its except ImportError) -- the
+    17-29s import cost made observable; the spec lookup sees the module
+    exists and never runs it.
+    """
+    import importlib.machinery
+    import sys
+
+    from plugins.memory.memory_os import cli as cli_module
+
+    class _ExplodingLoader:
+        def create_module(self, spec):
+            raise AssertionError(f"vector probe executed {spec.name}")
+
+        def exec_module(self, module):
+            raise AssertionError(f"vector probe executed {module}")
+
+    class _ExplodingFinder:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split(".")[0] in {"sentence_transformers", "torch"}:
+                return importlib.machinery.ModuleSpec(fullname, _ExplodingLoader())
+            return None
+
+    for name in list(sys.modules):
+        if name.split(".")[0] in {"sentence_transformers", "torch"}:
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(cli_module, "_vector_available_cache", None)
+    finder = _ExplodingFinder()
+    sys.meta_path.insert(0, finder)
+    try:
+        assert cli_module._check_vector_available() is True
+    finally:
+        sys.meta_path.remove(finder)
+
+
+def test_vector_probe_result_is_cached_per_process(monkeypatch):
+    import importlib.util as importlib_util
+
+    from plugins.memory.memory_os import cli as cli_module
+
+    calls: list[str] = []
+
+    def counting_find_spec(name, *args, **kwargs):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(cli_module, "_vector_available_cache", None)
+    monkeypatch.setattr(importlib_util, "find_spec", counting_find_spec)
+
+    assert cli_module._check_vector_available() is False
+    assert cli_module._check_vector_available() is False
+    assert calls == ["sentence_transformers"]
 from plugins.memory.memory_os.__main__ import main as memory_os_module_main
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore

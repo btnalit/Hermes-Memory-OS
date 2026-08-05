@@ -365,3 +365,163 @@ class TestExposureRollupCycle:
         assert report["selected"] == 1, (
             f"Guard IDs should be excluded, got {report['selected']}"
         )
+
+
+class TestRunOutcomeContract:
+    """Backlog 14: completion is not output. The lane's no-write exits must
+    leave durable, distinguishable evidence of WHY nothing was produced."""
+
+    @staticmethod
+    def _store(tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        return store
+
+    @staticmethod
+    def _snapshot(store):
+        import json
+        path = store.roots.memory_os_root / "system" / "exposure_rollup_snapshot.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_benign_skip_and_cursor_error_leave_distinguishable_outcomes(self, tmp_path) -> None:
+        """The core backlog-14 claim: these two exits used to leave
+        byte-identical evidence (no ledger row, no snapshot change), so a
+        permanently-broken lane was indistinguishable from an idle one without
+        re-running it and reading source.
+
+        Counterfactual: without the fix neither run writes a snapshot at all
+        (KeyError/FileNotFoundError here), which IS the indistinguishability.
+        """
+        import json
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+
+        # Benign: empty upstream.
+        idle_store = self._store(tmp_path / "idle")
+        report = run_exposure_rollup_cycle(idle_store)
+        assert report["skipped"] is True
+        assert report["run_outcome"] == "no_new_records"
+        idle_snapshot = self._snapshot(idle_store)
+        assert idle_snapshot["last_run"]["outcome"] == "no_new_records"
+        # A no-output exit must not fabricate a produced-looking snapshot.
+        assert idle_snapshot["status"] == "empty"
+        assert not (idle_store.roots.memory_os_root / "system" / "exposure_rollup.jsonl").exists()
+
+        # Broken: a produced run first, then compaction removes the cursor
+        # record from memory_sources -- the realistic sequence on production.
+        from plugins.memory.memory_os.memory_sources import memory_sources_path
+
+        broken_store = self._store(tmp_path / "broken")
+        append_memory_source_record(broken_store.roots, {
+            "record_id": "msrc_first", "created_at": "2026-07-12T02:00:00Z",
+            "selected": [{"source_ids": ["crystallized:first"]}], "dropped": [],
+        })
+        report = run_exposure_rollup_cycle(broken_store)
+        assert report["run_outcome"] == "produced"
+        rollup_path = broken_store.roots.memory_os_root / "system" / "exposure_rollup.jsonl"
+
+        ms_path = memory_sources_path(broken_store.roots)
+        ms_path.write_text(json.dumps({
+            "record_id": "msrc_after_compaction", "created_at": "2026-07-12T03:00:00Z",
+            "selected": [{"source_ids": ["crystallized:survivor"]}], "dropped": [],
+        }) + "\n", encoding="utf-8")
+        report = run_exposure_rollup_cycle(broken_store)
+        assert report["status"] == "error"
+        assert report["run_outcome"] == "source_cursor_not_found"
+        broken_snapshot = self._snapshot(broken_store)
+        assert broken_snapshot["last_run"]["outcome"] == "source_cursor_not_found"
+        # status semantics pinned (review CD-R1): the snapshot's top-level
+        # status describes snapshot-CONTENT availability, not lane health.
+        # The produced run's cumulative data is still valid, so "ok" beside a
+        # failed last_run is the intended, consistent pair.
+        assert broken_snapshot["status"] == "ok"
+        # Fail-closed contract unchanged: the failed run appended nothing.
+        assert len(rollup_path.read_text().splitlines()) == 1
+
+        # The point of the whole exercise: the artifacts now differ.
+        assert idle_snapshot["last_run"]["outcome"] != broken_snapshot["last_run"]["outcome"]
+
+    def test_produced_run_records_outcome_and_volume(self, tmp_path) -> None:
+        from datetime import datetime
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+
+        store = self._store(tmp_path)
+        append_memory_source_record(store.roots, {
+            "record_id": "msrc_produce", "created_at": "2026-07-12T02:00:00Z",
+            "selected": [{"source_ids": ["crystallized:produce"]}], "dropped": [],
+        })
+        report = run_exposure_rollup_cycle(store, now=datetime.fromisoformat("2026-07-12T03:00:00+00:00"))
+        assert report["status"] == "ok"
+        assert report["run_outcome"] == "produced"
+        snapshot = self._snapshot(store)
+        assert snapshot["status"] == "ok"
+        assert snapshot["last_run"] == {
+            "at": "2026-07-12T03:00:00Z",
+            "outcome": "produced",
+            "new_records": 1,
+            "trigger_class": report["trigger_class"],
+        }
+
+    def test_ledger_write_failure_is_a_third_distinguishable_outcome(self, tmp_path, monkeypatch) -> None:
+        """Eligible input existed but the append failed: neither "produced" nor
+        "nothing to do". Counterfactual: without the fix the report carries
+        status=error but the artifacts cannot say the input was lost."""
+        from plugins.memory.memory_os import jsonl_io
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+
+        store = self._store(tmp_path)
+        append_memory_source_record(store.roots, {
+            "record_id": "msrc_failwrite", "created_at": "2026-07-12T02:00:00Z",
+            "selected": [{"source_ids": ["crystallized:failwrite"]}], "dropped": [],
+        })
+        real_append = jsonl_io.append_jsonl_locked
+
+        def _fail_rollup_append(path, record, **kwargs):
+            if path.name == "exposure_rollup.jsonl":
+                raise OSError("disk full")
+            return real_append(path, record, **kwargs)
+
+        monkeypatch.setattr(jsonl_io, "append_jsonl_locked", _fail_rollup_append)
+        report = run_exposure_rollup_cycle(store)
+        assert report["status"] == "error"
+        assert report["run_outcome"] == "write_failed"
+        snapshot = self._snapshot(store)
+        assert snapshot["last_run"]["outcome"] == "write_failed"
+        # Review CD-R1: on this path the ledger append did NOT happen, so the
+        # snapshot's latest_window_* describe a window the ledger does not
+        # contain -- its status must say "error", not "ok".
+        assert snapshot["status"] == "error"
+
+    def test_monitor_stats_surface_last_run_and_honest_legacy_marker(self, tmp_path) -> None:
+        """exposure_monitor_stats carries the outcome to the monitor; a
+        snapshot written before outcome recording reports "unrecorded", never
+        a fabricated real outcome."""
+        import json
+        from plugins.memory.memory_os.exposure_rollup import (
+            exposure_monitor_stats,
+            run_exposure_rollup_cycle,
+        )
+
+        store = self._store(tmp_path / "fresh")
+        run_exposure_rollup_cycle(store)
+        stats = exposure_monitor_stats(store)
+        assert stats["last_run_outcome"] == "no_new_records"
+        assert stats["last_run_at"] != ""
+
+        legacy_store = self._store(tmp_path / "legacy")
+        sp = legacy_store.roots.memory_os_root / "system" / "exposure_rollup_snapshot.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({
+            "schema_version": "memory-os.exposure_rollup_snapshot.v0",
+            "status": "ok",
+            "latest_window_start": "2026-07-01T00:00:00Z",
+            "latest_window_end": "2026-07-02T00:00:00Z",
+        }), encoding="utf-8")
+        stats = exposure_monitor_stats(legacy_store)
+        assert stats["last_run_outcome"] == "unrecorded"
+        assert stats["last_run_at"] == ""

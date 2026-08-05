@@ -599,9 +599,31 @@ def _build_prefetch_sections(
         ),
     )
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
-    _append_section(sections, "Working Memory", _working_lines(store, query=query))
+    # Attribution (item 16a): every section class the disclosure audit treats as
+    # attributable must record the canonical records it drew from, or the
+    # disclosure is unauditable. Until this, section_source_ids had exactly ONE
+    # assignment site (crystallized), so 12 content-bearing classes emitted
+    # chars/count with no source_ids at all. The attributable set is defined on
+    # the audit side (see ATTRIBUTABLE_SOURCE_CLASSES there); deliberately not
+    # named here, because the X.3 firewall forbids this module from referencing
+    # the exposure/audit layer at all -- prefetch ranking must never be able to
+    # read audit data. This direction (producer records IDs, audit reads them)
+    # is one-way and creates no dependency.
+    working_ids: list[str] = []
+    _append_section(
+        sections, "Working Memory", _working_lines(store, query=query, source_ids=working_ids)
+    )
+    if working_ids:
+        section_source_ids["Working Memory"] = working_ids
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
-    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
+    candidate_ids: list[str] = []
+    _append_section(
+        sections,
+        "Crystallized Review Candidates",
+        _candidate_lines(store, query=query, seen=seen, source_ids=candidate_ids),
+    )
+    if candidate_ids:
+        section_source_ids["Crystallized Review Candidates"] = candidate_ids
     cryst_lines, cryst_degradation, cryst_ids = _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records)
     if cryst_degradation >= 2:
         cryst_header = "Crystallized Memory (deterministic floor recall)"
@@ -613,13 +635,36 @@ def _build_prefetch_sections(
     if cryst_ids:
         section_source_ids[cryst_header] = cryst_ids
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
-    _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
-    _append_section(sections, "Recent Event Summaries", _event_lines(store, session_id=session_id, seen=seen))
+    indexed_ids: list[str] = []
+    _append_section(
+        sections,
+        "Indexed Recall",
+        _indexed_lines(query, index, error_records=error_records, seen=seen, source_ids=indexed_ids),
+    )
+    if indexed_ids:
+        section_source_ids["Indexed Recall"] = indexed_ids
+    event_ids: list[str] = []
+    _append_section(
+        sections,
+        "Recent Event Summaries",
+        _event_lines(store, session_id=session_id, seen=seen, source_ids=event_ids),
+    )
+    if event_ids:
+        section_source_ids["Recent Event Summaries"] = event_ids
     # Second-hop graph traversal: anchor_ids come from FTS5 results.
     # _collect_anchor_ids calls index.search() a second time (微秒级,可忽略).
     # See docstring at _collect_anchor_ids for details.
     _first_anchors = _collect_anchor_ids(query, index)
-    _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index, seen=seen))
+    graph_ids: list[str] = []
+    _append_section(
+        sections,
+        "Related Memory",
+        _graph_layer_shadow_lines(
+            store, _first_anchors, index=index, seen=seen, source_ids=graph_ids
+        ),
+    )
+    if graph_ids:
+        section_source_ids["Related Memory"] = graph_ids
 
     # ── Phase 3: Retriever Facade observation/apply lane ───────────────
     # Shadow mode must be output-neutral: retrieve() builds and persists the
@@ -660,28 +705,38 @@ def _build_prefetch_sections(
     return sections, section_source_ids
 
 
+# Module-level so the attribution contract can be validated against it: the
+# vocabulary a checker gates on must be provable against what the producer
+# actually emits. Keeping this inside the function is what allowed the audit
+# side's attributable-class list to drift onto four names with no producer at
+# all (backlog item 16b) -- the mismatch was unobservable to any test.
+SECTION_SOURCE_CLASS_BY_TITLE: dict[str, str] = {
+    "Current Foreground Task": "foreground",
+    "Recall Clarification Guard": "recall_guard",
+    "Identity Memory": "identity",
+    "Memory State Overlay": "state_overlay",
+    "Continuity Bridge": "bridge",
+    "Last Session": "last_session",
+    "Conversation Carryover": "carryover",
+    "Working Memory": "working",
+    "Relationship Memory": "relationship",
+    "Crystallized Review Candidates": "candidate",
+    "Crystallized Memory": "crystallized",
+    "Substrate Recall": "substrate_recall",
+    "Indexed Recall": "indexed",
+    "Recent Event Summaries": "event",
+    "Related Memory": "graph_layer",
+    "Diagnostic Grounding": "diagnostic",
+}
+
+# Returned for any title absent from the mapping above.
+SECTION_SOURCE_CLASS_FALLBACK = "other"
+
+
 def _section_source_class(title: str) -> str:
     # Strip degradation annotation suffix (e.g. "Crystallized Memory (deterministic floor recall)")
     base_title = title.split(" (")[0] if " (" in title else title
-    mapping = {
-        "Current Foreground Task": "foreground",
-        "Recall Clarification Guard": "recall_guard",
-        "Identity Memory": "identity",
-        "Memory State Overlay": "state_overlay",
-        "Continuity Bridge": "bridge",
-        "Last Session": "last_session",
-        "Conversation Carryover": "carryover",
-        "Working Memory": "working",
-        "Relationship Memory": "relationship",
-        "Crystallized Review Candidates": "candidate",
-        "Crystallized Memory": "crystallized",
-        "Substrate Recall": "substrate_recall",
-        "Indexed Recall": "indexed",
-        "Recent Event Summaries": "event",
-        "Related Memory": "graph_layer",
-        "Diagnostic Grounding": "diagnostic",
-    }
-    return mapping.get(base_title, "other")
+    return SECTION_SOURCE_CLASS_BY_TITLE.get(base_title, SECTION_SOURCE_CLASS_FALLBACK)
 
 
 def _section_metadata(title: str, source_ids: list[str] | None = None) -> dict[str, Any]:
@@ -731,6 +786,12 @@ def _record_substrate_shadow_recall(
         return  # fail-open: shadow loss must not break prefetch
     record = {
         "schema_version": "memory-os.substrate_recall_shadow.v0",
+        # The field name is load-bearing: metadata_retention._record_created_at
+        # reads only created_at/ts/timestamp. Without it every record parsed as
+        # "no timestamp" and was retained forever (backlog 9). Forward-only:
+        # historical rows still carry no timestamp and stay retained -- their
+        # disposition is an owner decision recorded in the backlog.
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "query_class": str(report.get("query_class") or ""),
         "query_sha256": _safe_query_hash(query),
         "selected_provider": str(report.get("selected_provider") or ""),
@@ -1180,7 +1241,24 @@ def _identity_lines(store: MemoryOSStore) -> list[str]:
     return [f"- manifest sources: {', '.join(sorted(kinds))}"]
 
 
-def _working_lines(store: MemoryOSStore, *, query: str = "") -> list[str]:
+def _working_lines(
+    store: MemoryOSStore,
+    *,
+    query: str = "",
+    source_ids: list[str] | None = None,
+) -> list[str]:
+    """Working-memory disclosure lines.
+
+    ``source_ids`` is an optional out-parameter (same idiom as ``seen`` and
+    ``error_records`` elsewhere in this module): when provided it is filled with
+    the canonical ``working:<file_stem>:<item_id>`` reference for every emitted
+    item, so the memory_sources disclosure record can name what it drew from.
+    Populating it is required for attribution health (the attributable-class set
+    lives on the audit side; not named here because the X.3 firewall forbids this
+    module from referencing that layer). The end-to-end guard is
+    test_real_prefetch_leaves_no_attribution_gap, not this signature, because an
+    optional out-param cannot force a caller to pass it.
+    """
     lines: list[str] = []
     query_features = _bounded_query_features(query)
     query_terms = {
@@ -1218,6 +1296,12 @@ def _working_lines(store: MemoryOSStore, *, query: str = "") -> list[str]:
         candidates.sort(key=lambda x: x[0].get("updated_at", ""), reverse=True)
         for item, text in candidates[:WORKING_ITEMS_PER_FILE]:
             lines.append(f"- {path.stem}/{item.get('kind', 'item')}: {text}")
+            if source_ids is not None:
+                # Canonical form already in production use at
+                # deep_reflection.py:639 and allowlisted in v3_body_packet.py.
+                item_id = str(item.get("id") or "").strip()
+                if item_id:
+                    source_ids.append(f"working:{path.stem}:{item_id}")
     return lines
 
 
@@ -1663,11 +1747,60 @@ def _crystallized_lines(
     return result, degradation_level, record_ids
 
 
-def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:
-    if not _should_include_candidates(query):
+def _candidate_lines(
+    store: MemoryOSStore,
+    *,
+    query: str,
+    seen: set[tuple[str, str]] | None = None,
+    source_ids: list[str] | None = None,
+) -> list[str]:
+    # A magic word ("candidate", "结晶", "review queue", ...) is an explicit
+    # "show me the review queue" request and always lists the queue
+    # (unchanged behavior). Absent a magic word, a candidate is still
+    # allowed to surface when it is genuinely relevant to the query — the
+    # relevance floor below.
+    #
+    # Matching machinery reused: _extract_query_tokens (query -> tokens) +
+    # _record_body_score (score one record body in isolation). Considered
+    # _tokenize_for_floor_match first since it is _record_body_score's usual
+    # partner in _crystallized_lines, but that pairing is a *soft* rank
+    # (score-0 records sink and only drop out via a cap truncation) and its
+    # tokenizer emits single-character tokens on punctuation boundaries
+    # (e.g. "what's" -> "s"), which trivially substring-matches almost any
+    # body and defeats a *hard* include/exclude gate — verified empirically:
+    # an unrelated query ("What's the weather forecast for tomorrow?")
+    # still matched via the stray "s" token. _extract_query_tokens is the
+    # other mixed-language tokenizer already in this file (used for
+    # cross-session event relevance above) and drops ASCII tokens under 3
+    # chars plus stop words, so it doesn't produce that noise. Paired with
+    # _record_body_score — which scores a single record body in isolation,
+    # exactly the candidate-record shape — this is the closest existing fit
+    # for a strict gate; no new scorer is introduced.
+    #
+    # Threshold: require >=2 distinct token hits, not >=1. _extract_query_tokens
+    # emits overlapping CJK bigrams with no stop-word filter (unlike its ASCII
+    # side), and a single shared bigram is often pure grammar noise (的/是/在-
+    # style function words such as "什么"/"我们"/"这个") rather than topical
+    # overlap — verified empirically: query "我们什么时候开会？" (meeting time)
+    # scored 1 against an unrelated candidate body about a feature-confusion
+    # report purely via the shared bigram "什么". Genuine topical overlap
+    # reliably produces >=2 hits because a real shared multi-character word
+    # contributes multiple overlapping bigrams (e.g. "日本旅行" shared between
+    # query and body scored 4). The >=2 floor also holds for the ASCII case
+    # this was built against (score 3 for "about"/"memory"/"continuity").
+    RELEVANCE_FLOOR_MIN_SCORE = 2
+    magic_word_match = _should_include_candidates(query)
+    relevance_tokens: list[str] = [] if magic_word_match else _extract_query_tokens(query)
+    if not magic_word_match and not relevance_tokens:
         return []
     lines: list[str] = []
     for candidate in read_candidate_queue(store.roots)[:5]:
+        if not magic_word_match and _record_body_score(
+            str(candidate.body or ""), relevance_tokens
+        ) < RELEVANCE_FLOOR_MIN_SCORE:
+            # Conservative relevance floor: fewer than 2 distinct token hits
+            # => no line. Never emit an unmatched candidate as filler.
+            continue
         text = _redact(_clip(candidate.body, 180))
         if _is_diagnostic_style_seed(text):
             continue
@@ -1678,6 +1811,8 @@ def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, s
             )
             if seen is not None:
                 seen.add(("crystallized_candidate", candidate.candidate_id))
+            if source_ids is not None and candidate.candidate_id:
+                source_ids.append(f"candidate:{candidate.candidate_id}")
     return lines
 
 
@@ -1693,7 +1828,13 @@ def _should_include_candidates(query: str) -> bool:
     return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
-def _event_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[str, str]] | None = None) -> list[str]:
+def _event_lines(
+    store: MemoryOSStore,
+    *,
+    session_id: str = "",
+    seen: set[tuple[str, str]] | None = None,
+    source_ids: list[str] | None = None,
+) -> list[str]:
     # When session-scoped: use pure recency sort (_select_session_events).
     # This prioritizes temporal proximity within a single session over
     # source-class diversity (foreground:2, cron:1, mailbox:1, etc. from
@@ -1712,6 +1853,8 @@ def _event_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[
         lines.append(f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}")
         if seen is not None and event.id:
             seen.add(("event", event.id))
+        if source_ids is not None and event.id:
+            source_ids.append(f"event:{event.id}")
     return lines
 
 
@@ -1751,6 +1894,7 @@ def _graph_layer_shadow_lines(
     *,
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[str]:
     """Phase 2: knob-gated graph layer edge injection with shadow audit.
 
@@ -1797,7 +1941,7 @@ def _graph_layer_shadow_lines(
         return []
 
     # ── Phase 2 injection ──────────────────────────────────────
-    return _graph_layer_injection_lines(store, edges, seen=seen)
+    return _graph_layer_injection_lines(store, edges, seen=seen, source_ids=source_ids)
 
 
 def _resolve_edge_target_preview(
@@ -1843,6 +1987,7 @@ def _graph_layer_injection_lines(
     edges: list[dict],
     *,
     seen: set[tuple[str, str]] | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[str]:
     """Format graph edges as human-readable injection lines for agent context.
 
@@ -1900,6 +2045,8 @@ def _graph_layer_injection_lines(
 
         if seen is not None and to_type and to_id:
             seen.add((to_type, to_id))
+        if source_ids is not None and to_type and to_id:
+            source_ids.append(f"{to_type}:{to_id}")
 
     return lines
 
@@ -1919,12 +2066,18 @@ def _record_graph_layer_shadow(
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         return  # fail-open: shadow loss must not break prefetch
+    _now_stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     record = {
         "schema_version": "memory-os.graph_layer_shadow.v0",
         "phase": "1",
         "anchor_count": len(anchor_ids),
         "edge_count": len(edges),
-        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        # created_at is the name metadata_retention._record_created_at ages on
+        # (backlog 9); recorded_at stays for existing readers of this ledger.
+        # Forward-only: historical recorded_at-only rows remain unaged -- an
+        # owner decision, recorded in the backlog.
+        "created_at": _now_stamp,
+        "recorded_at": _now_stamp,
         "edges": [
             {
                 "relation_type": str(edge.get("relation_type", "unknown")),
@@ -2382,6 +2535,7 @@ def _indexed_lines(
     *,
     error_records: list[dict[str, Any]] | None = None,
     seen: set[tuple[str, str]] | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[str]:
     route = plan_query_route(query, diagnostic_grounding_enabled=False)
     search_query = str(route.get("search_query", ""))
@@ -2426,6 +2580,8 @@ def _indexed_lines(
         snippet = _redact(_clip(str(hit.get("snippet", "")), 220))
         if snippet:
             lines.append(f"- {record_type}/{record_id}: {snippet}")
+            if source_ids is not None and record_type and record_id:
+                source_ids.append(f"{record_type}:{record_id}")
     if lines:
         display_query = str(route.get("display_query", ""))
         lines.insert(0, f"- query route: {route.get('route', 'slow_path')}; search: {display_query}")

@@ -1342,6 +1342,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     _classify_full_monitor_runtime_contract(runtime_contract, passed, warn)
+
+    raw_continuity_freshness = snapshot.get("continuity_freshness")
+    continuity_freshness: dict[str, Any] = (
+        raw_continuity_freshness if isinstance(raw_continuity_freshness, dict) else {}
+    )
+    if continuity_freshness:
+        # Absence is the normal healthy state (see continuity_freshness_summary()
+        # in the embedded probe script) -- both branches are PASS, never WARN/FAIL,
+        # so a quiet ledger never drags the monitor status down.
+        if continuity_freshness.get("ledger_exists"):
+            passed.append({
+                "code": "continuity_freshness_ledger_present",
+                "value": {
+                    "record_count": continuity_freshness.get("record_count"),
+                    "latest_current_task_grade": continuity_freshness.get("latest_current_task_grade"),
+                },
+            })
+        else:
+            passed.append({"code": "continuity_freshness_ledger_absent_healthy"})
+        unknown_grade_count = int(continuity_freshness.get("total_unknown_grade_count") or 0)
+        stale_task_count = int(continuity_freshness.get("total_stale_task_count") or 0)
+        if unknown_grade_count > 0 or stale_task_count > 0:
+            # INFO, not WARN: an unparseable timestamp (unknown_grade_count) or a
+            # graded-stale current task (stale_task_count) is diagnostic signal
+            # for an operator, not a monitor-health problem -- continuity.py's own
+            # contract is "grading discloses; it never filters."  Routing this
+            # through `info` (unlike `warn`) means it needs no
+            # CLEAN_HOST_WARN_CLASSIFICATIONS entry.
+            info.append({
+                "code": "continuity_freshness_findings",
+                "value": {
+                    "total_unknown_grade_count": unknown_grade_count,
+                    "total_stale_task_count": stale_task_count,
+                    "latest_current_task_grade": continuity_freshness.get("latest_current_task_grade"),
+                    "record_count": continuity_freshness.get("record_count"),
+                },
+            })
+
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
 
@@ -1372,18 +1410,148 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     migration_debt_conservation_issue = (
         all_history_conservation_ok is False and schema_era_conservation_failure_count == 0
     )
-    if v2_exposure and (migration_debt_gap_count > 0 or migration_debt_conservation_issue):
+    # Item 16a: natural rows written before the attribution-complete producer
+    # cannot be attributed retroactively, so the gate excludes them. That debt
+    # must still have a READER -- a counter that is merely returned by
+    # exposure_monitor_stats and never surfaced alerts nobody (the same defect
+    # already recorded for exposure_rollup_lag_hours). It rides the existing
+    # INFO channel: visible, never driving FAIL/WARN on its own.
+    legacy_unattributed_count = int(v2_exposure.get("legacy_unattributed_record_count") or 0)
+    attribution_era_count = int(v2_exposure.get("attribution_era_record_count") or 0)
+    # Backlog 18: legacy_unmarked_rollup_count is the rollup-side twin of
+    # legacy_unattributed_record_count (rows written before trigger_class
+    # existed). It was cited as the precedent for the attribution era boundary
+    # while itself having no reader -- right in design, invisible in practice.
+    legacy_unmarked_rollup_count = int(v2_exposure.get("legacy_unmarked_rollup_count") or 0)
+    if v2_exposure and (
+        migration_debt_gap_count > 0
+        or migration_debt_conservation_issue
+        or legacy_unattributed_count > 0
+        or legacy_unmarked_rollup_count > 0
+    ):
         # All-history migration debt (pre-schema-era data) is visible but must
         # never drive FAIL/WARN on its own (Fix 2c).
+        migration_debt_value = {
+            "migration_debt_attribution_gap_count": migration_debt_gap_count,
+            "all_history_attribution_gap_count": all_history_gap_count,
+            "schema_era_attribution_gap_count": schema_era_gap_count,
+            "conservation_total_passes": all_history_conservation_ok,
+            # Pre-attribution-era natural rows, and how much real attributed
+            # evidence exists to judge. attribution_era_record_count == 0
+            # means schema_era_health is healthy_no_sample rather than a
+            # green earned on evidence.
+            "legacy_unattributed_record_count": legacy_unattributed_count,
+            "attribution_era_record_count": attribution_era_count,
+            "legacy_unmarked_rollup_count": legacy_unmarked_rollup_count,
+        }
+        if migration_debt_conservation_issue:
+            # The cumulative_* keys are the components of
+            # conservation_total_passes; their diagnostic moment is exactly an
+            # all-history conservation break, so the breakdown is published
+            # only then (backlog 18: a component's reader is the person
+            # debugging the aggregate it feeds).
+            migration_debt_value["conservation_components"] = {
+                key: int(v2_exposure.get(key) or 0)
+                for key in (
+                    "cumulative_eligible",
+                    "cumulative_selected",
+                    "cumulative_dropped_by_budget",
+                    "cumulative_dropped_by_rank",
+                )
+            }
         info.append({
             "code": "v2_exposure_all_history_migration_debt",
+            "value": migration_debt_value,
+        })
+    # Item 17: rolling_7d_attribution_gap_count was computed, returned, and read
+    # by nothing -- the same defect as exposure_rollup_lag_hours. It gets a
+    # reader here as INFO rather than its own WARN, deliberately:
+    # schema_era_attribution_gap_count already FAILs on ANY gap in an
+    # attribution-era record with no time bound, so a rolling WARN would be a
+    # strictly weaker duplicate alert. What the rolling window adds is
+    # DIAGNOSTIC -- whether a schema-era FAIL is an active regression or
+    # historical debt inside the marked set -- so it is surfaced, not graded.
+    # The record count travels with it because a gap count of 0 over 0 records
+    # means "no recent attributed traffic", not "recent traffic was clean".
+    # Gate on collection having SUCCEEDED, not merely on the dict being present.
+    # On a collection failure v2_exposure is {"schema_era_health": "unavailable",
+    # "error_code": ...} -- truthy -- so a presence check would fire and every
+    # .get(...) or 0 would yield 0, publishing zeros that are byte-identical to a
+    # genuinely quiet window. That is exactly exposure_rollup's two-no-write-exits
+    # defect: two different states leaving indistinguishable evidence. The
+    # collection failure is already reported as its own WARN, so this entry stays
+    # silent rather than fabricating a measurement -- matching the value-guarded
+    # migration-debt entry above.
+    v2_collection_succeeded = (
+        bool(v2_exposure)
+        and not v2_exposure.get("error_code")
+        and v2_health not in {"unavailable", "unavailable_remote_projection"}
+    )
+    if v2_collection_succeeded:
+        info.append({
+            "code": "v2_exposure_attribution_recent_window",
             "value": {
-                "migration_debt_attribution_gap_count": migration_debt_gap_count,
-                "all_history_attribution_gap_count": all_history_gap_count,
+                "rolling_7d_attribution_gap_count": int(
+                    v2_exposure.get("rolling_7d_attribution_gap_count") or 0
+                ),
+                "rolling_7d_attribution_era_record_count": int(
+                    v2_exposure.get("rolling_7d_attribution_era_record_count") or 0
+                ),
+                # Backlog 18: recent natural traffic VOLUME. Not the gap
+                # denominator (the era-scoped count above is; the domains
+                # differ). natural minus era = recent rows the producer failed
+                # to stamp with attribution_schema -- the post-deploy
+                # verification signal: it should trend to zero once the
+                # attribution-complete producer is live.
+                "rolling_7d_natural_record_count": int(
+                    v2_exposure.get("rolling_7d_natural_record_count") or 0
+                ),
                 "schema_era_attribution_gap_count": schema_era_gap_count,
-                "conservation_total_passes": all_history_conservation_ok,
             },
         })
+        # Backlog 18: rollup ledger state gets its READER here, as INFO and
+        # deliberately ungraded. lag_hours grows benignly whenever the upstream
+        # is idle (backlog 15 measured exactly that state), so grading it would
+        # false-alarm on quiet weeks; "ran recently" is already graded by
+        # helper-completion freshness, and WHY a run produced nothing is the
+        # production/reason-code contract (backlog 14). snapshot_status rides
+        # along so an empty snapshot's lag of 0.0 cannot read as "fresh".
+        info.append({
+            "code": "v2_exposure_rollup_ledger_state",
+            "value": {
+                "exposure_rollup_lag_hours": float(
+                    v2_exposure.get("exposure_rollup_lag_hours") or 0.0
+                ),
+                "exposure_rollup_records_total": int(
+                    v2_exposure.get("exposure_rollup_records_total") or 0
+                ),
+                "latest_window_start": str(v2_exposure.get("latest_window_start") or ""),
+                "latest_window_end": str(v2_exposure.get("latest_window_end") or ""),
+                "snapshot_status": str(v2_exposure.get("snapshot_status") or ""),
+                # Backlog 14: the reason-code answer to "did the last run
+                # produce, and if not, why" -- readable here without re-running
+                # the lane or reading its source. "unrecorded" = snapshot
+                # predates outcome recording.
+                "last_run_outcome": str(v2_exposure.get("last_run_outcome") or "unrecorded"),
+                "last_run_at": str(v2_exposure.get("last_run_at") or ""),
+                "last_run_new_records": int(v2_exposure.get("last_run_new_records") or 0),
+            },
+        })
+        # Backlog 18 (priority entry): schema_era_classified_ratio is the
+        # number BY.1 cited as maturity evidence (0.6506 -> 0.7018) while no
+        # code read it. It gets a reader here, ungraded: the cumulative ratio
+        # mixes pre-fix and post-fix rollups so it moves slowly by
+        # construction, and no evidence-backed threshold exists. None means
+        # "no schema-era rollup rows processed yet" -- emitting a fabricated
+        # 0.0 for that state would read as catastrophic coverage, so the entry
+        # is omitted instead (same no-fabricated-zeros rule as the collection
+        # guard above).
+        classified_ratio = v2_exposure.get("schema_era_classified_ratio")
+        if isinstance(classified_ratio, (int, float)) and not isinstance(classified_ratio, bool):
+            info.append({
+                "code": "v2_exposure_classification_coverage",
+                "value": {"schema_era_classified_ratio": float(classified_ratio)},
+            })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:
         passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
 
@@ -4212,6 +4380,7 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "provisional",
     "provisional_sweep",
     "runtime",
+    "session_fact_extraction",
     "session_mirror",
     "shadow_recall",
     "sqlite",
@@ -4452,6 +4621,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
+        f"- ContinuityFreshness={_continuity_freshness_summary(snapshot.get('continuity_freshness') or {})}",
         f"- L4Guard={summarize_l4_guard(snapshot)}",
         f"- V7Governance={summarize_v7_governance(snapshot)}",
         f"- FullMonitorRuntime={_full_monitor_runtime_summary(snapshot.get('full_monitor_runtime_contract') or {})}",
@@ -4804,6 +4974,18 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
         "actual_identity_write": status.get("actual_identity_write"),
         "actual_crystallized_approval": status.get("actual_crystallized_approval"),
     }
+
+
+def _continuity_freshness_summary(section: dict[str, Any]) -> str:
+    if not section:
+        return "unavailable"
+    return (
+        f"exists={section.get('ledger_exists')} "
+        f"records={section.get('record_count')} "
+        f"latest_grade={section.get('latest_current_task_grade')} "
+        f"stale={section.get('total_stale_task_count')} "
+        f"unknown={section.get('total_unknown_grade_count')}"
+    )
 
 
 def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
@@ -5789,6 +5971,38 @@ def enrich_memory_sources_stats(stats):
         enriched.get("selected_source_class_distribution") or selected_source_classes
     )
     return enriched
+
+def continuity_freshness_summary():
+    # Report-only ledger written by continuity.py (see its module docstring).
+    # Absence is the normal healthy state: the ledger is bounded by
+    # state-transition dedup (continuity_freshness_record_is_reportable), so an
+    # all-fresh grading pass never appends a line -- an empty/missing file is
+    # not evidence of anything broken. total_unknown_grade_count is the
+    # counter that matters most: an unparseable timestamp grades UNKNOWN, never
+    # STALE, so that is how this lane would fail silently without it.
+    path = os.path.join(_hermes_home, "memory-os/system/continuity_freshness.jsonl")
+    ledger_exists = os.path.exists(path)
+    raw_records = _read_jsonl(path)
+    parse_error_count = sum(1 for r in raw_records if isinstance(r, dict) and r.get("_parse_error"))
+    records = [r for r in raw_records if isinstance(r, dict) and not r.get("_parse_error")]
+    schema_mismatch_count = sum(
+        1 for r in records if str(r.get("schema_version") or "") != "memory-os.continuity_freshness.v0"
+    )
+    graded = [r for r in records if str(r.get("schema_version") or "") == "memory-os.continuity_freshness.v0"]
+    latest = graded[-1] if graded else {}
+    return {
+        "schema_version": "memory-os.continuity_freshness_monitor.v0",
+        "ledger_exists": ledger_exists,
+        "record_count": len(graded),
+        "parse_error_count": parse_error_count,
+        "schema_mismatch_count": schema_mismatch_count,
+        "latest_created_at": str(latest.get("created_at") or ""),
+        "latest_current_task_grade": str(latest.get("current_task_grade") or ""),
+        "latest_current_task_present": bool(latest.get("current_task_present")) if latest else None,
+        "total_stale_task_count": sum(int(r.get("stale_task_count") or 0) for r in graded),
+        "total_unknown_grade_count": sum(int(r.get("unknown_grade_count") or 0) for r in graded),
+        "raw_body_included": False,
+    }
 
 def rh26_probe():
     code = r"""
@@ -8465,6 +8679,7 @@ print(json.dumps({
   "hook_markers": hook_marker_counts(),
   "session_activity": session_activity_stats(),
   "compaction": compaction_stats(),
+  "continuity_freshness": continuity_freshness_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))

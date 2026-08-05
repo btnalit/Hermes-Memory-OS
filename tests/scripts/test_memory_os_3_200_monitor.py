@@ -1,4 +1,6 @@
+import concurrent.futures
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -155,6 +157,240 @@ def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, mo
     assert critical_result["code"] == 124
     assert "command_timeout_seconds=60" in critical_result["out"]
     assert observed_timeouts == [1, 60]
+
+
+def _exec_embedded_probe_prefix(hermes_home: str = "/unused") -> dict[str, Any]:
+    """Exec the verbatim embedded-script source that defines run()/
+    load_json_cmd()/_command_timeout_seconds()/shell_alias_no_env().
+
+    Mirrors test_embedded_remote_command_timeout_is_bounded_and_fail_closed's
+    convention immediately above: slice a clean prefix out of the real
+    _remote_probe_script() output and exec it, rather than retyping any of
+    that logic. shell_alias_no_env is generated source executed inside that
+    embedded script (see the giant r'''...''' literal spanning most of this
+    file) -- it is not a scripts.memory_os_3_200_monitor module attribute, so
+    it cannot be imported directly. The split point
+    (`def owner_review_rendered_digest_summary`) is the first top-level def
+    after shell_alias_no_env, so the prefix carries every name
+    shell_alias_no_env/load_json_cmd/run reference at call time.
+
+    Deliberately not the same helper as `_exec_remote_probe_prefix()` (used
+    below by the cron-fallback tests): that one splits *before*
+    `shell_alias_no_env` and hardcodes a nonexistent hermes_home, since its
+    callers only need the cron-registry helpers and never read real files.
+    This helper needs both shell_alias_no_env itself and a real, caller-chosen
+    hermes_home (continuity_freshness_summary() reads an actual ledger path
+    under it).
+    """
+    script = monitor._remote_probe_script(hermes_home)
+    prefix = script.split("def owner_review_rendered_digest_summary", 1)[0]
+    namespace: dict[str, Any] = {}
+    exec(prefix, namespace)
+    return namespace
+
+
+_SHELL_ALIAS_PROBE_NAMES = (
+    "status", "doctor", "memory_sources", "metadata_retention", "low_clue_recall",
+    "modules", "eval", "review", "review_aging", "review_channel",
+    "review_cron_status", "review_delivery_status", "review_delivery_gate",
+    "review_followups", "review_digest", "review_render", "review_reply",
+    "host_probe", "signal_sources", "memory_projection", "left_brain",
+    "review_surface",
+)
+
+
+def test_shell_alias_no_env_concurrent_probes_attribute_correctly_when_hermes_absent(monkeypatch, tmp_path):
+    """Regression coverage for the production flake behind `shell_alias_no_env_failed`.
+
+    shell_alias_no_env() fires ~22 CLI probe commands concurrently via a
+    ThreadPoolExecutor against the same HERMES_HOME files/SQLite state. A Full
+    Monitor run on production reported shell_alias_no_env_failed once; an
+    immediate identical re-run did not reproduce it, and manually re-running
+    every probe command individually returned rc=0 -- consistent with
+    transient contention under host load, not a deterministic defect. There
+    was no concurrency unit coverage for this path at all.
+
+    `hermes` itself cannot be exercised here: it is the separate Hermes host
+    binary -- not a pip package, not on PATH, no console-script entry point in
+    this repo (confirmed empirically: shutil.which("hermes") is None in this
+    sandbox, and even placing a same-named hermes.bat on PATH is not resolved
+    by subprocess.check_output(["hermes", ...]) without shell=True on Windows,
+    since Win32 CreateProcess only auto-appends .exe -- not the full PATHEXT
+    list -- when given an extension-less command). That matches this
+    project's "cannot be tested without network/SSH" carve-out: hermes is an
+    external dependency unavailable in any sandbox for this repo, so this
+    test exercises the largest genuinely reachable part instead.
+
+    With `hermes` deterministically absent from PATH, every one of
+    shell_alias_no_env()'s ~22 probes takes run()'s real `except OSError`
+    branch concurrently -- still a real, load-bearing assertion. It pins that
+    every name in the `commands` dict has a matching `results["<name>"]`
+    unpacking line (a live KeyError risk if the two ever drift, e.g. a
+    renamed alias -- this test raises loudly if that ever happens, since
+    shell_alias_no_env() itself would throw) and that every future's result
+    attributes back to its own name with no cross-talk between threads.
+    """
+    empty_path_dir = tmp_path / "empty_path"
+    empty_path_dir.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path_dir))
+    monkeypatch.delenv("MEMORY_OS_MONITOR_COMMAND_WORKERS", raising=False)
+    monkeypatch.delenv("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", raising=False)
+
+    namespace = _exec_embedded_probe_prefix()
+    result = namespace["shell_alias_no_env"]()
+
+    assert len(_SHELL_ALIAS_PROBE_NAMES) == 22
+    errors = []
+    for name in _SHELL_ALIAS_PROBE_NAMES:
+        assert result.get(f"{name}_ok") is False, name
+        error = result.get(f"{name}_error")
+        assert error, (name, error)
+        errors.append(error)
+    # Every probe hit the identical missing-binary condition; a thread/keying
+    # mixup in the futures-gathering loop would be visible here as a result
+    # attributed to the wrong probe name (e.g. one slot silently empty/None
+    # while another duplicates), not as a different error message.
+    assert len(errors) == 22
+    assert len(set(errors)) == 1
+
+
+def _module_cli_probe_commands() -> dict[str, list[str]]:
+    """Module-CLI equivalents of shell_alias_no_env()'s probe commands.
+
+    `hermes memory-os-agent-os <cmd>` delegates, with zero further subprocess
+    indirection, straight into `plugins.memory.memory_os.cli.memory_os_command`
+    (see plugins/memory-os-agent-os/__init__.py::_delegate_to_memory_os_cli) --
+    exactly what `python -m plugins.memory.memory_os <cmd>` (the module
+    entrypoint at plugins/memory/memory_os/__main__.py) invokes directly, with
+    no `hermes` binary required. This is the largest genuinely reachable
+    substitute for exercising real concurrent CLI access to a shared
+    HERMES_HOME/SQLite-index, since `hermes` itself is unavailable here (see
+    the docstring above).
+
+    `status`/`doctor` are excluded: measured empirically at 17-29s each on
+    this box (cli.py::_check_vector_available() eagerly imports
+    sentence_transformers/torch, unrelated to this concurrency question) --
+    reported separately as a latency finding, not fixed here (fix location is
+    outside this file's whitelist). `host-probe` and `review channel` are
+    excluded because the shell special-cases them before they ever reach
+    memory_os_command. `review reply ... approve oa_deadbeef` is excluded
+    because it is a write-attempt, not a read probe.
+    """
+    return {
+        "memory_sources": ["memory-sources", "stats", "--hours", "24"],
+        "metadata_retention": ["metadata-retention"],
+        "low_clue": ["low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"],
+        "modules": ["modules", "status"],
+        "eval_report": ["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"],
+        "review": ["review", "status"],
+        "review_aging": ["review", "aging-report"],
+        "review_cron_status": ["review", "cron-status"],
+        "review_delivery_status": ["review", "delivery-status"],
+        "review_delivery_gate": ["review", "delivery-gate"],
+        "review_followups": ["review", "proposal-followups"],
+        "review_digest": ["review", "preview-digest"],
+        "review_render": ["review", "render-digest"],
+        "signal_sources": ["signal-sources", "--json"],
+        "memory_projection": ["projection", "status"],
+        "left_brain": ["left-brain", "status"],
+        "review_surface": [
+            "review", "surface", "--operation", "next_page", "--section", "action_required", "--limit", "1",
+        ],
+    }
+
+
+def _run_module_cli_fleet(
+    commands: dict[str, list[str]],
+    namespace: dict[str, Any],
+    *,
+    hermes_home: Path,
+    workers: int,
+) -> dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(hermes_home)
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    load_json_cmd = namespace["load_json_cmd"]
+    argvs = {
+        name: [sys.executable, "-m", "plugins.memory.memory_os"] + args
+        for name, args in commands.items()
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {name: executor.submit(load_json_cmd, argv, env) for name, argv in argvs.items()}
+        return {name: future.result() for name, future in futures.items()}
+
+
+def test_concurrent_module_cli_probes_match_sequential_baseline_no_corruption(tmp_path):
+    """Concurrency-safety coverage for shell_alias_no_env()'s ThreadPoolExecutor
+    pattern, using the largest genuinely reachable substitute for the
+    unavailable `hermes` binary (see _module_cli_probe_commands()'s docstring
+    and the sibling hermes-absent test above).
+
+    Fires the same worker-count contract (`MEMORY_OS_MONITOR_COMMAND_WORKERS`,
+    default 4) at 17 real, read-only Memory-OS CLI probes against one shared
+    temporary HERMES_HOME, using the verbatim `run`/`load_json_cmd` extracted
+    from the embedded script -- not a reimplementation. If concurrent
+    subprocess access to the same on-disk store ever produced a false
+    failure (lock contention, truncated/interleaved output, a wrong-name
+    attribution), the concurrent run's result would differ from a sequential
+    (workers=1) baseline run against the identical store. It does not: every
+    probe's schema_version survives concurrency unchanged, and none of them
+    (except signal-sources) carry load_json_cmd's `_error` shape.
+
+    signal-sources exits rc=1 by design on a fresh store (unmet source
+    requirements) even though its stdout is well-formed JSON -- `run()` uses
+    `subprocess.check_output`, which raises CalledProcessError on ANY non-zero
+    exit regardless of stdout content, so `load_json_cmd` deliberately turns
+    it into the `{"_error": <stdout>, "_code": 1}` shape (this is what
+    shell_alias_no_env's own `signal_sources_ok`/`signal_sources_error` keys
+    already rely on -- not a defect this test introduces). The concurrency
+    assertion for that probe is still meaningful: its `_error` text (the full
+    JSON body) must be byte-identical between the sequential and concurrent
+    runs, proving concurrent access didn't truncate/interleave/corrupt it.
+
+    This is not a race: the futures pattern (`{name: executor.submit(...)}`
+    then `{name: future.result() for ...}`) has no shared mutable state
+    between threads beyond each thread's own independent subprocess call, so
+    there is nothing here for the GIL or thread scheduling to corrupt. What
+    the real production flake needed was concurrency-safety *evidence*, which
+    this test now provides.
+    """
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    MemoryOSStore(roots).initialize()
+
+    namespace = _exec_embedded_probe_prefix()
+    commands = _module_cli_probe_commands()
+
+    sequential = _run_module_cli_fleet(commands, namespace, hermes_home=tmp_path, workers=1)
+    concurrent_result = _run_module_cli_fleet(commands, namespace, hermes_home=tmp_path, workers=4)
+
+    assert set(sequential) == set(commands)
+    assert set(concurrent_result) == set(commands)
+
+    for name in commands:
+        seq = sequential[name]
+        con = concurrent_result[name]
+        assert isinstance(seq, dict), (name, seq)
+        assert isinstance(con, dict), (name, con)
+        if name == "signal_sources":
+            # Deliberately-nonzero exit (see docstring): assert its known
+            # _error shape survives concurrency byte-for-byte, rather than
+            # asserting a schema_version it will never carry.
+            assert seq.get("_code") == 1, seq
+            assert con.get("_code") == 1, con
+            assert isinstance(seq.get("_error"), str) and "memory-os.signal_source_requirement_report.v0" in seq["_error"]
+            assert con.get("_error") == seq.get("_error"), name
+            continue
+        assert "_error" not in seq, (name, seq)
+        assert "_error" not in con, (name, con)
+        # Attribution under concurrency: the result for `name` must carry
+        # `name`'s own schema, matching the sequential baseline for the same
+        # command -- a futures-keying mixup would show up here as a
+        # concurrent schema_version belonging to a *different* probe.
+        assert con.get("schema_version") == seq.get("schema_version"), name
 
 
 def test_embedded_shell_alias_commands_use_bounded_parallel_collection(tmp_path):
@@ -519,6 +755,135 @@ def test_clean_host_living_memory_ledger_collection_failure_stays_classified_war
         and item["production_behavior"] == "fail_if_production"
         for item in classification["clean_host_warn_classification"]
     )
+
+
+def test_classify_snapshot_continuity_freshness_absent_ledger_is_healthy_pass():
+    """Absence of the continuity_freshness ledger is the NORMAL healthy state
+    (see continuity_freshness_record_is_reportable() in continuity.py: an
+    all-fresh grading pass is deliberately never appended, so the ledger
+    staying empty/missing is not evidence anything is unhealthy). This must
+    classify PASS, never WARN/FAIL -- and it must never require a
+    CLEAN_HOST_WARN_CLASSIFICATIONS entry, since it is not a WARN at all."""
+    snapshot = _healthy_snapshot()
+    snapshot["continuity_freshness"] = {
+        "schema_version": "memory-os.continuity_freshness_monitor.v0",
+        "ledger_exists": False,
+        "record_count": 0,
+        "parse_error_count": 0,
+        "schema_mismatch_count": 0,
+        "latest_created_at": "",
+        "latest_current_task_grade": "",
+        "latest_current_task_present": None,
+        "total_stale_task_count": 0,
+        "total_unknown_grade_count": 0,
+        "raw_body_included": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "continuity_freshness_ledger_absent_healthy" for item in classification["pass"])
+    assert not any("continuity_freshness" in item.get("code", "") for item in classification["warn"])
+    assert not any("continuity_freshness" in item.get("code", "") for item in classification["fail"])
+    assert not any("continuity_freshness" in item.get("code", "") for item in classification["info"])
+
+
+def test_classify_snapshot_continuity_freshness_unknown_grade_count_surfaces_as_info():
+    """Counterfactual: a nonzero unknown_grade_count is how the continuity
+    freshness lane fails silently (an unparseable timestamp grades UNKNOWN,
+    never STALE -- see continuity.py's ContinuityObject.age_seconds()). It
+    must be visible in the monitor's classification output. Before the fix,
+    the monitor never read snapshot["continuity_freshness"] at all, so this
+    assertion fails with an empty info list; after the fix, the count is
+    carried through verbatim."""
+    snapshot = _healthy_snapshot()
+    snapshot["continuity_freshness"] = {
+        "schema_version": "memory-os.continuity_freshness_monitor.v0",
+        "ledger_exists": True,
+        "record_count": 4,
+        "parse_error_count": 0,
+        "schema_mismatch_count": 0,
+        "latest_created_at": "2026-08-04T00:00:00Z",
+        "latest_current_task_grade": "unknown",
+        "latest_current_task_present": True,
+        "total_stale_task_count": 1,
+        "total_unknown_grade_count": 3,
+        "raw_body_included": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    findings = [item for item in classification["info"] if item["code"] == "continuity_freshness_findings"]
+    assert findings, classification["info"]
+    assert findings[0]["value"]["total_unknown_grade_count"] == 3
+    assert findings[0]["value"]["total_stale_task_count"] == 1
+    # PASS still records the ledger is present -- INFO is additive, not a
+    # replacement for the presence fact.
+    assert any(item["code"] == "continuity_freshness_ledger_present" for item in classification["pass"])
+    # Never a WARN/FAIL: continuity.py's contract is "grading discloses; it
+    # never filters" -- disclosure is not, by itself, a monitor-health defect,
+    # and this code path must never require a CLEAN_HOST_WARN_CLASSIFICATIONS
+    # registration.
+    assert not any("continuity_freshness" in item.get("code", "") for item in classification["warn"])
+    assert not any("continuity_freshness" in item.get("code", "") for item in classification["fail"])
+
+
+def test_continuity_freshness_summary_reads_real_ledger_and_counts_correctly(tmp_path):
+    """Exercises the real embedded-script collector (continuity_freshness_summary(),
+    added alongside the classify_snapshot wiring tested above) against an
+    actual continuity_freshness.jsonl ledger -- not a hand-built snapshot dict
+    -- so the parse_error/schema_mismatch/latest-record logic is verified
+    against real file I/O rather than a fixture that would pass vacuously."""
+    ledger_dir = tmp_path / "memory-os" / "system"
+    ledger_dir.mkdir(parents=True)
+    ledger_path = ledger_dir / "continuity_freshness.jsonl"
+    records = [
+        {
+            "schema_version": "memory-os.continuity_freshness.v0",
+            "created_at": "2026-08-04T00:00:00Z",
+            "current_task_grade": "aging",
+            "current_task_present": True,
+            "stale_task_count": 0,
+            "unknown_grade_count": 1,
+        },
+        {
+            "schema_version": "memory-os.continuity_freshness.v0",
+            "created_at": "2026-08-04T01:00:00Z",
+            "current_task_grade": "stale",
+            "current_task_present": True,
+            "stale_task_count": 1,
+            "unknown_grade_count": 2,
+        },
+        {"schema_version": "memory-os.some_other_ledger.v3", "irrelevant": True},
+    ]
+    lines = [json.dumps(record) for record in records]
+    lines.append("{not valid json")
+    ledger_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["continuity_freshness_summary"]()
+
+    assert summary["ledger_exists"] is True
+    assert summary["record_count"] == 2  # the schema-mismatched record is excluded
+    assert summary["schema_mismatch_count"] == 1
+    assert summary["parse_error_count"] == 1
+    assert summary["latest_current_task_grade"] == "stale"  # last graded record wins
+    assert summary["total_unknown_grade_count"] == 3  # 1 + 2
+    assert summary["total_stale_task_count"] == 1
+    assert summary["raw_body_included"] is False
+
+
+def test_continuity_freshness_summary_missing_ledger_is_absent_not_error(tmp_path):
+    """Absent ledger file (the normal healthy state per continuity.py's
+    state-transition dedup) must report ledger_exists=False with zero counts,
+    never raise, and never look like an unparseable/corrupt ledger."""
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["continuity_freshness_summary"]()
+
+    assert summary["ledger_exists"] is False
+    assert summary["record_count"] == 0
+    assert summary["parse_error_count"] == 0
+    assert summary["total_unknown_grade_count"] == 0
+    assert summary["total_stale_task_count"] == 0
 
 
 def test_production_living_memory_stale_open_evaluation_unavailable_escalates_to_fail():
@@ -7262,3 +7627,367 @@ def test_execution_gate_helper_completion_warn_codes_are_clean_host_classified()
         assert code in table, f"{code} would fail the clean-host monitor as unclassified"
         # Registering must not escalate today's production WARNs into FAILs.
         assert table[code]["production_behavior"] == "warn_if_production"
+def test_v2_exposure_surfaces_pre_attribution_era_debt_and_evidence_volume():
+    """Item 16a: the era boundary excludes pre-fix natural rows from the gate,
+    so the excluded volume must have a READER. A counter that exposure_monitor_stats
+    merely returns alerts nobody -- the defect already on record for
+    exposure_rollup_lag_hours.
+
+    Counterfactual: without the monitor change this INFO entry omits both keys
+    (KeyError), and with legacy debt as the only signal the entry is not emitted
+    at all.
+    """
+    # Legacy debt is the ONLY signal: no migration gap, no conservation issue.
+    # Pre-change this emitted no INFO entry, so 170 excluded production rows
+    # would have been invisible.
+    debt_only = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "healthy_no_sample",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "legacy_unattributed_record_count": 170,
+            "attribution_era_record_count": 0,
+        },
+    })
+    entry = next(
+        item for item in debt_only["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["legacy_unattributed_record_count"] == 170
+    assert entry["value"]["attribution_era_record_count"] == 0
+
+    # healthy_no_sample must remain a PASS-class value (monitor already accepts
+    # it), so the era boundary does not turn into a spurious exposure FAIL on
+    # deploy day. Asserted per-code rather than on overall status: this minimal
+    # snapshot omits every unrelated check, so the aggregate status is FAIL for
+    # reasons that have nothing to do with attribution (same reason the
+    # conservation test above only inspects codes).
+    assert not any(
+        item["code"] == "v2_exposure_schema_era_unhealthy" for item in debt_only["fail"]
+    )
+    assert any(
+        item["code"] == "v2_exposure_schema_era_healthy"
+        and item["value"] == "healthy_no_sample"
+        for item in debt_only["pass"]
+    )
+
+    # And once real attributed traffic exists with a genuine gap, it still FAILs.
+    with_real_gap = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "FAIL",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 5,
+            "schema_era_attribution_gap_count": 5,
+            "legacy_unattributed_record_count": 170,
+            "attribution_era_record_count": 40,
+        },
+    })
+    assert with_real_gap["status"] == "FAIL"
+    assert any(
+        item["code"] == "v2_exposure_schema_era_unhealthy" for item in with_real_gap["fail"]
+    )
+def test_rolling_attribution_window_is_surfaced_as_info_not_a_duplicate_alert():
+    """Item 17: the rolling window gets a READER, deliberately as INFO.
+
+    It is not graded because schema_era_attribution_gap_count already FAILs on
+    any gap in an attribution-era record with no time bound -- a rolling WARN
+    would be a strictly weaker duplicate. What it adds is the active-vs-historical
+    distinction, which is diagnostic.
+
+    Counterfactual: without the monitor change this INFO entry does not exist
+    (StopIteration), which is the state the backlog item described.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "FAIL",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 4,
+            "schema_era_attribution_gap_count": 4,
+            "rolling_7d_attribution_gap_count": 3,
+            "rolling_7d_attribution_era_record_count": 12,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_attribution_gap_count"] == 3
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 12
+    assert entry["value"]["schema_era_attribution_gap_count"] == 4
+
+    # Deliberately NOT its own warn/fail code -- the gate above already covers it.
+    for bucket in ("warn", "fail"):
+        assert not any(
+            item["code"] == "v2_exposure_attribution_recent_window"
+            for item in snapshot[bucket]
+        ), f"rolling window must not duplicate the schema-era gate in {bucket}"
+
+    # A clean window still reports, so a reader can tell "clean" from "no data".
+    clean = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 40,
+        },
+    })
+    clean_entry = next(
+        item for item in clean["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert clean_entry["value"]["rolling_7d_attribution_era_record_count"] == 40
+def test_attribution_recent_window_stays_silent_when_collection_failed():
+    """A failed collection must not be published as a measurement of zero.
+
+    On collection failure v2_exposure_monitor is
+    {"schema_era_health": "unavailable", "error_code": ...} -- truthy -- so a
+    presence-based guard fires and every .get(...) or 0 yields 0, producing an
+    INFO entry byte-identical to a genuinely quiet window. Same defect shape as
+    exposure_rollup's two no-write exits leaving indistinguishable evidence.
+
+    Counterfactual: guarding on `if v2_exposure:` instead of on collection
+    success makes this fail -- verified, the entry appears with all-zero values.
+    """
+    failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {"schema_era_health": "unavailable", "error_code": "ImportError"},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_attribution_recent_window" for item in failed["info"]
+    ), "zeros from a failed collection must never be published as a measurement"
+    # The failure itself must still be reported -- silence here is not silence overall.
+    assert any(
+        item["code"] == "v2_exposure_monitor_collection_failed" for item in failed["warn"]
+    )
+    # Backlog 18: the ledger-state and classification-coverage entries obey the
+    # same rule -- a failed collection publishes no fabricated measurements.
+    for code in ("v2_exposure_rollup_ledger_state", "v2_exposure_classification_coverage"):
+        assert not any(item["code"] == code for item in failed["info"]), code
+
+    # Remote-projection failure uses a different sentinel; same rule applies.
+    remote_failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {"schema_era_health": "unavailable_remote_projection"},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_attribution_recent_window"
+        for item in remote_failed["info"]
+    )
+
+    # And a successful collection with genuinely zero recent traffic DOES report,
+    # so "silent" and "measured zero" stay distinguishable.
+    quiet = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "healthy_no_sample",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 0,
+        },
+    })
+    entry = next(
+        item for item in quiet["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 0
+
+
+def test_migration_debt_surfaces_rollup_side_debt_and_conservation_components():
+    """Backlog 18: legacy_unmarked_rollup_count was cited as the precedent for
+    the attribution era boundary while itself having no reader. It joins the
+    migration-debt INFO entry, including as the entry's sole trigger; and the
+    cumulative_* components of conservation_total_passes are published exactly
+    when their aggregate breaks, which is the only moment a reader needs them.
+
+    Counterfactual: without the monitor change, the rollup-debt-only snapshot
+    emits no migration-debt entry at all (the trigger never looked at rollup
+    rows), and the conservation breakdown does not exist anywhere.
+    """
+    rollup_debt_only = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "legacy_unattributed_record_count": 0,
+            "attribution_era_record_count": 12,
+            "legacy_unmarked_rollup_count": 7,
+        },
+    })
+    entry = next(
+        item for item in rollup_debt_only["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["legacy_unmarked_rollup_count"] == 7
+    # Conservation is fine here, so the component breakdown must NOT pad the
+    # entry -- components appear at their diagnostic moment, not always.
+    assert "conservation_components" not in entry["value"]
+
+    # All-history conservation break (schema era clean): the breakdown appears.
+    conservation_break = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": False,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "cumulative_eligible": 100,
+            "cumulative_selected": 60,
+            "cumulative_dropped_by_budget": 30,
+            "cumulative_dropped_by_rank": 9,
+        },
+    })
+    entry = next(
+        item for item in conservation_break["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["conservation_components"] == {
+        "cumulative_eligible": 100,
+        "cumulative_selected": 60,
+        "cumulative_dropped_by_budget": 30,
+        "cumulative_dropped_by_rank": 9,
+    }
+
+
+def test_rollup_ledger_state_is_surfaced_as_info_and_never_graded():
+    """Backlog 18: exposure_rollup_lag_hours had no reader since its birth (the
+    CLAUDE.md example of a computed-and-ignored metric). It gets one as INFO,
+    with the window bounds and snapshot_status riding along so an empty
+    snapshot's lag of 0.0 cannot read as "fresh".
+
+    Deliberately ungraded: an idle upstream inflates lag benignly (backlog 15
+    measured exactly that), so a lag threshold would false-alarm on quiet weeks.
+
+    Counterfactual: without the monitor change this entry does not exist
+    (StopIteration) -- the metric goes back to alerting nobody.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "exposure_rollup_lag_hours": 68.0,
+            "exposure_rollup_records_total": 988,
+            "latest_window_start": "2026-08-01T00:00:00Z",
+            "latest_window_end": "2026-08-02T00:00:00Z",
+            "snapshot_status": "ok",
+            "last_run_outcome": "no_new_records",
+            "last_run_at": "2026-08-03T00:05:00Z",
+            "last_run_new_records": 0,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_rollup_ledger_state"
+    )
+    assert entry["value"] == {
+        "exposure_rollup_lag_hours": 68.0,
+        "exposure_rollup_records_total": 988,
+        "latest_window_start": "2026-08-01T00:00:00Z",
+        "latest_window_end": "2026-08-02T00:00:00Z",
+        "snapshot_status": "ok",
+        # Backlog 14: a 68h lag plus outcome no_new_records reads as "idle
+        # upstream", not "broken lane" -- the disambiguation the lag metric
+        # alone could never provide.
+        "last_run_outcome": "no_new_records",
+        "last_run_at": "2026-08-03T00:05:00Z",
+        "last_run_new_records": 0,
+    }
+    for bucket in ("warn", "fail"):
+        assert not any(
+            item["code"] == "v2_exposure_rollup_ledger_state"
+            for item in snapshot[bucket]
+        ), f"ledger state is diagnostic context and must never alert via {bucket}"
+
+
+def test_classification_coverage_gets_a_reader_and_never_fabricates_a_zero():
+    """Backlog 18, priority entry: schema_era_classified_ratio is the number
+    BY.1 cited as maturity evidence (0.6506 -> 0.7018) while no code read it --
+    a number can be load-bearing in argument while feeding no decision. It gets
+    a reader as INFO.
+
+    None means "no schema-era rollup rows processed yet"; coercing it to 0.0
+    would publish catastrophic-looking coverage for a no-sample state, so the
+    entry is omitted instead (the no-fabricated-zeros rule).
+
+    Counterfactual: without the monitor change the ratio has no reader
+    (StopIteration on the first block); with a naive `or 0` guard the None
+    snapshot emits a 0.0 entry (second block fails).
+    """
+    base = {
+        "schema_era_health": "PASS",
+        "conservation_total_passes": True,
+        "schema_era_conservation_failure_count": 0,
+        "all_history_attribution_gap_count": 0,
+        "schema_era_attribution_gap_count": 0,
+    }
+    with_ratio = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {**base, "schema_era_classified_ratio": 0.7018},
+    })
+    entry = next(
+        item for item in with_ratio["info"]
+        if item["code"] == "v2_exposure_classification_coverage"
+    )
+    assert entry["value"] == {"schema_era_classified_ratio": 0.7018}
+
+    no_sample = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {**base, "schema_era_classified_ratio": None},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_classification_coverage"
+        for item in no_sample["info"]
+    ), "a no-sample ratio must be omitted, not published as 0.0"
+
+
+def test_recent_window_carries_natural_traffic_volume_alongside_era_denominator():
+    """Backlog 18: rolling_7d_natural_record_count joins the recent-window
+    entry as traffic VOLUME. It is natural-domain while the gap count is
+    era-domain -- pairing them as gap/denominator computes a wrong ratio, which
+    is why the era-scoped denominator stays present. The natural-minus-era
+    difference is the post-deploy verification signal: recent rows the producer
+    failed to stamp with attribution_schema.
+
+    Counterfactual: without the monitor change the volume key is absent
+    (KeyError) and a reader cannot see recent unstamped traffic at all.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 3,
+            "rolling_7d_natural_record_count": 5,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_natural_record_count"] == 5
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 3

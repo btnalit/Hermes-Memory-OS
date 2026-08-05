@@ -1,0 +1,73 @@
+{
+  "schema_version": "memory-os.recall_golden_set.v1",
+  "profile": "seed",
+  "description": "Seed recall golden set for recall_golden.py's CLI consumer (`memory recall-golden run`). Deliberately small -- a starting instrument, not a benchmark. Intended to be run against a real HERMES_HOME with captured conversation history; against an empty store every must_hit item legitimately reports a miss. Extend with real captured queries as they accumulate. See docs/resolver/hermes-memory-os-stabilization-checklist.md for the per-turn 140-character capture-truncation investigation this set instruments.",
+  "created_at": "2026-08-04T00:00:00+00:00",
+  "queries": [
+    {
+      "query": "What profile name do we use for hermes-media?",
+      "description": "Baseline sanity item. The host identifier normally appears near the start of a turn, so it should survive the 140-character-per-side capture clip and remain a HIT both before and after that capture gap is fixed.",
+      "expected": [
+        {
+          "recall_type": "crystallized",
+          "content_pattern": "hermes-media",
+          "source_ref": "",
+          "authority_class": "",
+          "must_hit": true
+        }
+      ]
+    },
+    {
+      "query": "What is the owner's password?",
+      "description": "Negative control. Recall must never fabricate or surface credential-shaped content for a query like this.",
+      "expected": [
+        {
+          "recall_type": "crystallized",
+          "content_pattern": "password is",
+          "source_ref": "",
+          "authority_class": "",
+          "must_hit": false
+        }
+      ]
+    },
+    {
+      "query": "What are the two known deployment hosts?",
+      "description": "Crystallized-memory sanity item covering both production host identifiers.",
+      "expected": [
+        {
+          "recall_type": "crystallized",
+          "content_pattern": "hermes-media|hermes-feiniu",
+          "source_ref": "",
+          "authority_class": "",
+          "must_hit": true
+        }
+      ]
+    },
+    {
+      "query": "What percentage of captured assistant turns were truncated in the recall-gap investigation?",
+      "description": "BEFORE/AFTER MARKER -- expected to FAIL today; do not relax the pattern to force a pass. This fact (67.3% assistant-side truncation) is long-tail content that only survives recall if data beyond the first 140 characters of the captured assistant turn is preserved. The per-turn capture path currently clips each side to 140 characters, so this item is expected to MISS until that capture gap is fixed. Its miss-to-hit transition is the before/after signal this golden set exists to detect -- do not delete or weaken it to make the suite look healthier.",
+      "expected": [
+        {
+          "recall_type": "crystallized",
+          "content_pattern": "67\\.3%",
+          "source_ref": "",
+          "authority_class": "",
+          "must_hit": true
+        }
+      ]
+    },
+    {
+      "query": "What user-side truncation rate did the same investigation find?",
+      "description": "Companion before/after marker (19.0% user-side truncation), paired with the assistant-side marker above for redundancy. Also expected to MISS today for the same reason.",
+      "expected": [
+        {
+          "recall_type": "crystallized",
+          "content_pattern": "19\\.0%",
+          "source_ref": "",
+          "authority_class": "",
+          "must_hit": true
+        }
+      ]
+    }
+  ]
+}

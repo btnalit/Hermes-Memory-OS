@@ -955,3 +955,50 @@ class TestClearancePairSource:
         )
         assert len(pairs) == 0
         assert evaluated == 0
+
+
+def test_empty_llm_reply_is_recorded_not_silently_skipped(tmp_path: Path) -> None:
+    """Backlog 14: "" is how _call_hermes_runtime_model reports most failures.
+    The lane's exception path records an error_record but the empty-reply path
+    was a bare continue, so a run where every call came back empty reported
+    contradictions_found=0 indistinguishably from "genuinely no
+    contradictions".
+
+    Counterfactual: without the fix, error_records contains no
+    llm_empty_content entry and the report reads as a clean quiet run.
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_empty_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_empty_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value="",
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
+
+    assert result["contradictions_found"] == 0
+    empty_records = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_empty_content"
+    ]
+    assert empty_records, (
+        "an all-empty-reply run must be distinguishable from a genuinely "
+        "quiet one via error_records"
+    )
+    assert empty_records[0]["component"] == "llm_contradiction_lane"

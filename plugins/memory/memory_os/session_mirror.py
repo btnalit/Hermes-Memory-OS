@@ -163,6 +163,54 @@ def session_mirror_graduation_policy(store: MemoryOSStore) -> dict[str, Any]:
     }
 
 
+def _record_auto_apply_last_run(
+    store: MemoryOSStore,
+    *,
+    status: str,
+    reason: str,
+    written_event_ids_count: int,
+    counters: dict[str, int] | None = None,
+) -> str:
+    """Durably record why the last auto-apply run produced (or did not).
+
+    Backlog 14 (completion is not output): every wrapper exit before the real
+    scan returned a typed reason to the heartbeat and persisted nothing, so a
+    lane that ran hundreds of times producing nothing left no artifact a
+    reader could consult -- indistinguishable from never having run. A single
+    atomic JSON state file (not a ledger: fixed size, no retention needs).
+    ``counters`` is omitted rather than zero-filled when no scan ran, so a
+    missing measurement never reads as a real zero. Returns an error code on
+    write failure ("" on success) so callers can surface it.
+    """
+    record: dict[str, Any] = {
+        "schema_version": "memory-os.session_mirror_auto_apply_last_run.v0",
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "status": status,
+        "reason": reason,
+        "written_event_ids_count": int(written_event_ids_count),
+    }
+    if counters:
+        record["counters"] = {key: int(value) for key, value in counters.items()}
+    try:
+        write_json_atomic(
+            store.roots.memory_os_root / "system" / "session_mirror_auto_apply_last_run.json",
+            record,
+        )
+        return ""
+    except Exception as exc:
+        return type(exc).__name__
+
+
+def _auto_apply_scan_counters(report: dict[str, Any]) -> dict[str, int]:
+    return {
+        "candidate_session_count": int(report.get("candidate_session_count") or 0),
+        "selected_session_count": int(report.get("selected_session_count") or 0),
+        "skipped_by_platform_count": int(report.get("skipped_by_platform_count") or 0),
+        "skipped_by_limit_count": int(report.get("skipped_by_limit_count") or 0),
+        "skipped_by_owner_rejection_count": int(report.get("skipped_by_owner_rejection_count") or 0),
+    }
+
+
 def auto_apply_graduated_session_mirror(
     store: MemoryOSStore,
     *,
@@ -171,13 +219,18 @@ def auto_apply_graduated_session_mirror(
     """Apply one bounded SessionMirror batch after owner-approved lane graduation."""
     policy = session_mirror_graduation_policy(store)
     if policy.get("status") != "active":
+        reason = str(policy.get("reason") or policy.get("status") or "policy_not_active")
+        last_run_error = _record_auto_apply_last_run(
+            store, status="skipped", reason=reason, written_event_ids_count=0,
+        )
         return {
             "schema_version": "memory-os.session_mirror_auto_apply.v0",
             "status": "skipped",
-            "reason": policy.get("reason") or policy.get("status") or "policy_not_active",
+            "reason": reason,
             "policy": policy,
             "written_event_ids_count": 0,
             "boundary": _false_boundary(),
+            **({"last_run_record_error_code": last_run_error} if last_run_error else {}),
         }
     mirror = SessionMirror(store)
     dry_run = mirror.scan(
@@ -186,6 +239,13 @@ def auto_apply_graduated_session_mirror(
         platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
     )
     if int(dry_run.get("selected_session_count") or 0) <= 0:
+        last_run_error = _record_auto_apply_last_run(
+            store,
+            status="skipped",
+            reason="no_matching_pending_session",
+            written_event_ids_count=0,
+            counters=_auto_apply_scan_counters(dry_run),
+        )
         return {
             "schema_version": "memory-os.session_mirror_auto_apply.v0",
             "status": "skipped",
@@ -194,6 +254,7 @@ def auto_apply_graduated_session_mirror(
             "dry_run": _bounded_auto_apply_dry_run(dry_run),
             "written_event_ids_count": 0,
             "boundary": _false_boundary(),
+            **({"last_run_record_error_code": last_run_error} if last_run_error else {}),
         }
     selected_fingerprints = (
         dry_run.get("selected_session_fingerprints")
@@ -225,6 +286,13 @@ def auto_apply_graduated_session_mirror(
         evidence_refs=[f"session_mirror_lane_graduation:{policy.get('approval_ref') or ''}"],
     )
     if gate.get("permit_decision") != "allowed":
+        last_run_error = _record_auto_apply_last_run(
+            store,
+            status="skipped",
+            reason="execution_gate_blocked",
+            written_event_ids_count=0,
+            counters=_auto_apply_scan_counters(dry_run),
+        )
         return {
             "schema_version": "memory-os.session_mirror_auto_apply.v0",
             "status": "skipped",
@@ -234,6 +302,7 @@ def auto_apply_graduated_session_mirror(
             "written_event_ids_count": 0,
             "execution_gate_envelope_id": str(gate.get("execution_gate_envelope_id") or ""),
             "boundary": _false_boundary(),
+            **({"last_run_record_error_code": last_run_error} if last_run_error else {}),
         }
     apply_governance = {
         "owner_approved": True,
@@ -265,6 +334,23 @@ def auto_apply_graduated_session_mirror(
     result["schema_version"] = "memory-os.session_mirror_auto_apply.v0"
     result["auto_apply_policy"] = policy
     result["execution_gate_envelope_id"] = str(gate.get("execution_gate_envelope_id") or "")
+    written_count = int(result.get("written_event_ids_count") or 0)
+    last_run_error = _record_auto_apply_last_run(
+        store,
+        status=str(result.get("status") or ""),
+        # "produced" vs "produced_zero": a real apply run that wrote nothing is
+        # a distinct state from "nothing matched" (that exits above) -- it
+        # means selection succeeded and the apply path dropped everything.
+        reason=(
+            str(result.get("reason") or "blocked")
+            if str(result.get("status") or "") == "blocked"
+            else ("produced" if written_count > 0 else "produced_zero")
+        ),
+        written_event_ids_count=written_count,
+        counters=_auto_apply_scan_counters(result),
+    )
+    if last_run_error:
+        result["last_run_record_error_code"] = last_run_error
     complete_execution_gate_envelope(
         store,
         envelope_id=str(gate.get("execution_gate_envelope_id") or ""),
@@ -402,7 +488,9 @@ class SessionMirror:
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
-        covered = self._provider_captured_session_ids()
+        event_records = _read_event_records(self.store)
+        covered = self._provider_captured_session_ids(event_records)
+        previously_imported = self._mirror_imported_session_ids(event_records)
         pending_sessions = [
             session
             for session in sessions
@@ -424,6 +512,18 @@ class SessionMirror:
         platform_filtered = [
             session for session in new_sessions if not platforms or str(session.get("platform") or "").lower() in platforms
         ]
+        # Backlog 13: never-imported-first ordering. dedup_key embeds the
+        # content hash, so an active session re-enters the pending queue on
+        # every content change -- and discovery order is stable (session id /
+        # file path), so with pure head-of-queue selection and a per-run cap
+        # the same low-id active sessions re-occupy the head on every run and
+        # the tail never surfaces (measured: 637 runs, backlog 1574 -> 1575).
+        # Sessions this lane has never imported come first; within each class
+        # the original queue order is kept (stable sort). Re-imports of
+        # already-mirrored sessions still happen, after the backlog drains.
+        platform_filtered.sort(
+            key=lambda session: str(session.get("session_id") or "") in previously_imported
+        )
         limit = max(int(max_sessions or 0), 0)
         if not dry_run and limit == 0:
             limit = 1
@@ -710,15 +810,40 @@ class SessionMirror:
             "last_scan_at": "",
         }
 
-    def _provider_captured_session_ids(self) -> set[str]:
+    def _provider_captured_session_ids(
+        self, event_records: list[dict[str, Any]] | None = None
+    ) -> set[str]:
         captured: set[str] = set()
-        for record in _read_event_records(self.store):
+        records = event_records if event_records is not None else _read_event_records(self.store)
+        for record in records:
             if record.get("kind") != "conversation_turn":
                 continue
             safe_ref = record.get("safe_ref", {})
             if isinstance(safe_ref, dict) and safe_ref.get("session_id"):
                 captured.add(str(safe_ref["session_id"]))
         return captured
+
+    def _mirror_imported_session_ids(
+        self, event_records: list[dict[str, Any]] | None = None
+    ) -> set[str]:
+        """Session ids this lane has imported at least once (any content version).
+
+        Derived from the mirrored events themselves rather than from
+        SessionMirror state, for the same reason as
+        ``_owner_rejected_fingerprints``: ``_rebuild_state()`` reconstructs
+        state from events, so a signal stored only in state silently vanishes
+        on repair. Used by scan() to order never-imported sessions first
+        (backlog 13).
+        """
+        imported: set[str] = set()
+        records = event_records if event_records is not None else _read_event_records(self.store)
+        for record in records:
+            if str(record.get("source") or "") != "session_mirror":
+                continue
+            safe_ref = record.get("safe_ref", {})
+            if isinstance(safe_ref, dict) and safe_ref.get("session_id"):
+                imported.add(str(safe_ref["session_id"]))
+        return imported
 
     def _write_state(self, state: dict[str, Any]) -> None:
         write_json_atomic(self.state_path, state)

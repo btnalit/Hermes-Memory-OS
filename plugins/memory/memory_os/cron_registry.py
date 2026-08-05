@@ -239,6 +239,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
             "candidate_aggregation",
             "l3_probe_verification",
             "v3_wandering",
+            "session_fact_extraction",
         ),
     ),
     MemoryOSCronGroupSpec(
@@ -419,6 +420,20 @@ MEMORY_OS_CRON_LANES: tuple[MemoryOSCronLaneDef, ...] = (
         helper_kind="local_helper",
         group_key="tick_evidence",
         due_interval_minutes=360,
+    ),
+    # Offline lane closing the 140-char turn-summary truncation gap: reads
+    # raw session transcripts (never events) and extracts durable facts from
+    # messages too long to have survived _turn_summary's clip. See
+    # plugins/modules/cognition/session_fact_extraction.py for the full
+    # design/governance rationale.
+    MemoryOSCronLaneDef(
+        key="session_fact_extraction",
+        raw_script="memory_os_session_fact_extraction_lane.py",
+        lane_id="session_fact_extraction",
+        helper_kind="local_helper",
+        group_key="tick_evidence",
+        due_interval_minutes=360,
+        timeout_seconds=600,
     ),
     # G4 day-boundary + maintenance
     MemoryOSCronLaneDef(

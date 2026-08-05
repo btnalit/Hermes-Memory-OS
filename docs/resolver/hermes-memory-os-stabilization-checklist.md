@@ -2341,6 +2341,1168 @@ import cycle（`cycles: []`）/ write surface（`unclassified_count=0`）/ stati
 
 ---
 
+## CA — Owner 报告「关键事实漏失」的实测定位 + 三项并行修复（2026-08-04）
+
+Owner 原话：「我发现很多"关键事实"没存入记忆，导致召回漏掉了一些。」
+本节记录**实测定位**（含两处推翻本会话自己论断的证据）与随之做的三项修复。
+
+### 定位结论：不是一个 bug，是三个独立成因
+
+| | 位置 | 性质 |
+|---|---|---|
+| **① 捕获截断** | `__init__.py:1828` `_turn_summary` = `_clip(user,140)` + `_clip(assistant,140)`，**硬编码，全仓无 knob**；正文只以 `user_sha256`/`assistant_sha256` 落盘 | 事件层只有 280 字 |
+| **② 无事实抽取** | `inner_drive.py:294` `body=f"Remembered from event {event.id}: {event.summary}"` | 候选正文就是那 280 字加前缀；①不修这里也拿不到更多 |
+| **③ 候选在召回里几乎不可见** | `prefetch.py` `_should_include_candidates` | 查询不含 `candidate/crystallized/候选/结晶/沉淀/长期记忆/审查队列/待审` 就 `return []`，**与相关性无关** |
+
+`runtime.py:111` 的候选生成读的是 `store.read_events()`，即那 280 字事件——所以①②③在一条链上。
+
+### 3.200 只读核实推翻了本会话两个论断（这是本节最重要的部分）
+
+| 本会话先前的断言 | 生产实测 |
+|---|---|
+| ">140 字永久不可恢复（只剩哈希）" | **错。** 完整正文durable 存在 `/root/.hermes/sessions/*.json`——**468 个文件 / 136MB**，单条消息内容最长 **975,665 字**；抽样会话 68 条消息中 31 条超 140 字 |
+| "cron lane 里 LLM 抽取结构上不可能（无可抽取对象）" | **错。** 正文在磁盘上，off-hot-path 完全读得到 |
+
+**教训**：第一个论断是从"本仓库没有反查映射"推出"系统层不可恢复"——**跨系统边界的否定结论不能只用本仓库证据**。
+第二个论断是把"热路径禁 LLM（INV-5）"这条约束**惯性延伸**到了 off-hot-path，
+而它成立的前提（抽取必须发生在 `sync_turn`）在第一个论断被推翻时就死了。
+
+### 生产规模（实测硬数字，供 3.200 复核对账）
+
+- 事件：**3815** 条，其中 `conversation_turn` **1982** 条、`conversation_turn_mirrored` **539** 条。
+- 截断率：**助手侧 67.3%（1333/1982）**、**用户侧 19.0%（377/1982）**（以 `_clip` 的 `...` 尾标判定）。
+- `session_mirror`：**637 次 apply 运行、累计 `finding_count` = 0**；
+  `auto_apply_max_sessions_per_run: 1`，最近一次 `candidate_session_count: 1575` / `selected_session_count: 1`。
+- 镜像事件实际内容形如
+  `Session … mirrored; last_user=nihao; last_assistant=你好呀 👋 …`，**最长 259 字**
+  ——即 136MB 会话数据每个会话只产出约 160 字的"最后一条消息预览"。
+- **选择仍是纯队头**：`session_mirror.py` 的 `selected_sessions = platform_filtered[:limit]`
+  （代码注释自陈 "Selection is otherwise pure head-of-queue"）。批次 BY 只修了"被拒会话饿死后队"
+  那一半，**一般性队头偏置未修** → 1575 积压按 1/run 永远排不空。
+
+### 本轮做了什么（三项并行，文件互斥，各自独立 worktree）
+
+1. **③ 候选相关性下限**（`prefetch.py`）。**没有删那个关键词门**——已核实它是**刻意的权威分层**
+   （测试用「这些结晶候选和长期记忆有什么关系？」并断言输出带
+   `candidate only / not approved crystallized memory` 标签）。改为：magic-word 路径**行为逐字不变**，
+   新增相关性路径 `_extract_query_tokens` + `_record_body_score >= 2`。
+   阈值取 2 有实测依据：`_tokenize_for_floor_match` 会把 `"what's"` 切出单字符 token `"s"`
+   从而几乎匹配任何正文；`_extract_query_tokens` 的 CJK 侧发无过滤重叠 bigram，阈值取 1 时
+   「我们什么时候开会？」会靠语法 bigram「什么」匹上无关候选。
+2. **F `recall_golden` 接线**（`recall_golden.py` / `cli.py` + seed fixture）。
+   裁决由"倾向删除"反转为保留——它是①唯一的度量仪器。**同时查出 authority 维度是死代码**，
+   见方案 §3.3；hit/miss 那一半经反事实实测为真。
+3. **`continuity_freshness` monitor 可见性 + 并发单测**（`memory_os_3_200_monitor.py` / `tests/scripts/`）。
+   **刻意不引入任何新 WARN 码**（全走 `pass`/`info`），因此
+   `CLEAN_HOST_WARN_CLASSIFICATIONS` 无需注册——避开了待办 1 那个坑
+   （未注册 WARN 码在 clean host 会落 `clean_host_warn_unclassified` 即 **FAIL**）。
+   账本缺失被显式判为 `continuity_freshness_ledger_absent_healthy`（**缺失是正常健康态**，
+   因为状态迁移去重意味着没有 stale 就不写）。
+
+### 整合评审纠正的一处 agent 报告错误
+
+第 1 项的 agent 报告称候选段"可能挤掉 `Recent Event Summaries`(80) / `Indexed Recall`(90)"——**方向说反了**。
+`_budget_keep_priority` docstring 明写 "Higher value means survive budget pressure longer"，
+而 `_next_budget_drop_index` 升序排序后丢 `candidates[0]`，**即数字小的先被淘汰**。
+`Crystallized Review Candidates` = 50 会在 60/65/80/90 **之前**被丢，
+所以**未批准候选挤不掉已批准/已索引内容**——方向是安全的那一边。
+**记在这里以免后来者去"修"一个不存在的问题。**
+
+### 顺带查出的一条真缺陷（未修，登记）
+
+`cli.py::_check_vector_available()` **急切 import `sentence_transformers`/`torch`**，
+导致单次 `status`/`doctor` 调用耗时 **17–29 秒**。
+`shell_alias_no_env()` 并发跑 22 条 CLI 探针 → 这**很可能就是待办 3 那个生产 flake 的成因**
+（BY.3 记录过一次 `shell_alias_no_env_failed` 重跑不复现）。
+本轮未修（超出该 agent 白名单），登记为待办。
+
+### 并发测试的诚实声明
+
+`shell_alias_no_env` **不是模块属性**——它在 `_remote_probe_script()` 的嵌入式字符串里
+（第 5368–8471 行是一整个 `r'''` 串，经 subprocess 执行），不可 import；本沙箱也没有 `hermes`。
+因此测的是两件可达的事：22 条探针在 `hermes` 确定缺失时并发命中 `except OSError`
+且无跨 future 串号；以及 17 条真实只读 CLI 探针在 workers=1 与 workers=4 下结果一致。
+**未发现竞态**（futures 模式无线程间共享可变状态）。
+`status`/`doctor` 因上述 17–29 秒延迟被排除在并发命令集外——如实声明，这不是全覆盖。
+
+### ①的设计（已定案，未实现）
+
+**①是一条按 `fact_judge` 模板建的新 cron lane，不是新 LLM 集成，也不扩 `session_mirror` 的 charter。**
+
+复用既有机制（Owner 明确要求"别重复造车"，已查证）：
+- `low_clue_recall._call_hermes_runtime_model(prompt, config)` + `_extract_json_object`，
+  `provider="hermes_default"` → 经 `hermes_cli.config.load_config` +
+  `resolve_runtime_provider` **直接用 Hermes 自己配置的模型**
+  （支持 `chat_completions` / `codex_responses` / `anthropic_messages`）。
+  **已有两个先例**：`llm_edge_proposer.py`、`plugins/modules/governance/fact_judge.py`
+  ——跨模块导入这两个私有函数是既定模式，照做即可，**且刻意不改 `low_clue_recall.py`**
+  （那还顺便避开与批次 E 的文件冲突）。
+- 失败处理**照抄 `fact_judge`**：重试 + 具名 failure_reason
+  （`llm_exception` / `llm_empty_content` / `llm_parse_failed` / `llm_missing_key`）
+  + **回落确定性启发式**。**绝不继承** `_call_hermes_runtime_model` 裸返回 `""` 的行为——
+  否则会造出第二个"637 次运行 0 findings"的静默 lane。
+  （这也作废了"确定性 vs LLM"的二选一：房子里的做法是 LLM 主路 + 确定性兜底。）
+- 限额走 knob（`*_max_tokens` / `*_max_per_tick` / `*_timeout_ms`），注册进 `OVERRIDABLE_KNOBS`。
+- cron 接入：2 行 shim `from memory_os_execution_gate_runner import main`，
+  注册进 `cron_registry.py` 的 lane 表并**挂进既有 group**（按 CLAUDE.md：加 lane 不是加 cron job）。
+- **写入可走 `append_governed_jsonl`**——它跑在 ExecutionGate envelope 下，
+  这点比批次 C 干净（C 在 prefetch 热路径无 envelope，只能走 allowlist 登记）。
+
+**必须避开的两个已知坑**：
+1. **不得照搬纯队头选择**，否则 1575 积压永远排不空——新 lane 最容易继承的 bug。
+2. `fact_judge` 默认 `max_tokens=1024` / `timeout_ms=15000` 对一条 97 万字消息远远不够
+   → 必须分块/选段 + per-tick 上限，**不能"把会话喂进去"**。
+
+**与③配套**：①产候选、③让候选能被召回；单做任一件效果都打折。
+
+### 测试与门
+
+3071 → **3089 passed / 13 skipped / 0 failed**（+18）。
+分段实测：两份整合时 3083（recall_golden +8、候选下限 +4），并入 monitor 那份后 3089（+6）。
+import cycle（`cycles: []`）/ write surface（`unclassified_count=0`, surface_count 154）/
+static hygiene（含 compileall）/ public checkout probe `--strict` /
+`git diff --check origin/main...HEAD`（按区间）—— 全过。
+
+### 未验证项（如实声明）
+
+- **仅 `local_pass`。三项均未部署 3.200**——按 Owner 裁定，部署在全部任务完成后统一执行。
+- seed golden set 是示例性的，未绑定真实捕获数据；在真实库上非标记项的命中结果未验证。
+- 相关性下限对**生产规模**数据的行为未验证（本地测试都是近空库 + 2200 字宽预算）。
+- ①未实现。
+
+### CA.1 — 按本节文档对 3.200 的完整只读核对与复盘（2026-08-04）
+
+**全程只读**：无部署、无重启、无写入。C 仍未部署（按 Owner 裁定全部完成后统一部署）。
+
+#### 与文档一致（4 项，逐条实测）
+
+| 断言 | 实况 |
+|---|---|
+| `deployed_head` = `01356df` | manifest `01356df3a52a…`、`active_runtime_path=/opt/Hermes-Memory-OS`；`/opt` HEAD 同值且工作树干净——**manifest 与 `/opt` 本次无漂移** |
+| C 未部署 | 三角互证：`continuity_freshness.jsonl` 不存在、live `prefetch.py` 中 `_record_continuity_freshness` 出现 0 次、`/opt` 停在 C 之前 |
+| 8 job / tick 错开 / legacy 暂停不删 | **26 = 7 enabled + 19 paused**；`2,17,32,47`、`7,37`、`12`、`5 0` 逐字一致；第 8 个 `expression-feedback-request` 为 Owner 刻意停用 |
+| lane 停用有审计记录 | `memory-os.cron_lane_disabled.v1`，`expression_feedback_request` 的 actor=owner / 2026-07-28 / reason 已填 |
+
+#### Full Monitor 基线已变化：97/6/1 → **102 PASS / 5 WARN / 1 FAIL**
+
+FAIL 仍只有 `v2_exposure_schema_era_unhealthy`。
+**口径声明**：本次 monitor **由本整合分支发起，非主机已部署的 `01356df`**，
+差别至少含本轮新增的 `continuity_freshness_ledger_absent_healthy`（PASS）
+——与 BY.1 记录的同类口径问题一致，比较时须扣除。
+runtime 181.197s / 目标 180s → `full_monitor_runtime_over_target` 仍 WARN。
+
+#### 文档漂移 1（好的方向）：LLM 判断器已恢复
+
+BY.1 记的「`low_clue_llm_judge_unavailable` WARN，OpenAI 额度耗尽」**已过期**：
+本次 `low_clue_llm_judge_available` 在 **PASS** 列。
+独立佐证：`system-modules/fact_judge/verdicts.jsonl` 643 行，最近 80 次
+`failure_reason` 分布 **`none: 58` / `llm_empty_content: 22`** —— 通路可用（72.5%），
+但**约 27.5% 返回空**。
+**这实测验证了待办 12（①）的设计决定**：若①继承 `_call_hermes_runtime_model`
+裸返回 `""`，约四分之一的抽取会静默产出空。照抄 `fact_judge` 的重试 + 具名
+failure_reason + 确定性兜底**不是保守，是必需**。
+
+#### 文档漂移 2：那个唯一 FAIL —— 我最初的诊断也是错的（已于同日修正，见 CA.2）
+
+BY.1（本清单 L2070-2072）称该 FAIL「数据成熟度驱动，**实测正在推进**：
+rollup lag 74.4h→26.5h、schema-era 分类率 0.6506→0.7018」。
+我当时反驳为「`exposure_rollup` 停产，lag 只会重涨，'正在推进'不成立」。
+（附带纠正：此处原文把该说法也记到"路线图 P1-4"名下，**属误引**——
+路线图只在 L218/L291 要求"继续观察 lag/attribution/conservation"，并未声称正在推进；
+且它 L107 早已正确写明唯一 FAIL 是 `v2_exposure_schema_era_unhealthy`。）
+
+**双方都错，且错在同一个轴上**：monitor 里**根本不存在 lag 门控**。
+`grep -n "exposure_rollup_lag" scripts/memory_os_3_200_monitor.py` 零命中；
+`exposure_rollup_lag_hours` 只由 `exposure_monitor_stats()` 计算并上报，
+**从未进入 PASS/WARN/FAIL 判定**。拿 lag 论证 FAIL 是否推进，无论方向都无意义。
+
+真正的 FAIL 与根因见 CA.2。此处仅保留方法教训：
+**在用某个指标论证结论之前，先 grep 它是否真的被门控。**
+一个"被计算并上报"的指标不等于一个"会告警"的指标。
+
+BY.1 那句话里**真正需要推翻的不是"正在推进"，而是"数据成熟度驱动"**：
+CA.2 实测该 FAIL 的唯一驱动因素是 `schema_era_attribution_gap_count = 69`，
+而它是一个**代码缺陷**（`working` 段落从不填 `source_ids`），不是成熟度不足。
+**再等多久都不会自己好。** 一个佐证：BY.1 记的分类率是 `0.6506→0.7018`，
+本次实测仍是 **0.7018**，一位不差——那条曲线早已停住。
+
+#### 本次核对最重要的结论：一个反复出现的缺陷模式
+
+**系统观测"跑过了"，不观测"产出了"。** 三个独立实例同型：
+
+| 实例 | 被观测到 | 未被观测到 |
+|---|---|---|
+| `exposure_rollup` | envelope 完整关闭 | **两条"不产出"退出路径的证据完全相同**：`if not new_records` 的良性跳过（L141）与 `source_cursor_not_found` 的永久错误（L128-138），都在开 envelope 前 return，都不写 jsonl、也不写 snapshot |
+| `session_mirror` | 637 次 apply 运行 | 累计 `finding_count` = 0（且积压 1574→1575 在涨） |
+| `_call_hermes_runtime_model` | 调用返回 | 返回 `""` 与成功不可区分（实测 27.5% `llm_empty_content`） |
+
+monitor 的 helper completion 只判 envelope，**`completion ≠ output`**，因此
+三者皆无告警。`exposure_rollup` 这一行尤其说明问题：它其实**已经**在 report 里
+写了 `skipped=True`，但那个 report 只返回给调用方、不落盘，于是从产物侧
+**一个永久坏掉的 lane 与一个正常空转的 lane 长得一模一样**——本轮要区分它们，
+不得不读源码 + 手工把游标拿去和 `memory_sources.jsonl` 比对（见 CA.2）。
+
+批次 C 的账本设计（状态迁移去重 + `unknown_grade_count` 计数器）刚好是这个模式的
+反面——**那不是巧合，应当推广为通例**。已登记为待办 14，并已写入 CLAUDE.md
+新增小节 **“Completion Is Not Output”**（含"不产出必须落盘写明原因码"的硬要求）。
+
+#### 本次核对中我自己的两次误报（方法教训，须记）
+
+1. **「26 个 cron job 而文档说 8」** —— 错。截断了输出 + 未把 19 个 paused legacy 计入。
+   8 注册 − 1 Owner 停用 = 7 enabled，文档准确。
+2. **「`working_cleanup`/`hindsight_advisory_digest` 4 天没跑 = monitor 漏报」** —— 错。
+   两者 `due_interval_minutes=10080`（**7 天**），4 天 < 7 天，**不该判 stale**，
+   `stale=0` 是正确的。而且这恰好证明 CLAUDE.md 警告的那个陷阱
+   （用 group cron 表达式推导窗口会把周 lane 误报 stale）**生产里正确避开了**。
+
+**两次都是"先报警、后核实"。** 与本会话早先那三次（方案 §4.1 的错误说法、
+臆造批次 G、">140 不可恢复"）是同一个毛病：**结论跑在证据前面**。
+在这份清单里，报警和核实之间必须隔一次 grep。
+
+---
+
+### CA.2 — 待办 15 结案 + 那个唯一 FAIL 的真实根因（2026-08-04，只读实测）
+
+CA.1 把待办 15 留成"不许猜"的开放项：`exposure_rollup` 每天开 envelope 却不追加账本行，
+**"无新合格数据"与"静默失败"对处置的要求完全相反**。本节把它查到底，
+结论是**两个假设都不成立，答案是第三种**，并顺带定位到那个唯一 FAIL 的真实根因。
+
+#### 一、读源码：`exposure_rollup` 有两条"不产出"退出路径
+
+`plugins/memory/memory_os/exposure_rollup.py::run_exposure_rollup_cycle`：
+
+| 位置 | 条件 | 行为 | 性质 |
+|---|---|---|---|
+| L141-143 | `if not new_records` | `skipped=True` 直接 return | **良性**，按设计不写 |
+| L128-138 | `_latest_source_cursor` 返回 `source_cursor_not_found` | `status="error"` 直接 return | **永久失败** |
+
+两条**都在开 envelope 之前 return**，因此 jsonl 与 snapshot **都不写**
+（snapshot 写在 L309-326，且是 `except Exception: pass` 的 best-effort）。
+这解释了实测现象：两个文件 mtime 完全相同、都停在 `2026-08-02 00:05:18 +0800`。
+**证据侧无法区分**——这就是待办 14 那个模式的教科书实例。
+
+`source_cursor_not_found` 的危险性值得单记：`_latest_source_cursor` 是 fail-closed 的，
+一旦压缩把游标记录从 `memory_sources.jsonl` 移除，之后**每一次运行都会走同一条错误路径、
+永远不产出**，而 lag 只会单调增长。
+
+#### 二、判别式实测：游标仍在队首 ⇒ 良性空转
+
+只读探针（远端 `python3`，不落任何文件）：
+
+```
+memory_sources.jsonl   rows: 988   mtime 2026-08-01T15:51:08 (+0800)
+  最后一条 created_at : 2026-08-01T07:51:08.673109Z
+  最后一条 record_id  : msrc_20260801T075108673109Z_4d466577
+exposure_rollup.jsonl  rows: 16
+  最后一行 window_end            : 2026-08-01T16:05:18.054652Z
+  最后一行 source_offset_end     : 988
+  最后一行 source_cursor_record_id: msrc_20260801T075108673109Z_4d466577
+  ⇒ 游标命中 index 987 / 988 ⇒ new_records = 0
+```
+
+**结论：走 L141 良性分支，非缺陷。** `source_offset_end = 988` 等于源文件总行数，
+游标就是最后一条记录，上游自 `08-01T07:51Z` 起零增长 —— lane 没有输入可处理。
+**待办 15 结案。**
+
+#### 三、纠正我自己在 CA.1 里的错误：monitor 根本没有 lag 门控
+
+CA.1（以及路线图 P1-4）都在用 `exposure_rollup_lag_hours` 论证那个 FAIL 是否推进。
+`grep -n "exposure_rollup_lag" scripts/memory_os_3_200_monitor.py` → **零命中**。
+该指标只由 `exposure_monitor_stats()` 计算并上报，**从不进入 PASS/WARN/FAIL**。
+**用一个不被门控的指标论证告警状态，方向对错都无意义。**
+教训并入待办 14：**"被计算并上报"≠"会告警"，引用指标前先 grep 它是否真的被判定。**
+
+#### 四、那么那个唯一 FAIL 到底是什么：`working` 段落缺归因
+
+远端实测 `exposure_monitor_stats()`：
+
+```
+schema_era_health                    = FAIL
+schema_era_attribution_gap_count     = 69      ← 唯一驱动因素
+schema_era_conservation_failure_count= 0
+telemetry_degraded_count             = 0
+conservation_total_passes            = True
+schema_era_natural_record_count      = 170
+schema_era_classified_ratio          = 0.7018
+exposure_rollup_lag_hours            = 68.0    （不被门控，仅供参考）
+```
+
+`schema_era_health` 的判定是 `FAIL if schema_gap or conservation_failures or
+telemetry_degraded_count`（L473-475），后两项皆 0 ⇒ **FAIL 完全由 69 个归因缺口驱动**。
+
+再按 `source_class` 分组（只读探针，复用 `_memory_source_has_attribution_gap` 同一判据）：
+
+| source_class | bucket | 缺口段落数 | 有归因段落数 |
+|---|---|---|---|
+| `working` | dropped | **41** | 0 |
+| `working` | selected | **28** | 0 |
+| `crystallized` | dropped | 0 | 83 |
+| `crystallized` | selected | 0 | 50 |
+
+**69 个缺口 100% 集中在 `working`，且 `working` 从无一次填对；`crystallized` 133 段零缺口。**
+即 prefetch 披露工作记忆时报了 `chars`/`count` > 0，却从不填 `source_ids`。
+
+同一缺陷的另一面：`_extract_record_ids_from_section`（L80-86）只接受
+`crystallized:` / `candidate:` 前缀，所以 `working` 记录**即使填了 ID 也不会被分类** ——
+这正是 `classified_ratio = 0.7018`（≈30% 处理了但分类不到）的来源。两个数字同源。
+
+**未修，登记为待办 16。** 修前必须先定的设计问题：工作记忆记录的规范 ID 前缀是什么
+（新增 `working:`？），以及归因补齐后 `classified_ratio`/`conservation` 语义是否需同步调整。
+这一条与"关键事实漏失"同源——都在 prefetch 披露侧，是批次 C 的邻接面。
+
+#### 五、继续追下去：那个门本身只覆盖 2/13 个类，静默跳过 1093 个缺口
+
+顾问指出"prefetch 有 bug"只是三种读法之一，还须排除"`working` 本无可引用身份"
+与"该段落是聚合视图"。按 CLAUDE.md「Beyond the Pointed-Out Problem」把调用链读完，
+结论是第一种成立，**但同时发现了一个更大的问题**。
+
+**可引用性已确证**（否决"本无身份"读法）：`_working_lines` 逐条遍历单个 item，
+手上同时握着 `path.stem` 与 item；item 有 `id`（`working.py:350`）；
+规范引用格式 `working:<stem>:<id>` 已在 `deep_reflection.py:639` 生产使用，
+`working:` 前缀在 `v3_body_packet.py:21` 的允许前缀表内，`low_clue_recall.py:478` 也在产出。
+`_working_lines` 只是签名仍为 `list[str]`，而 `_crystallized_lines` 早已扩成三元组带 ID。
+
+**更大的问题**：`section_source_ids` 在 `_build_prefetch_sections` 内**只有一个赋值点**
+（`prefetch.py:614`，crystallized 专属）。于是逐类实测（3.200 只读，复用生产同一判据）：
+
+| source_class | 有 ID | 无 ID | 是否被 `attributable_classes` 统计 |
+|---|---:|---:|---|
+| `crystallized` | **133** | 0 | ✅ |
+| `working` | 0 | **69** | ✅（**唯一驱动 FAIL 的那 69 个**） |
+| `last_session` | 0 | 162 | ❌ 静默跳过 |
+| `foreground` | 0 | 145 | ❌ |
+| `identity` | 0 | 133 | ❌ |
+| `state_overlay` | 0 | 133 | ❌ |
+| `bridge` | 0 | 133 | ❌ |
+| `substrate_recall` | 0 | 133 | ❌ |
+| `event` | 0 | 115 | ❌ |
+| `other` | 0 | 66 | ❌ |
+| `indexed` | 0 | 46 | ❌ |
+| `diagnostic` | 0 | 22 | ❌ |
+| `candidate` | 0 | 5 | ❌ |
+
+**被门统计的缺口 69，被静默跳过的 1093。** 原因是 `attributable_classes`
+（`exposure_rollup.py:509` 硬编码）里 `entity_graph` / `indexed_recall` / `vector` /
+`hindsight` **四个名字全项目无任何生产者**，而生产者实际发出的是
+`indexed` / `graph_layer` / `substrate_recall` / `event` / `candidate` ——
+**名字对不上，门就静默失效**。该集合无任何测试引用，测试夹具还把
+`source_class` 写死成 `"crystallized"`，所以这 12 个类从未被测试触达。
+
+**由此得到本节最重要的一句**：只补 `working` 的 ID 会让
+`schema_era_attribution_gap_count` 归零、`schema_era_health` 转 PASS、**monitor 变绿**，
+而 1093 个真实缺口继续不可见——**靠缩小度量范围换来的绿色**，正是路线图 L43
+明令禁止的。故 16b 必须先于或同时于 16a；修 16b 会让 FAIL 数字先变大，那是正确方向。
+
+#### 六、方法记账
+
+本节做对的地方是**先读源码把"不产出"的所有退出路径穷举出来，再设计判别式实测**，
+而不是从现象直接推断。CA.1 的错误恰恰相反：拿一个没验证过是否被门控的指标去论证结论。
+**顺序是——穷举分支 → 设计判别式 → 取证 → 才下结论。**
+
+**但本节自己又犯了一次同样的错，须记。** §4 定位到"69 个缺口全在 `working`"之后，
+我直接把根因写成"prefetch 有 bug"并把修法写成"新增 `working:` 前缀"——
+**跳过了"这份测量有几种读法"这一步**。至少还有两种：`working` 本无可引用身份
+（则该类根本不该在 `attributable_classes` 里）、或该段落是聚合视图（无 1:1 记录可列）。
+`working` 是 **0/69 从未填过**，而"实现了但有 bug"通常表现为"有时填有时不填"——
+这个 0 本身就是要求换读法的信号，我当时没读出来。
+经顾问点出后按 CLAUDE.md「Beyond the Pointed-Out Problem」把调用链读完，
+才发现真正的量级问题（1093 个静默跳过）与那个"修了反而变绿"的陷阱。
+**教训：定位到根因不是终点；须再问一次"同一组测量还能怎么解释"，
+并且必须验证修法在物理上是否可能（`working` 到底有没有 ID）。**
+本会话这已是第六次"结论跑在证据前面"。
+
+（3.200 全程只读：无部署、无重启、无写入。批次 C 仍未部署，按 Owner 要求全部任务完成后统一部署。）
+
+**遗留清理项**：3.200 的 `/tmp` 下有 4 个历史遗留克隆目录
+（`hmos-fresh-clone-QQ82NL`、`Hermes-Memory-OS-community-commit-clone`、
+`Hermes-Memory-OS-community-clean2`、`Hermes-Memory-OS-community-clean`），
+系早前会话的探针残留。本轮只记录未删除（生产主机上的删除动作需 Owner 确认）。
+
+---
+
+### CB — ①会话事实抽取 lane 实现（2026-08-04，未部署）
+
+关闭待办 12。`sync_turn` 只把 `_turn_summary` 的每侧 140 字符摘要写进事件队列，
+`inner_drive.py:294` 又从那个已截断的摘要构造候选体，因此**任何写在消息第 140 字符
+之后的持久事实永远进不了记忆**——这正是 Owner 报告的"关键事实漏失"的 A 类成因。
+完整消息体在主机上以原始会话转录形式留存，故新增一条**离线** cron lane 去回收它们。
+
+#### 落地文件
+
+新增 `plugins/modules/cognition/session_fact_extraction.py`（核心）、
+`scripts/memory_os_session_fact_extraction_lane.py`（lane helper，CLI/env 契约照
+`memory_os_fact_judge_lane.py`）、`scripts/memory_os_cron_session_fact_extraction_gate.py`
+（2 行 gate shim）、两个测试文件。
+改 `cron_registry.py`（lane def + `tick_evidence` 成员，lane 数 21→22，
+active-closure 覆盖 19→20 条，**不新增 cron job**）、`knob_overrides.py`（6 个 knob）、
+`test_memory_os_cron_registry.py`（派生 job 数断言仍为 8，lane 数 19→20）。
+`write_surface_check.py` **无需改动**：本 lane 的写入全部走既有
+`append_governed_jsonl` / `append_candidate_queue` 包装，`surface_count` 保持 154、
+`unclassified_count=0`（已实跑确认，非推断）。
+
+#### 关键设计决定
+
+- **只处理 >140 字符的消息**（`MESSAGE_ELIGIBILITY_THRESHOLD_CHARS`，注释绑定到
+  `_turn_summary` 的 clip 长度）。≤140 的消息本就完整存活，重抽是纯重复劳动。
+  这条把语料裁掉一大半，是"有界"的主要来源。
+- **先脱敏再判长度**，与 `_turn_summary` 的 redact-then-clip 同序；脱敏后的文本才
+  送 LLM。这一点比 `inner_drive` 更需要：后者的候选来自**已脱敏的 140 字摘要**，
+  而本 lane 读的是**原始转录体**。
+- **持久指纹账本**（`system-modules/session_fact_extraction/processed_sessions.jsonl`，
+  指纹 = 文件名+size+mtime）+ **最新未处理优先**。**刻意不照搬**
+  `session_mirror` 的纯队头选择（`platform_filtered[:limit]`，其代码注释自承偏置）,
+  否则积压永远排不空（待办 13）。
+- **三重有界**：每 tick 最多 2 个会话、每会话最多 20 条合格消息、最多 5 条事实；
+  每条消息送模型前截到 4000 字符（生产实测单条消息可达 97 万字符，而回复预算
+  `max_tokens=1024`——不设输入上界必然失败）。合格性筛选**放在每会话消息上限之前**，
+  避免一串短"好的/谢谢"把实质消息挤出窗口。
+- **只产出未批准候选**，走既有 `append_candidate_queue`；从不结晶、不批准、不外发；
+  对会话文件**只读**。
+
+#### LLM 复用（不重复造车）
+
+照 `fact_judge` 模板：同样从 `low_clue_recall` 私有导入
+`_call_hermes_runtime_model` / `_extract_json_object`，provider `hermes_default`，
+同样的重试循环与**分类失败码**（`llm_exception` / `llm_empty_content` /
+`llm_parse_failed` / `llm_missing_key`），以及**fail-closed** 的确定性回退
+（仅在命中 `_DURABLE_MARKERS` 时产出，绝不无条件产出）。
+`_call_hermes_runtime_model` 任何失败都返回 `""` 且与成功不可区分，生产实测
+`llm_empty_content` 占比 27.5%——**绝不继承那个裸 `""`**。
+
+#### 产出可观测性：本 lane 是待办 14 的正面样板
+
+每次运行都落盘 `runs.jsonl`，含
+`sessions_scanned / sessions_eligible / sessions_processed /
+sessions_skipped_already_processed / messages_considered /
+messages_eligible_over_threshold / facts_extracted / candidates_written /
+llm_calls / llm_failures_by_reason / fallback_used_count`，
+外加封闭原因码集 `SKIPPED_REASON_CODES`
+（`sessions_dir_absent` / `no_session_files_found` / `no_unprocessed_sessions`）。
+**三条 skip 路径全部在 return 之前写 run report**，因此
+"无合格输入" / "有输入但模型失败" / "有输入且产出了" 三者**从产物即可区分，
+不必重跑、不必读源码**——正是 CA.2 §5 指出 `exposure_rollup` 缺的那件事。
+
+#### 整合评审中我改掉的两个缺陷（子 agent 未发现，均补了反事实测试）
+
+1. **`candidate_id` 含 mtime → 活跃会话每次追加都产生重复候选。**
+   原实现 `material = f"{fingerprint}|{message_index}|{fact_text}"`，而指纹含 mtime。
+   会话被追加 → 指纹变 → 会话重新入选（这是**设计意图**）→ 未变的第 0 条消息被重抽 →
+   因指纹已变而**得到新的 candidate_id** → 绕开 `append_candidate_queue` 的
+   candidate_id 去重（`crystallized.py:1116`）→ 候选队列被同一事实反复灌入，
+   且每个副本都是 resolver 可自动批准的。
+   改为 `f"{session_id}|{message_index}|{fact_text}"`（三者跨追加均稳定）。
+   反事实实测：还原旧实现后队列 3 行而非 2 行（`assert 3 == 2`），已确认会失败。
+2. **`sessions_skipped_already_processed` 重复扣减。**
+   原式 `sessions_scanned - sessions_eligible - _unreadable_count(...)`，而
+   `sessions_scanned = len(pairs)`，`_discover_session_files` **已经**把 stat 失败的
+   文件排除在 `pairs` 之外——再扣一次即重复扣减，且 `max(...,0)` 把负数夹掉、
+   掩盖了症状。改为 `sessions_scanned - sessions_eligible`，并删掉随之失去调用方的
+   `_unreadable_count`。反事实实测：还原旧式后报 0 而非 1（`assert 0 == 1`），已确认会失败。
+
+#### 全量测试套件另外抓出 3 个回归（子 agent 只跑了定向测试，全部漏掉）
+
+子 agent 的定向测试全绿（38/38），但**全量套件 3 failed**。这正是
+「Definition of Done — 绝不在只跑自己新增/改动的测试后就推送」那条规则的实证。
+三者全部落在**子 agent 白名单之外的文件**，它无权修（已在其报告中如实上报了相邻风险，
+但没预见到这三处会 FAIL）：
+
+1. `test_error_record_emitting_components_constant_matches_source` ——
+   新组件名 `session_fact_extraction` 发了 `error_record` 却未登记进
+   `memory_os_3_200_monitor.py::ERROR_RECORD_EMITTING_COMPONENTS`。
+   该测试**从源码正则反推真实发射者清单**再比对常量，所以"新增发射者却不分类"
+   会响亮失败而不是静默扩大盲区——设计得很好，正好抓到我们。已按字典序补入。
+   注：该常量同时喂给 `_error_record_component_coverage`，而
+   `unaggregated_component_count` 本就 > 0（headline 聚合只覆盖 runtime /
+   memory_projection / session_mirror / prefetch 四个），是一个诚实的盲区计量而非门；
+   已确认无测试钉住其具体数值（只断言 `> 0` 与自一致），故补入是安全且更诚实的。
+2. `test_installer_can_run_owner_cron_onboarding_with_auto_channel`（`blocked` ≠ `applied`）
+3. `test_installer_can_run_full_owner_cron_profile_when_requested`（`0` ≠ `9` 个 job）
+
+2、3 同一个根因：`memory_os_owner_cron_onboarding.py:222-225` 要求
+**group 的每一个成员 helper 都必须存在于 `<hermes_home>/scripts/`**
+（其代码注释写明理由：「a group tick whose helper is absent would fail that lane on
+every tick with no install-time signal」）。而 `install_memory_os_plugin.py`
+的 `_write_operational_helper_scripts` 是**逐个列举**源文件的，新 lane 的两个脚本
+不在其中 ⇒ 安装后 helper 缺失 ⇒ onboarding 直接 blocked ⇒ 一个 job 都不建。
+已补 `SOURCE_SESSION_FACT_EXTRACTION_LANE` / `_GATE` 两个常量与 copy map 两项。
+（`plugins/` 树是整体拷贝的，故模块文件本身无需登记；已核实
+`_validate_system_module_source` 只是源树抽检清单，不是拷贝清单。）
+
+**这三处的反事实就是它们本身**：三个测试在修复前实测 FAIL、修复后 PASS，
+无需再另写——既有守卫已经承担了反事实职责。
+
+**由此补一条"新增 lane 的登记清单"**（Section W 规则 5：同类问题全项目排查）。
+加一条 lane 至少要动：① `cron_registry.py` lane def；② 该 group 的 `member_keys`；
+③ `knob_overrides.py`（若有 knob）；④ `install_memory_os_plugin.py` 的
+`SOURCE_*` 常量 + `_write_operational_helper_scripts` copy map；
+⑤ `memory_os_3_200_monitor.py::ERROR_RECORD_EMITTING_COMPONENTS`（若发 error_record）；
+⑥ 部署时重新生成 registry 快照。
+**不需要**动 `LEGACY_PER_LANE_CRON_JOBS`——已核实该表只登记**合并前**就存在于
+已 onboarding 主机上的旧单 lane job（用于 pause 而非删除，是回滚路径）；
+新 lane 直接诞生在 `tick_evidence` 内，从未有过独立 job，加进去是惰性条目
+且会误导 onboarding 去 pause 一个从不存在的 job。子 agent 这个判断是对的（已复核）。
+**也不需要**动 `write_surface_check.py`（已实跑确认 `surface_count` 仍 154、
+`unclassified_count=0`）。
+
+另补一条**脱敏防漂移测试**：断言本 lane 的 `_SECRET_PATTERNS` 与
+`memory_os.__init__._TASK_SECRET_PATTERNS` 的正则字符串逐条相等。
+两者当前完全一致（同 4 条、同序）；该测试的作用是——若日后规范集新增一条模式，
+这里**失败**而不是静默漏掉那一类秘密（本 lane 读原始转录，脱敏不得弱于捕获路径）。
+
+#### 生产形状已实测核对（不是假设）
+
+子 agent 自陈"会话文件形状未对生产核实"。已核实：
+`session_mirror.py:306` 的 `sessions_root` 就是 `hermes_home / "sessions"`、
+`:613` glob 的就是 `session_*.json`，与本 lane 一致；3.200 上该 glob 命中 **141 个**
+文件，顶层键含 `messages`/`platform`/`session_id`，`messages[0]` 含 `content`/`role`
+——**与实现假设完全一致**。（同目录另有 42 个 `2026*.jsonl` 新格式与若干
+`request_dump_*.json` 错误转储，两者都不匹配该 glob，与 `session_mirror` 自身口径相同。）
+
+**排空速率**（据此可算，非估计）：`tick_evidence` cron 为每小时，
+lane `due_interval_minutes=360` ⇒ 每天 4 次 × 每次 2 个会话 = **8 个/天**，
+141 个文件约需 **18 天**排空。最新优先意味着召回价值立刻开始体现；
+若要更快，`session_fact_extraction_max_sessions_per_tick` 可直接调大（上界 20）。
+
+#### 部署要求（**遗漏则静默失效**，须写进统一部署清单）
+
+`cron_group_runner._load_group` **优先读**
+`<hermes_home>/memory-os/system/memory_os_cron_registry.json`，且只要快照里该 group 的
+`member_keys` 解析出非空成员就**直接返回、不回退**编译内注册表。
+已 onboarding 的主机上，快照里 `tick_evidence` 仍是旧的 5 个成员 ⇒
+**新 lane 根本不会被 tick 调用，且没有 `unknown_registry_key`、没有 error record、
+没有 WARN**——tick 照常关闭一个干净的 envelope，只是从未执行它。
+（`execution_gate_runner._load_spec` 确实会回退到编译内注册表，所以失效点精确地
+在 group 成员解析，而非 permit 签发；子 agent 报的"会报 `unknown_registry_key`"
+不准确，实际比那更隐蔽。）
+⇒ **统一部署时必须重新生成该快照**（归口
+`install_memory_os_plugin.py` / `memory_os_owner_cron_onboarding.py`），
+并**在部署后核对快照里确有 `session_fact_extraction`**，不得假定注册即生效。
+已同步写入 CLAUDE.md cron 小节。
+
+#### 测试与门
+
+- 新增 20 个测试（`test_memory_os_session_fact_extraction.py` 17 +
+  `test_memory_os_session_fact_extraction_lane.py` 3，均为子 agent 所写）
+  ＋ 整合评审中我补的 3 个（两个反事实 + 脱敏防漂移）= **+23**。
+  CB.1 又补 3 个（延后可重试、延后有界、账本保留可老化）⇒ 本节合计 **+26**。
+- **3089 → 3115 passed / 13 skipped / 0 failed（最终一跑全绿）。**
+  数字对得上：3089 + 26 = 3115。
+- 四门全过：`write_surface_check`（`surface_count` 154 不变、`unclassified_count=0`）、
+  `import_cycle_check`（`cycle_count=0`）、`static_hygiene`、
+  `public_checkout_probe --strict`（`PASS`）；**空白检查按推送区间**
+  （`git diff --check origin/main...HEAD`）干净，非逐提交；无 CRLF。
+- 中途两次全量跑各有 1 个**环境性**失败，均已隔离证伪、与本批改动无关，如实记下：
+  ① `test_completion_append_and_sidecar_are_idempotent_under_concurrency`
+  （`PermissionError`，已知 Windows 文件锁 flake，单独重跑即 PASS）；
+  ② `test_t2_2_5_gate_fails_closed_when_fts_query_errors`
+  （`sqlite3.OperationalError: unable to open database file`）——
+  单独重跑 PASS、同一 `--basetemp` 单跑 PASS、整文件 64 个全 PASS；
+  是 OS 资源错误而非断言失败，且 graph_layer 的 FTS 门与本批所改的
+  `session_fact_extraction`/`metadata_retention` 无任何调用关系。
+  **换全新 basetemp 重跑后 3115 全绿，证实成因是该次运行累积的 3863 个临时目录**
+  ——不是回归。（教训：不要用"它是 flake"收尾，要换掉可疑变量再跑一次拿到绿。）
+- **环境注记**：本机 C: 盘在此期间被占满（98G/99G），触发 ENOSPC 一度使 shell
+  不可用（连工具自身的输出文件都创建不了）。非本会话造成（本会话产物 <1MB）。
+  处置：清掉 pytest 残留后把测试临时目录改到 D: 盘（`TMPDIR` + `--basetemp`）。
+- 证据级别：**仅 `local_pass`**。未部署、未在 3.200 上跑过本 lane。
+
+#### CB.1 — 顾问复审又抓出 3 处（含一个会让整条 lane 失去意义的缺陷）
+
+`f4a3ccf` 提交后请顾问复审，抓出 3 处我逐行评审时漏掉的问题。第一处严重：
+**它会让 lane 在自己最可能的失败模式下永久丢失事实——正是 lane 存在的理由。**
+
+**1（严重）：LLM 失败后仍把会话指纹记为已处理 ⇒ 事实永久丢失。**
+`newly_processed_fingerprints.append(fingerprint)` 原本在**每会话循环末尾无条件执行**
+（在每消息循环之外）。于是模型不可用的那一 tick：每条消息 `llm_empty_content` →
+`has_durable_fact=False` → 0 候选 → **会话仍被标记已处理、此后永不重访**
+（除非文件本身变化）。而生产实测该失败率是 **27.5%**——不是边缘情况。
+
+同时暴露出与回退策略的耦合：`_heuristic_extract_fact` 用
+`_clip(message_text, 500)` 当"事实"，是当时唯一挡在"模型故障"与"全丢"之间的东西。
+但**这个耦合是我在派单里指定照抄 `fact_judge` 才带进来的，是我的指令错了**：
+`fact_judge` 判的是"已存在内容"的一个**布尔**，marker 启发式是合理的降级答案；
+本 lane 必须**生成**一条摘要，而**没有任何启发式能做摘要**。
+marker 命中的 500 字符原文切片不是"恢复出的事实"，
+它恰恰是本 lane 要消除的那种截断。更糟的是 `_DURABLE_MARKERS` 里含 **`"用"`**
+（实测确认），几乎任何长中文消息都含它 ⇒ 该门几乎必然命中，而非罕见命中；
+且候选 `bridge_state` 在 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内 ⇒
+这些原文切片可被 resolver 自动提升为**临时结晶**。这是治理问题，不只是噪声。
+
+**改法（两半必须一起改，顾问明确指出"不许只改一半"）**：
+- **失败即延后，绝不臆造**：LLM 失败返回
+  `reason="llm_unavailable_extraction_deferred"`、不产候选；删除
+  `_heuristic_extract_fact` 与 `_DURABLE_MARKERS` 导入。
+- **延后有界**：指纹账本增加 `status`（`processed` / `deferred` / `abandoned`）
+  与 `attempt`；只有 `processed`/`abandoned` 是**终态**、才抑制重跑。
+  `MAX_EXTRACTION_ATTEMPTS=3` 之后记 `abandoned`——**终态但与 `processed` 可区分**，
+  使"放弃"在账本里看得见，而不是长得像成功。
+  （若无此上限，一条永远解析失败的消息会每 tick 重复占用预算、饿死其他会话。）
+- 新增计数器 `sessions_deferred_llm_failure` / `sessions_abandoned_after_max_attempts`
+  ——否则"模型故障"与"这批确实没事实"都读作 `facts_extracted=0`。
+- 反事实实测（还原为无条件指纹）：
+  `assert 0 == 1`（延后未被记录）与 `assert False`（永不放弃）**双双失败**，已确认。
+
+**2：两个新账本重复了待办 9 的老毛病。**
+指纹账本原本写 `processed_at`，而 `metadata_retention._record_created_at()`
+只认 `created_at`/`ts`/`timestamp` ⇒ 每条都被判"无时间戳" ⇒ **永久 `retained_records`**。
+且两个账本**根本没在 `metadata_retention` 注册**（未注册＝对保留计划不可见＝无界增长）。
+增长不是理论问题：被追加的会话**按设计**会产生新指纹，故活跃会话每 tick 加一行，
+而 `read_processed_session_fingerprints` 每次运行都读整个文件。
+已改为 `created_at` 并把两个账本都注册进 `metadata_retention_plan`。
+反事实实测（改回 `processed_at`）：`assert None is not None` 失败，已确认；
+且该测试**经真实生产者取证**（断言的是 lane 实跑写出的行，不是手写夹具）。
+
+**3：推送前的空白检查必须按推送区间做，而非逐提交。**
+我此前每次提交只跑了 `git diff --cached --check`，而 CI 检查的是整个推送区间
+（记忆条目 `ci-whitespace-gate-checks-pushed-range` 记的就是这条）。已按区间复核。
+
+**方法记账**：这三处我逐行读完 785 行仍然漏掉。第 1 处漏掉的原因值得记——
+我把注意力放在"这段代码做了什么"，而没问"**LLM 失败时这段代码做什么**"。
+`fingerprint_outcomes` 的赋值点在循环末尾、语法上毫不显眼，
+但它与失败路径的交互决定了整条 lane 有没有意义。
+**教训：读一个有外部依赖的循环时，必须专门再走一遍"依赖失效"那条路径。**
+
+#### 下游治理事实（须 Owner 知情，本轮不改）
+
+候选 `bridge_state="inner_drive_candidate"`，是既有受治理路径（与 `inner_drive` 同）。
+但该值在 `resolver_gate.py:33` 的 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内，因此
+`candidate_aggregation` 的 resolver 自动批准**可以**把这些候选提升为**临时**
+（provisional）结晶记录，条件是通过 `is_reversible`（无身份信号、非敏感、无副作用）。
+本 lane 自身从不结晶；但"LLM 从原始转录抽出的事实"经此路径可在无 Owner 逐条批准的
+情况下进入临时结晶态。**这是既有设计的既有行为，不是本 lane 新增的**，
+但因为本 lane 的来源是原始转录而非已脱敏摘要，性质上比 `inner_drive` 更值得 Owner
+明示确认是否接受。
+
+**CB.1 之后此项风险已显著下降**：删除臆造回退后，候选体**只可能**是 LLM 产出的摘要，
+不再可能是 marker 命中的 500 字符原文切片。原先那条路径才是真正的问题所在——
+`_DURABLE_MARKERS` 含 `"用"`，模型故障期间几乎每条长中文消息都会变成一条
+原文切片候选，且同样 resolver 可自动提升。现在模型故障只会**延后**，不产候选。
+剩余待 Owner 裁定的只有一个干净问题：**"LLM 从原始转录摘出的事实"
+是否可以像 `inner_drive` 候选一样被 resolver 自动提升为临时结晶**，
+还是应当为本 lane 引入一个不在 `RESOLVER_ELIGIBLE_BRIDGE_STATES` 内的新 `bridge_state`
+以强制逐条 Owner 批准。**本轮不改，等 Owner 裁定。**
+
+---
+
+### CC — 修复 16a/16b：归因契约（2026-08-04，未部署）
+
+关闭待办 16。Owner 裁定：**resolver 保持自动提升，尽量减少人工介入** ⇒
+①的候选 `bridge_state` **不改**，`RESOLVER_ELIGIBLE_BRIDGE_STATES` 不新增成员。
+该裁定已记录，本节不再讨论。
+
+#### 两个缺陷各自的修法
+
+**16b：门的词表与生产者词表不匹配 ⇒ 静默失效。**
+`exposure_rollup._memory_source_has_attribution_gap` 原本硬编码
+`{crystallized, working, entity_graph, indexed_recall, vector, hindsight}`，
+其中**后四个全项目无任何生产者**；而生产者
+（`prefetch._section_source_class`）实发的是 `indexed` / `graph_layer` /
+`event` / `candidate` / `substrate_recall` 等。名字对不上，那几类就从不被检查。
+
+改法不是"补几个名字"，而是**让不匹配变成可测**：
+- 生产者词表提升为模块级常量 `SECTION_SOURCE_CLASS_BY_TITLE` +
+  `SECTION_SOURCE_CLASS_FALLBACK`（原先是函数内局部 dict，**任何测试都看不见它**，
+  这正是漂移能存在的原因）。
+- 门侧拆成两个显式集合：`ATTRIBUTABLE_SOURCE_CLASSES`（6 个）与
+  `NON_ATTRIBUTABLE_SOURCE_CLASSES`（11 个，**逐类写明豁免理由**）。
+- 守卫测试 `test_attributable_source_classes_cover_the_producer_vocabulary`
+  断言两件事：生产者能发出的每个类都被显式分类（漏分类＝静默不检查），
+  且契约里**没有无生产者的死名字**（死名字＝该类检查静默为空）。
+  两个方向都断言，才能同时挡住原缺陷和未来新增段落。
+
+**豁免的 11 类及理由**（派生/聚合视图，无 1:1 规范记录可引，
+要求 `source_ids` 是**不可满足**而非"未满足"）：
+`foreground`（任务锚点，派生态）、`recall_guard`（固定守卫串，自带合成标记）、
+`identity`（整文件片段）、`state_overlay`（跨记录聚合）、`bridge`（连续性桥，派生）、
+`last_session`（会话摘要，派生）、`carryover`（深省卡，派生）、
+`relationship`（整文件片段）、`substrate_recall`（**按契约就是
+`advisory_only` / `authority_class="derived_projection"`**，见 `substrates/base.py`）、
+`diagnostic`（诊断接地，派生）、`other`（未映射标题，定义上未知）。
+
+**16a：生产者只为 crystallized 一个类填 ID。**
+`section_source_ids` 在 `_build_prefetch_sections` 内**只有一个赋值点**
+（crystallized 专属），其余段落一律落到 `_section_metadata` 的空 `{}` 分支。
+已为 `working` / `candidate` / `event` / `indexed` / `graph_layer` 五个类补齐：
+- `working` → `working:<file_stem>:<item_id>`（规范格式已在
+  `deep_reflection.py:639` 生产使用，前缀在 `v3_body_packet.py:21` 允许表内）
+- `candidate` → `candidate:<candidate_id>`
+- `event` → `event:<event_id>`
+- `indexed` / `graph_layer` → `<record_type>:<record_id>`
+- 并扩 `_extract_record_ids_from_section` 的前缀白名单
+  （原只认 `crystallized:`/`candidate:`，所以 `working` **即使填了 ID 也无法分类**
+  ——这正是 `classified_ratio = 0.7018` 的同源解释）
+
+**实现方式选择**：用**可选出参** `source_ids: list[str] | None = None`，
+而非改返回类型。理由：`_event_lines` / `_graph_layer_shadow_lines` 被测试直接导入
+并断言其列表返回值，改签名会连带打破多个测试文件；而 `seen` 与 `error_records`
+本来就是本文件既有的同款可选出参惯例。
+**代价与对策**：可选出参正是 Section W 规则 4 说的那种"陷阱默认值"——
+调用方忘了传就静默无归因。所以真正的护栏不是签名而是
+**结果级测试** `test_real_prefetch_leaves_no_attribution_gap`：
+跑一次真实 prefetch，断言产出的披露记录零缺口，
+且**显式断言 working/event/candidate 三类确实出现**（否则测试会空过）。
+反事实实测：删掉任一 `source_ids=` 实参 ⇒ 该测试与端到端那条**双双失败**，已确认。
+
+#### 关键设计问题：为什么必须有"归因纪元"边界
+
+只修生产者**永远清不掉那个 FAIL**。门是对**全部自然行**算缺口的，
+而 3.200 上那 69 个有缺口的行**全都是自然行**——它们已经写入、
+披露动作已经发生、ID 当时就没被采集，**无法追溯补齐**。
+
+故引入 `memory_sources.ATTRIBUTION_SCHEMA_VERSION`
+（`memory-os.memory_sources_attribution.v1`），新记录带此标记；
+门**只对带标记的记录**判定归因健康，未带标记的自然行计入
+`legacy_unattributed_record_count` 并继续留在
+`all_history_attribution_gap_count` 里（**不是抹掉，是分类为债务**）。
+这与同文件既有的 `legacy_unmarked_rollup_count`（处理 `trigger_class`
+出现之前写的 rollup 行）**是同一个模式、同一个理由**，不是新发明。
+
+#### 诚实护栏：不许"清零即变绿"
+
+上一步有个显而易见的滥用空间：部署当天所有旧行都成了"债务"、
+带标记的行为 0 ⇒ 缺口 0 ⇒ 报 PASS。**那就是靠缩小度量换绿色**，
+正是待办 16 自己警告的事。故加：
+- 当存在自然行但**归因纪元为空**时，`schema_era_health` 报
+  **`healthy_no_sample`**（monitor 早已把它当 PASS 值收下，见 `:1389`，
+  但字面上写明"没有样本"），**不报 PASS**；
+- 同时追加 freeze reason `attribution_era_no_sample`，
+  **clearance 在出现真实归因流量前不得解冻**。
+
+#### 实测投影（3.200 只读，无部署）
+
+用新判据在生产数据上跑一遍（本地重实现判据，不落任何文件）：
+
+| | 值 |
+|---|---|
+| 总行 / 自然行 | 988 / 170 |
+| 归因纪元行（部署前） | **0**（预期） |
+| **旧**：`schema_era_attribution_gap_count` | **69 → FAIL** |
+| **新**：`schema_era_attribution_gap_count` | **0** |
+| **新**：`legacy_unattributed_record_count` | **170** |
+| **新**：`schema_era_health` | **`healthy_no_sample`**（非 PASS） |
+| **新**：freeze reason | `attribution_era_no_sample` |
+
+**覆盖面是升了不是降了**（这条最关键，用来证明不是"买绿"）：
+把**新**词表套到全部自然行上会命中 **129 行**（旧词表只有 69 行）。
+新被检查到的段落：`event` 115、`indexed` 46、`candidate` 5
+（`working` 69 原本就在检查内）。也就是说 CA.2 记的"静默跳过 1093 个段落"
+在按行折算后确实存在，且现在这些类**已进入检查范围**——
+只是那批行属于修复前、无法追溯，故落入债务侧。
+（`substrate_recall` 的 133 个段落现在**明确豁免**，理由是它按契约就是
+`advisory_only` 的派生投影，不是本地规范记录的引用——这比原先"名字对不上所以
+碰巧不检查"诚实得多。）
+
+**部署后的预期演进**：FAIL 立即转为 `healthy_no_sample`（不是 PASS），
+clearance 保持冻结；随新流量产生带标记记录，`attribution_era_record_count` 上升，
+届时**任何一条新记录漏归因都会重新 FAIL**。这是把一个"永远红且无人能修"的门，
+换成一个"当前干净、且能真正检出新缺陷"的门。
+
+#### 一个额外收获：注释也能触发架构防火墙
+
+`test_x3_exposure_firewall::test_prefetch_ranking_not_contaminated_by_exposure`
+**不只查 import，它扫 `prefetch.py` 的源文本**，禁止出现
+`exposure_rollup` / `selected_count` / `exposure_rollup_lag` 三个串
+（X.3：曝光数据不得回流进 prefetch 排序）。我写的解释性注释里写了
+`exposure_rollup.ATTRIBUTABLE_SOURCE_CLASSES`，于是全量套件把它抓出来了。
+
+本次改动**没有**新增 import、也没有数据依赖——归因是
+"生产者写 ID → 审计侧读 ID"的**单向**关系。所以正确处置是**改注释、
+保留防火墙**，而不是放宽那条测试。为了迁就一句注释去削弱一条架构测试，
+是明显划不来的交易。已在三处注释中改为"审计侧"的说法并注明为何不点名。
+
+（也再次印证：只跑自己新加的测试是不够的。这条是全量套件抓出来的，
+新增的 10 个归因测试全绿也不会发现它。）
+
+#### 测试与门
+
+新增 `tests/plugins/memory/test_memory_os_attribution_contract.py`（10 个）：
+词表双向守卫、每个可归因类都有可识别前缀、提取器认 `working:`/`event:`、
+非规范 ID 仍被忽略、`working` 无 ID 即缺口、豁免类无 ID 不算缺口、
+映射是唯一真源（含降级后缀）、新记录带纪元标记、
+**真实 prefetch 零缺口（含防空过断言）**、端到端纪元内且干净。
+另在 `test_memory_os_phase1_observability.py` 新增
+`test_pre_attribution_era_gaps_are_surfaced_as_debt_not_gated`。
+
+**改了 3 个既有测试的夹具**（保持原意，非削弱断言）：两个 `natural-anchor`
+与一个 `natural-good` 都代表"当前纪元的健康记录"，故补上 `attribution_schema`
+标记——否则它们会落到"无样本"侧，而它们的原意正是"健康且可解冻"。
+
+**3115 → 3126 passed / 13 skipped / 0 failed（+11）**，数字对得上：
+归因契约 10 + phase1 纪元债务 1。四门全过；`surface_count` 154 不变、
+`unclassified_count=0`；空白检查按推送区间干净。
+
+本轮全量套件因本机环境（C: 盘曾占满、后台进程被回收）分三段前台跑完，
+三段均为最终代码状态、无过期分段：
+`tests/plugins` 2086、`tests/scripts`+`seam`+`system_modularization` 1015、
+`tests/ev*` 25 —— 合计 3126。
+
+证据级别：**仅 `local_pass`**，未部署。**部署要点**：本节改的是判据与生产者，
+不新增 lane，无需重生成 cron 注册快照；但 `memory_sources` 记录格式新增了
+`attribution_schema` 字段，部署后应确认新写入的行确实带该字段
+（否则门会一直停在 `healthy_no_sample`，而那正是"没有样本"的诚实读数）。
+
+#### CC.1 — 复审：把"被我加宽的东西"的下游全查一遍
+
+顾问复审提的三点，全部属同一类——**我加宽了判据，但没查判据的所有消费者**。
+这正是 CLAUDE.md"越过被指出的问题、追整条调用链"那条规则的适用场景，
+而我第一轮只查了自己**故意改的**那两个数。
+
+**① `_memory_source_has_attribution_gap` 有三个调用点，我只给其中一个套了纪元。**
+`all_history_gap`（全量 `ms_records`）与 `rolling_gap`（近 7 天）现在也在跑
+**6 类**判据而非原来的**实际 2 类**，数字必然上涨——而我的投影脚本只算了
+`schema_era` 一个。已补测（3.200 只读）：
+
+| 计数器 | 旧 | 新 | 是否触发告警 |
+|---|---|---|---|
+| `schema_era_attribution_gap_count`（**唯一 FAIL 驱动**）| 69 | **0** | FAIL→清除 |
+| `all_history_attribution_gap_count` | 778 | **844** | **否**，`info` 专用（Fix 2c 明写"绝不单独驱动 FAIL/WARN"）|
+| `rolling_7d_attribution_gap_count` | 3 | **3**（不变）| **否**，**全 monitor 无任何引用** |
+| `migration_debt_attribution_gap_count` | 709 | **844** | 否，同为 `info` |
+
+结论：**本次部署不引入任何新的 WARN/FAIL**，只让 INFO 侧的债务数字更诚实
+（+66 行，正是原先被静默跳过的那批）。`rolling_7d` 恰好不变，因为近 7 天只有 5 行。
+另注：`rolling_7d_attribution_gap_count` **算了但没人读**，与
+`exposure_rollup_lag_hours` 是同一个既有毛病，**本节未修**，登记为待办 17。
+
+**② 新计数器"算了但没人读" —— 已修。**
+`legacy_unattributed_record_count` / `attribution_era_record_count` 原本只是
+被 `exposure_monitor_stats` 返回。远程与本地探针都是**整字典**透传
+（`:5565`、`:4691`，无白名单），所以它们进得了快照——**但 monitor 不读**，
+于是那 170 行债务与"有多少真实归因证据"这两个数**对任何读者都不存在**。
+这正是我刚写进 CLAUDE.md 的反模式。已让它们搭既有 INFO 通道
+（`v2_exposure_all_history_migration_debt`，天然就是"可见但绝不驱动 FAIL/WARN"），
+并把 `legacy_unattributed_record_count > 0` 加入该 INFO 的触发条件——
+否则当债务是**唯一**信号时（迁移债务为 0），整条 INFO 根本不发出。
+反事实实测：去掉该触发条件 ⇒ 测试报 `StopIteration`（条目压根不存在），已确认。
+
+**③ 三段式 `working:a:b` ID 从未走过 rollup 循环。**
+已查：`_extract_record_ids_from_section` **无跨文件消费者**，
+`exposure_rollup.py` 内**没有任何 `split(":")`/`partition(":")`**，
+三个使用点（`:261`、`:269`、`:315`）一律把 ID 当**不透明键**用
+（`id_classification[rid] = ...`、`selected_rids.update(...)`、`sorted(...)`）。
+故三段式 ID 与 `indexed`/`graph_layer` 的 `<record_type>:<record_id>` 均安全，
+**无需改动**。
+
+**未采纳的一条**：`substrate_recall`（133 段）的豁免是全节最可能被质疑的判断，
+但它有 `substrates/base.py` 的 `advisory_only` / `derived_projection` 契约依据，
+且已写明理由，保持豁免。
+
+**方法记账**：三点全是"消费者未审计"。我把 `ATTRIBUTABLE_SOURCE_CLASSES`
+从实际 2 类扩到 6 类时，只想着"这样才检得全"，没想到
+**同一个判据还被两个报告口径共用**。
+**教训：加宽一个判据前，先 grep 它的全部调用点，并对每个调用点问
+"这个数字变大了会不会触发告警、以及谁在读它"。**
+
+#### CC.2 — 待办 17：给滚动窗口一个读者，并把 31 个键全查一遍
+
+本节是**第一次按新流程做的**：写代码 → 全量套件 + 四门 → **顾问复审** → 折叠 → **才提交一次**。
+此前 CB.1 与 CC.1 都是"先提交、后复审"，于是复审抓到的每一处都变成又一个补救提交
+（`f4a3ccf`→`6b34976`、`47a077a`→`c261072`）。这是流程错误，不是手误。
+折叠已完成：6 个提交合为 3 个，且折叠前后内容逐字节一致（`git diff --stat` 为空）。
+
+**修法判定：`rolling_7d_attribution_gap_count` 定为 INFO，不给它单独的 WARN。**
+待办 17 原本列了两条路。选 INFO 的理由是**它作为告警是冗余的**：
+`schema_era_attribution_gap_count` 已经对**归因纪元内任意一条**有缺口的记录
+无时间界地 FAIL，所以"近 7 天有缺口"必然已经被那条 FAIL 覆盖，
+再加一个 WARN 只是更弱的重复告警。滚动窗口真正提供的是**诊断价值**——
+一个 schema-era FAIL 到底是**正在退化**还是**纪元内的历史债务**。
+所以给它读者（`v2_exposure_attribution_recent_window`，INFO），但不给它分级。
+
+**顺带修掉一个我自己刚引入的语义错误**：`rolling_gap` 原先**没有**做纪元过滤。
+若不改，生产者修好后的**头 7 天**里，它会因为窗口内还有修复前的旧行而报出缺口，
+而生产者其实是正确的——一个"当前是否正在退化"的滚动信号，
+用无法归因的历史行是答不出来的。已改为对 `rolling_era_records` 计数，
+并新增 `rolling_7d_attribution_era_record_count` 作为分母：
+**0 缺口 / 0 记录 是"近期没有归因流量"，不是"近期很干净"**。
+反事实实测：改回 `rolling_records` ⇒ 断言 `1 == 0` 失败；
+去掉 monitor 那段 INFO ⇒ `StopIteration`。两条都实测确认。
+
+#### 31 个键的读者普查（待办 17 的第二半）
+
+写脚本枚举 `exposure_monitor_stats` **真实返回**的键（调用函数取键，不解析源码），
+再全项目扫 503 个文件找读者。**关键教训在于这个审计工具本身先给了我错答案。**
+
+第一版把**注释里的提及**也算成"有读者"，于是 `exposure_rollup_lag_hours`
+显示为"有生产读者"——而它在 monitor 里的两次出现**全是我自己刚写的注释**
+（把它当作"已知无人读的指标"举例）。加上"跳过纯注释行"的过滤后，结论翻转。
+**一个用文本匹配判断"有没有读者"的工具，会把谈论 X 误判为使用 X。**
+
+修正后的准确结论：
+
+| 分类 | 数量 | 说明 |
+|---|---|---|
+| 有生产读者 | 15 | 含本次新加的两个滚动键 |
+| 仅测试断言 | 9 | 生产侧无消费者 |
+| 仅文档提及 | 3 | |
+| 任何地方都无读者 | 4 | |
+
+**但要注意我这个审计的第二个局限**：它排除了生产者文件本身，
+所以**内部消费**的键会被误判为孤儿。实测核对后，以下 4 个**并非孤儿**——
+它们在 `exposure_rollup.py` 内部驱动 `freeze_reasons` / `schema_health`（`:542-558`），
+而那两个是有读者的：`telemetry_degraded_count`、`initial_natural_cycle_count`、
+`production_observation_days`、`budget_pressure_streak_days`。
+
+**扣除内部消费后，真正"算了却无人分级、无人读"的键**（登记为待办 18）：
+
+- **`schema_era_classified_ratio`** —— 最值得注意的一个。**这正是 BY.1 当作
+  "数据成熟度"证据引用的那个 `0.6506→0.7018`**。它被计算、被写进快照、
+  被写进本文档，但**没有任何代码读它、更没有分级**。
+  一个被当作论据反复引用的数字，其实从未进入任何判定。
+- **`exposure_rollup_lag_hours`** —— CLAUDE.md 早已记载它"从不分级"，本次确认无误
+  （且我的审计工具一度把它误判为有读者，见上）。
+- **`legacy_unmarked_rollup_count`** —— **这条最讽刺：我在 CC 节用它作为
+  "把不可追溯的旧行分类为债务"的先例来论证归因纪元边界的正当性，
+  而它自己也没有生产读者。**先例在**设计**上成立（分类而非抹除），
+  但在**可见性**上同样不合格。反过来说，本次的
+  `legacy_unattributed_record_count` 已经比它所仿照的先例更好——那个有读者。
+- 其余：`cumulative_selected` / `cumulative_dropped_by_rank` /
+  `cumulative_dropped_by_budget` / `cumulative_eligible` /
+  `exposure_rollup_records_total` / `rolling_7d_natural_record_count` /
+  `schema_era_natural_record_count` / `latest_window_start` / `latest_window_end`。
+  这些多为快照上下文性质，未必都需要分级，但需要**逐个明确定性**，
+  不能继续停在"算了不用"。
+
+#### 新流程第一次见效：复审在提交前抓到一个真缺陷
+
+这是本会话第一次**在提交前**跑顾问复审，它当场抓到一处——而且正是我整个会话
+一直在记录的那个形状：**两种不同状态留下完全相同的证据**。
+
+我给新 INFO 条目的守卫是**存在性**判断 `if v2_exposure:`。但采集失败时
+`v2_exposure` **并不是空的**，它是 `{"schema_era_health": "unavailable",
+"error_code": ...}`（`:4697`/`:4714` 两条填充路径都这么写，
+`test_memory_os_3_200_monitor.py:526` 还钉了这个形状）——**truthy**。
+于是条目照发，三个 `.get(...) or 0` 全取 0，
+monitor 就会公布 `rolling_7d_attribution_gap_count: 0`、
+`rolling_7d_attribution_era_record_count: 0`，
+**与「近期确实很干净」的输出逐字节相同**，而实际上探针根本没跑成。
+采集失败另有 WARN 上报，但这条 INFO 是在**把默认值当测量值发布**。
+
+对照就在我这段代码上方：`v2_exposure_all_history_migration_debt` 用的是
+**值守卫**（`migration_debt_gap_count > 0 or ...`），所以采集失败时它正确地保持沉默。
+我偏离了近邻的既有约定。
+
+已改为守卫「采集是否**成功**」（无 `error_code` 且 health 不在
+`{unavailable, unavailable_remote_projection}`）。脚本外独立复验：
+修前 `INFO entry emitted on collection FAILURE: True`，修后 `False`。
+并补测试断言三件事：采集失败不发条目、失败本身仍有 WARN（沉默不等于整体沉默）、
+**采集成功但近期确实为 0 时仍要发**——否则「沉默」与「测得 0」就分不开了。
+
+**这正是把复审移到提交前的全部意义**：同一处缺陷，按旧流程会变成又一个补救提交。
+
+**另记一处已知不一致**（顾问指出，非阻塞，登记在待办 18）：
+`rolling_7d_attribution_gap_count` 现在是**纪元域**，而
+`rolling_7d_natural_record_count` 仍是**自然域**。谁把这两个当成
+「缺口/分母」配对使用就会算出错的比率。本次新增的
+`rolling_7d_attribution_era_record_count` 才是正确分母。
+
+#### CC.2 测试与门
+
+**3127 → 3130 passed / 13 skipped / 0 failed（+3）**：纪元过滤（phase1）、
+monitor INFO、以及复审抠出的采集失败静默各一。分三段前台跑：`tests/plugins` 2087、
+`tests/scripts`+`seam`+`system_modularization` 1018、`tests/ev*` 25 = 3130。
+四门全过，`surface_count` 154 不变、`unclassified_count=0`，空白检查干净。
+（计数溯源：CC 节记的 3126 是 `47a077a` 时的状态；CC.1 的 monitor 测试使其成为 3127。）
+证据级别：**仅 `local_pass`**，未部署、未推送。
+
+**本节不修这批**——那是独立范围，且每个都需要单独的定性判断
+（该分级、该进 INFO、还是该删）。**故意不做**，登记为待办 18，
+而不是顺手扩大改动面。
+
+## CD — 残留待办一轮清扫：18/14/11/9/13/10/2 七项关闭 + 3 部分关闭（2026-08-04）
+
+按待办表的优先级顺序（18 → 14 → 11 → 9 → 13 → 10 → 2/3），每项独立反事实
+（revert→FAIL→restore→PASS 全部实测）。顺链另抓出两个未登记的真缺陷（见 CD.2）。
+
+### CD.1 待办 18 —— `exposure_monitor_stats` 孤儿键逐个定性
+
+不套统一处理，逐键裁定（graded / info / internal / component / 删除）：
+
+- **`schema_era_classified_ratio`**（优先项）→ **INFO**，新条目
+  `v2_exposure_classification_coverage`。刻意不分级：累计比率混合修复前后的
+  rollup，结构上就动得慢，没有证据支撑的阈值。**None 不得压成 0.0**——
+  无样本发布 0.0 会读成"覆盖率灾难"，条目改为不发（与采集失败守卫同一条
+  不造零规则）。
+- **`exposure_rollup_lag_hours` / `latest_window_start` / `latest_window_end` /
+  `exposure_rollup_records_total`** → **INFO**，新条目
+  `v2_exposure_rollup_ledger_state`。lag 刻意不分级——上游安静时 lag 良性增长
+  （待办 15 实测过的形状），分级必然在安静周误报；「跑没跑」已有
+  helper-completion freshness 分级，「为什么没产出」由 CD.2 的 last_run 回答。
+  `snapshot_status` 随行，防止空快照的 lag=0.0 读成"新鲜"。
+- **`legacy_unmarked_rollup_count`** → 并入既有 **migration-debt INFO** 条目
+  （它就是 rollup 侧的迁移债务），并成为该条目的独立触发条件之一。
+- **`rolling_7d_natural_record_count`** → 并入 **recent-window INFO** 条目，
+  注明是自然域流量体量、不是纪元域缺口的分母（CC.2 登记的域错配就此有了
+  就地说明）；natural−era 差值顺便成为部署后验证信号（新行未打
+  `attribution_schema` 时该差值不归零——正是 S266 登记的静默陷阱的探测器）。
+- **四个 `cumulative_*`** → 定性为 `conservation_total_passes` 的 **component**：
+  只在 all-history conservation 破裂（它们的诊断时刻）时随 migration-debt 条目
+  发布分解，平时不刷屏。
+- **`schema_era_natural_record_count`** → **删除**。名字撒谎（算的是全史自然行，
+  不是纪元域），且恒等于 `attribution_era_record_count +
+  legacy_unattributed_record_count`（两者都已 INFO 可见）。零读者经重新 grep 确认。
+- **census 门**：`test_exposure_monitor_stats_key_census_every_key_has_a_disposition`
+  钉死整个键集与每键定性——未来新增键必须先定性才能过测试，
+  "算了没人读"不能再无声出生。
+- **census 意外收获**：抓到 **`attribution_gap_count`** ——一个全项目零引用的
+  `all_history_attribution_gap_count` 重复别名，**手工审计（CC.2）自己也漏掉了它**，
+  因为它的名字是三个有读者键的子串。已删除。方法教训追加：子串键名会骗过
+  逐键 grep，census 的键集等值断言不会。
+
+### CD.2 待办 14 —— completion ≠ output：三个实例全部闭合
+
+- **`exposure_rollup`**：两条字节相同的不产出退出路径（良性跳过 /
+  `source_cursor_not_found`）现在每次运行都往快照写 `last_run` 块——
+  封闭原因码集合 `{produced, no_new_records, source_cursor_not_found,
+  legacy_source_cursor_missing, write_failed}` + 本次 new_records 数 +
+  trigger_class。读者不重跑、不读源码即可区分"无输入"与"永久坏死"。
+  经 `exposure_monitor_stats`（`last_run_outcome/at/new_records` 三键，
+  census 已定性 info）进入 CD.1 的 ledger-state INFO 条目。旧快照无该块时
+  如实报 `unrecorded`，不造真结果。写入放在 envelope 之外是刻意的：
+  观测产物必须恰好在出事的那几条路径上存活，网关失败路径本身仍留在
+  permit 审计轨迹里（代码注释已写明理由）。
+- **`session_mirror`**：`auto_apply_graduated_session_mirror` 的每条退出
+  （policy_not_active / no_matching_pending_session / execution_gate_blocked /
+  produced / produced_zero / blocked）现在原子写
+  `system/session_mirror_auto_apply_last_run.json`（定长状态文件，非账本，
+  写面已登记 `session_mirror_auto_apply_last_run_state`，155/155）。
+  未跑 scan 的路径**省略 counters 而不是填零**。monitor 对该文件的采集接线
+  **显式不做**（与 BV 记录的 recall_facade 采集接线同类，留待下一次 monitor 批次）。
+- **`_call_hermes_runtime_model` 裸 `""` 全调用方清查**（6 个生产调用方）：
+  fact_judge、session_fact_extraction、llm_edge_proposer 本就正确；
+  **`clearance_cycle` 是真缺陷**——逐对跳过使"每次调用都空回"的死判官
+  对每条 provisional 记录**恒返回 `clear`**，恰是该函数 docstring 明令禁止的
+  常量裁决；改为计数 `pairs_evaluated`，有配对却零判定时 fail-closed 返回
+  `unknown/judge_unavailable`（沿用 C3 词表，不新增枚举值；部分判定仍可 clear，
+  测试钉住两侧）。**`llm_contradiction_lane` 的 `""` 裸 continue** 改为记
+  `llm_empty_content` error_record（与其异常路径对称）。
+- **顺链意外收获（本节最重）**：给 contradiction lane 写空回复反事实时，
+  测试在**到达 LLM 调用之前**就崩了——`CLAIM_EXTRACTION_PROMPT` 的 JSON 示例
+  **大括号未转义**，`.format()` 对第一个配对就抛 KeyError 且无人捕获。
+  即：**该 lane 只要找到候选对就必崩，从未在生产上成功跑过判定循环**，
+  而全套件此前没有任何测试触达这个循环（clearance_cycle 早就用
+  `__BODY_A__` replace 风格躲开了同一个坑——同一族缺陷在隔壁文件早有人踩过）。
+  已转义并留注释 + 该反事实测试即回归门。全项目扫描：`llm_edge_proposer`
+  的模板转义正确，无同类。
+
+### CD.3 待办 11 —— `_check_vector_available` 不再执行 torch
+
+`importlib.import_module("sentence_transformers")` 改
+`importlib.util.find_spec()`（spec 查找不执行包）+ 进程级缓存。
+status/doctor 单次 17–29 秒的成本归零；`shell_alias_no_env` 22 条并发探针
+每条都省掉这段载入窗口（待办 3 的疑似成因）。反事实用爆炸 loader
+（find_spec 返回 spec、create/exec 即炸）证明探测"知道装了"而"从不执行"；
+stdout 污染守卫测试迁移到新机制，语义不变。
+
+### CD.4 待办 9 —— 两个 shadow 账本可老化（forward-only）
+
+选低爆炸半径的修法 A：两个 writer 补 `created_at`
+（`graph_layer_shadow` 保留 `recorded_at` 给既有读者；
+`substrate_recall_shadow` 原本无任何时间字段）。历史行仍不可老化——
+**这是 owner 决策，刻意不做**（修法 B 会让两个从未剪过的生产账本立即
+整体进入归档计划）。反事实经真实 producer 构造（吸取
+counterfactuals-must-use-real-producer 教训）+ 未来时钟跑 plan：
+两账本各 1 条 archive_candidate、archive action 成对出现；revert 后
+恒 retained。确认无 signature-dedup 依赖整条记录（不会因新增时变字段
+导致无界增长）。
+
+### CD.5 待办 13 —— session_mirror 一般性队头偏置
+
+机制查实：发现序按 session id / 文件名稳定排序，而 `dedup_key` 含
+`content_sha256`——**活跃会话每次内容变化都以新 dedup_key 重回队头位置**，
+配 per-run 上限后队尾永不露头（637 次运行、积压 1574→1575 的成因形状）。
+修法：`platform_filtered` 稳定排序，**从未被本 lane 导入过的会话优先**；
+"导入过"信号从 mirrored 事件的 `safe_ref.session_id` 派生
+（与 BY 拒绝修复同一理由：存 state 的信号会在 `_rebuild_state()` 时无声消失，
+测试专门断言删掉 state 文件后排序仍成立）。已导入会话的新内容版本仍会导入，
+只是排在积压之后。事件账本从每次 scan 读两遍合并为一遍
+（`_provider_captured_session_ids` 增加可选参数复用）。
+
+### CD.6 待办 10 —— recall_golden authority 维度从死代码到真实现
+
+- `matched_source_ref` 不再从期望值抄——从**实际命中的 section** 派生
+  （`build_prefetch_section_candidates` 的 `metadata.source_ids`）；
+  `matched_authority` = 该 section 的 `source_class`（词表即
+  `prefetch.SECTION_SOURCE_CLASS_BY_TITLE`）。hit/miss 语义逐字不动
+  （仍判预算后文本——agent 实际看到的东西；归因用 section 结构，二者分开判）。
+- `classify_evaluation_item` 补齐语义：期望了 authority/source_ref 而披露
+  **无归因可验** → `context_insufficient`（原先无分支可达）；**验证过且不符**
+  → `source_authority_issue`（原先结构性不可达——反事实实测旧代码对
+  错误 source_ref 期望返回 "hit"，因为比较的两边是同一个回声值）。
+- **`min_score` 删除而非实现**：披露面不存在逐 section 分数，字段只能永远
+  是死重量。loader 改为忽略未知键（生产主机上已部署的 golden 文件带着
+  `min_score`，观测仪器不应因 schema 漂移崩溃），种子 fixture 同步清理。
+- §3.3 退出条件「hit/miss/authority 报告」三项至此全部真实。
+
+### CD.7 待办 2 + 待办 3（部分）
+
+- 待办 2：`install_memory_os_plugin.py` 五处报告字段
+  `str(path.relative_to(...))` → `.as_posix()`（与 BK 修 `plan_deployment()`
+  同病同修）。反事实在本机（Windows）实测：revert 后嵌套路径含反斜杠即红。
+- 待办 3：并发单测覆盖确认已由 CB 批次落地（并发归因 + 并发/串行基线
+  一致性两测）；疑似根因（每条 CLI 探针 17–29s 的 torch 载入放大争用窗口）
+  已由 CD.3 修除。**不宣称并发风险归零**——判定为已缓解 + 有覆盖，
+  生产复核留给下一次部署后的 Full Monitor 观察，届时如再现再升级。
+
+### CD.8 待办 8 登记更新（未开工，如实）
+
+仪器侧本轮补齐：`session_fact_extraction` lane 已实现（CB，待部署）、
+`recall_golden` 三维度已全部真实（CD.6）。A（没入库）/B（入库没召回）
+分离分析仍需两件事：部署后的生产数据 + owner 提供的具体漏失实例。
+不猜测、不预写修复。
+
+### CD 反事实覆盖
+
+12 条新增反事实测试全部 revert→FAIL→restore→PASS 实测（census 键集、
+migration-debt 扩展、ledger-state、classification-coverage、recent-window
+体量键、run-outcome 三态、死判官 fail-closed、空回复 error_record、
+爆炸 loader、shadow 老化、队头排序 + rebuild 存活、authority 三测、
+posix 清单）。另有 2 条守卫型（采集失败不发新 INFO 条目、缓存单次探测）。
+
+### CD.R 独立复审与处置（提交后复审，fold 回同一提交）
+
+独立复审 agent 对 `28dbf8a..4dd64b6` 的结论：无 Critical、3 Important、3 Minor，
+"With fixes"。逐条核实后的处置：
+
+1. **快照 `status` 与 `last_run.outcome` 矛盾（两处）——半接受**。
+   write_failed 路径成立且已修：该路径 ledger append 没发生，快照的
+   `latest_window_*` 描述了 ledger 中不存在的窗口，硬编码 `"ok"` 是双重撒谎，
+   改为按 `report["status"]` 取值，反事实实测（revert 后断言
+   `'ok' == 'error'` 红）。第二处（`_record_last_run_outcome` 的
+   `setdefault` 保留旧 status）**推回**：那是有意语义——`status` 描述
+   快照内容可用性（ok/empty/error），不是 lane 健康度；produced 后
+   cursor 错误留下的 "ok"+`source_cursor_not_found` 是自洽组合
+   （"累计数据有效；最近一次运行失败"）。语义已写进 helper docstring，
+   并新增 produced→压缩→cursor 错误的实测断言把这对组合钉死。
+2. **session_mirror last-run 文件无 monitor 读者——推回**：
+   CD.2 与待办 14 更新中已显式登记"monitor 采集接线显式不做，
+   与 BV 的 recall_facade 接线同类"；复审要求的"explicit stated follow-up"
+   在复审前已存在。
+3. **monitor 测试文件拼接错位——接受已修**：CD 的测试插入点误落在
+   `test_attribution_recent_window_stays_silent_when_collection_failed`
+   函数体中间，其 remote-projection / quiet-zero 两块被缝进新测试尾部
+   （断言仍全部执行，无覆盖损失，但 docstring 与函数体不符）。
+   纯代码搬移归位。**流程教训**：在测试文件中段插入时必须先读到
+   函数真正的结尾，"看见一个完整断言块"不等于"看见函数结束"。
+4. **Minor（原子性不对称）——接受**：`_record_last_run_outcome` 改用
+   `write_json_atomic`（与 session_mirror 的同类 recorder 对齐；消除
+   monitor 并发读到半写快照的窗口），新写面登记
+   `exposure_rollup_last_run_snapshot_state`。其余 Minor 均为 pre-existing
+   格式问题，不动。
+
+### CD 测试与门
+
+**3130 → 3153 passed / 13 skipped / 0 failed（+23，单次全量前台跑，11m27s）**，
+增量与新增测试逐文件对账吻合（census 1、monitor 4、rollup 4、clearance 1、
+contradiction 1、cli 2、shadow-aging 1、session_mirror 2、recall_golden 6、
+installer 1）。复审处置 fold 后受影响三文件定向重跑 260 passed，
+全量复跑 **3153 passed / 13 skipped / 0 failed**（8m58s，计数不变——
+处置只加断言、搬移代码，不增测试函数）。
+四门全过：import cycle 无环、write surface **154→156** /
+`unclassified_count=0`（新登记 `session_mirror_auto_apply_last_run_state`、
+`exposure_rollup_last_run_snapshot_state`）、static hygiene pass、
+public checkout probe --strict exit 0、`git diff --check` 干净。
+证据级别：**仅 `local_pass`**，未部署、未推送。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -2354,8 +3516,9 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    比原记录更严重：未注册的 WARN 码在 clean-host 会落 `clean_host_warn_unclassified` 即 **FAIL**，
    与 `deploy_memory_os.py` 是否接入 cron onboarding 无关。五个码（含 BY 新增的
    `..._disabled_without_audit_record`）全部按 `warn_if_production` 注册，生产行为不变。
-2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
-   `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
+2. ~~`install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
+   `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。~~ ——
+   **CD 已修**（五处全改 `.as_posix()`，Windows 本机反事实实测）。
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险（BM 记录，`review_reply` 使用假 token
    探针本身已确认安全）。**BY.3 首次拿到实测复现**：BY 部署后紧接着跑的那次 Full Monitor
@@ -2363,17 +3526,21 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    同一次运行还带 `full_monitor_runtime_over_target`；随即原样重跑**不复现**
    （`shell_alias_no_env_ok` 回到 PASS、false 键为空），且逐条手工复现探针条件
    （12 条 CLI 命令、不带 env 前缀）全部 rc=0。判定为**主机负载下的瞬时争用**，
-   非 BY 引入的回归——但这条待办从此不再是"无实测复现"。仍缺并发单测覆盖。
+   非 BY 引入的回归——但这条待办从此不再是"无实测复现"。
+   **CD 部分关闭**：并发单测覆盖已由 CB 批次落地（并发归因 + 并发/串行基线
+   一致性）；疑似成因（每条 CLI 探针 17–29s 的急切 torch 载入，见待办 11）
+   已由 CD.3 修除。保留观察点：下一次部署后的 Full Monitor 如再现
+   `shell_alias_no_env_failed` 再升级，否则视为关闭。
 4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
 5. ~~在 3.200 补写 `expression_feedback_request` 的停用审计记录~~ —— **BY.3 已写入并验证**
    （见 BY.3 节）。`reason` 字段刻意**没有编造原始停用理由**：主机上从来没有记录过它，
    现文案如实写明"owner 2026-08-02 决定保持停用 / 原始理由未知 / 本条为补记不改变运行状态"，
    owner 可随时替换该文本。
 6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
-7. **`system/continuity_freshness.jsonl` 无 monitor 字段**（BZ 登记）。
-   保留策略已在 BZ 补登记（`metadata_retention` 的 `shadow_retention_days`，
-   与两个兄弟 shadow 账本同等），状态迁移去重后体积有界；**仍缺的是 monitor 可见性**
-   ——没有任何 monitor 字段报告分级结果或 UNKNOWN 计数。C→D→E 链部署前应补。
+7. ~~**`system/continuity_freshness.jsonl` 无 monitor 字段**~~ —— **CA 已关闭**。
+   新增 `continuity_freshness_summary()` + `classify_snapshot` 分支 + 中文摘要行，
+   **不引入新 WARN 码**（全走 `pass`/`info`），账本缺失显式判为
+   `continuity_freshness_ledger_absent_healthy`。保留策略已在 BZ 登记。
 8. **关键事实未入库导致召回漏项**（Owner 2026-08-04 提出，**只登记未开工**——
    「后续要仔细分析」是排序指令）。指 Memory-OS 的写入链
    `sync_turn` → candidate → owner 批准 → crystallized 漏掉了本该留存的事实。
@@ -2392,7 +3559,13 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 
    **这一条改变了批次 F 的性质**：`recall_golden` 正是测量召回漏项的仪器，
    删除决定不再独立——见接线闭环方案 §3.3 末尾。
-9. **两个既有 report-only shadow 账本已登记保留策略但永远不会老化**（BZ 查出，未修）。
+   **CD.8 状态更新**：仪器侧已齐（session_fact_extraction 已实现待部署、
+   recall_golden 三维度已全部真实）；A/B 分离分析仍待部署后的生产数据
+   与 owner 提供的具体漏失实例，不预写修复。
+9. ~~**两个既有 report-only shadow 账本已登记保留策略但永远不会老化**~~ ——
+   **CD.4 已修（forward-only）**：两个 writer 补 `created_at`，新记录正常老化；
+   历史行仍不可老化，处置留 owner 决策（修法 B 会让两个从未剪过的生产账本
+   立即整体进入归档计划）。原始记录保留备查（BZ 查出）。
    `metadata_retention._record_created_at()` 只认 `created_at`/`ts`/`timestamp`，而
    `graph_layer_shadow` 的记录写 `recorded_at`、`substrate_recall_shadow` 的记录
    **没有任何时间字段** → 两者的每条记录都被判"无时间戳" → 永久 `retained_records`。
@@ -2400,6 +3573,150 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    属超出批次 C 范围的行为变更，需单独决策。修法二选一：给两个 writer 补
    `created_at`（只影响新记录，历史行仍不可老化），或让 `_record_created_at` 兼容
    `recorded_at`（立即覆盖历史行，影响更大）。
+10. ~~**`recall_golden` 的 authority 维度是死代码**~~ —— **CD.6 已修**：
+    matched_source_ref/matched_authority 从实际命中 section 派生、
+    `source_authority_issue` 与 `context_insufficient` 均可达且经反事实实测、
+    `min_score` 删除（无生产者）+ loader 容忍未知键。§3.3 三项退出条件全部真实。
+    原始诊断保留备查（CA 查出）。
+    `evaluate_recall` 的 `matched_source_ref` 从**期望值**抄，`matched_authority` 从不赋值，
+    `authority_class`/`min_score` 从不被读，`"context_insufficient"` 无分支返回。
+    后果：方案 §3.3 的退出条件「hit/miss/**authority** 报告」只满足前两项，
+    **不得据现状声称该项达标**。hit/miss 经反事实实测为真。
+11. ~~**`cli.py::_check_vector_available()` 急切 import `sentence_transformers`/`torch`**~~
+    —— **CD.3 已修**：`find_spec` + 进程缓存，status/doctor 不再执行 torch；
+    爆炸 loader 反事实钉死"从不执行"。（CA 查出。）单次 `status`/`doctor` 耗时 **17–29 秒**；而
+    `shell_alias_no_env()` 并发跑 22 条 CLI 探针——**很可能是待办 3 那个生产 flake 的成因**。
+    这条同时也是 `full_monitor_runtime_over_target` 的候选成因之一。
+    修法方向：把 vector 可用性探测改为惰性/缓存，不在 `status`/`doctor` 路径上加载模型。
+12. ~~**①会话事实抽取 lane 未实现**~~ —— **已实现（CB 节），但未部署**。
+    按 `fact_judge` 模板建成新 cron lane，复用 `_call_hermes_runtime_model`；
+    两个坑都已避开（持久指纹账本 + 最新优先，而非 `session_mirror` 的纯队头；
+    三重有界 + 每条消息 4000 字符入参上限）。
+    **剩余动作只有部署**，且有一个静默失效点必须照做：统一部署时须重新生成
+    `memory-os/system/memory_os_cron_registry.json` 快照，否则
+    `cron_group_runner._load_group` 会返回旧的 `tick_evidence` 成员并
+    **无任何报错地跳过本 lane**（详见 CB 节"部署要求"）。
+13. ~~**`session_mirror` 一般性队头偏置未修**~~ —— **CD.5 已修**：
+    从未导入的会话优先（稳定排序），信号从 mirrored 事件派生、
+    经删 state 重建测试证明存活；活跃会话不再以新内容版本反复霸占队头。
+    （CA 实测；机制查实为 dedup_key 含 content_sha256 + 稳定发现序。）
+14. ~~**monitor 只观测"跑过了"，不观测"产出了"**~~ —— **CD.2 已修**：
+    exposure_rollup 快照 `last_run` 封闭原因码（monitor INFO 可见）、
+    session_mirror auto-apply 每条退出落盘原因、`_call_hermes_runtime_model`
+    六个调用方清查（clearance 死判官恒 clear 改 fail-closed、contradiction lane
+    空回复记 `llm_empty_content`，顺链修掉后者从未被触达的模板必崩缺陷）。
+    session_mirror last-run 文件的 monitor 采集接线显式不做（登记，与 BV 的
+    recall_facade 接线同类）。原始诊断保留备查（CA.1 查出）。
+    helper completion 只判 ExecutionGate envelope，`completion ≠ output`。三个同型实例：
+    `exposure_rollup` 的两条不产出退出路径（良性跳过 / `source_cursor_not_found`
+    永久错误）在产物侧证据完全相同；`session_mirror` 637 次运行 findings=0 且积压在涨；
+    `_call_hermes_runtime_model` 返回 `""` 与成功不可区分（实测 27.5%）。
+    修法方向：为有产出契约的 lane 增加"本次产出行数/新增记录数"信号，
+    completion 与 production 分别判定；**不产出时必须落盘写明封闭原因码**，
+    使读者不重跑、不读源码即可区分"无合格输入"与"处理失败"。批次 C 账本的
+    状态迁移去重 + `unknown_grade_count` 正是这个模式的反面，**应推广为通例**。
+    已写入 CLAUDE.md 新增小节 “Completion Is Not Output”。
+15. ~~**`exposure_rollup` 跑了却不产出**~~ —— **已诊断结案，属良性空转，非缺陷**（CA.2）。
+    游标实测仍在队首（`msrc_20260801T075108673109Z_4d466577`，index 987/988）⇒
+    `new_records = 0` ⇒ 走 L141 `skipped=True` 良性分支，**按设计不写任何文件**。
+    上游 `memory_sources.jsonl` 自 `2026-08-01T07:51:08Z` 起零增长，故 lane 无输入可处理。
+    **未落入 `source_cursor_not_found` 那条永久错误路径**（该路径仍是真实风险，
+    压缩一旦移除游标记录即永久静默失败，已并入待办 14 的产出可观测性要求）。
+    附带纠正：本条原文（以及路线图 P1-4）都在用 lag 论证，而 monitor 中**并不存在
+    lag 门控**，`exposure_rollup_lag_hours` 只计算上报、从不参与判定。
+16. ~~**那个唯一 FAIL 的真实根因，以及"修了它反而更糟"的陷阱**~~ —— **CC 已修复关闭**
+    （16a + 16b 一并修，词表双向守卫 + 归因纪元边界 + `healthy_no_sample` 诚实护栏；
+    实测投影：69→0 缺口、170 债务、覆盖面 69→129 行，**升而非降**）。
+    以下为原始诊断记录，保留备查（CA.2 §4-§6 实测）。
+    **这是代码缺陷、不是数据成熟度问题——再等多久都不会自己好**（BY.1 记的分类率
+    `0.6506→0.7018`，本次实测仍精确为 `0.7018`，曲线早已停住）。
+    FAIL 码是 `v2_exposure_schema_era_unhealthy`，由 `schema_era_attribution_gap_count = 69`
+    单独驱动（conservation 与 telemetry 均为 0，`conservation_total_passes = True`）。
+    拆成两条独立缺陷，**且修复顺序有强约束**：
+
+    **16a：prefetch 只为 `crystallized` 一个类填 `source_ids`。**
+    `_build_prefetch_sections` 里 `section_source_ids` 只有**一个赋值点**
+    （`prefetch.py:614`，`section_source_ids[cryst_header] = cryst_ids`），
+    其余段落一律走 `_section_metadata` 的空 `{}` 分支。实测印证：
+    `crystallized` 133 段**全部有 ID**，其他 12 个 content-bearing 类**一个都没有**。
+    `working` 并非"有时漏"而是 **0/69 从未填过**。
+    可行性已核实（否则本条无从修）：`_working_lines` **逐条遍历单个 item**，
+    手上同时握着 `path.stem` 与 item，而 item 有 `id` 字段（`working.py:350`），
+    且规范引用格式 `working:<stem>:<id>` **已在生产代码中使用**
+    （`deep_reflection.py:639`；`working:` 前缀亦在 `v3_body_packet.py:21`
+    的 `_ALLOWED_SEED_PREFIXES` 内，`low_clue_recall.py:478` 也在产出它）。
+    差别只是 `_crystallized_lines` 被扩展成返回三元组带 ID，而 `_working_lines`
+    的签名至今只返回 `list[str]`。
+    配套还需扩 `_extract_record_ids_from_section`（只认 `crystallized:`/`candidate:`），
+    否则 `working` 即使填了 ID 仍无法分类——这也是 `classified_ratio = 0.7018` 的同源解释。
+
+    **16b：`attributable_classes` 有 4 个死名字，导致该门只覆盖 2/13 个实际类。**
+    `exposure_rollup.py:509` 硬编码
+    `{crystallized, working, entity_graph, indexed_recall, vector, hindsight}`，
+    而 `_section_source_class`（`prefetch.py:663-684`）实际产出的是
+    `indexed` / `graph_layer` / `substrate_recall` / `event` / `candidate` / …
+    —— **`entity_graph`、`indexed_recall`、`vector`、`hindsight` 四个名字全项目无任何生产者**
+    （已 grep 确认；`memory_sources.py:516` 的 `source_class` 直接取自上述映射）。
+    实测 3.200：门统计到 **69** 个缺口，**静默跳过 1093 个**同样 content-bearing 且无 ID 的段落。
+    其中至少 4 类是**明确可引用**的（`candidate` 5、`indexed` 46、`event` 115、
+    `substrate_recall` 133 = 299），因为它们的前缀本就在既有 ID 约定里
+    （`candidate:` 甚至已被 `_extract_record_ids_from_section` 接受）；
+    余下 `foreground`/`last_session`/`identity`/`state_overlay`/`bridge`/`diagnostic`/`other`
+    是否属"派生聚合视图、本就不该要求归因"**需逐类裁定**，不得一刀切。
+    该集合是函数内硬编码字面量、**无任何测试引用**；而测试夹具
+    （`test_memory_os_phase1_observability.py:18` 的 `_section`）把
+    `source_class` 写死成 `"crystallized"`，所以 12 个类与 4 个死名字**从未被测试触达**。
+
+    **顺序约束（本条最重要的一句）**：若只修 16a，
+    `schema_era_attribution_gap_count` 归零 → `schema_era_health` 转 PASS →
+    monitor 变绿，而 **1093 个真实缺口继续不可见**。
+    那是**靠缩小度量范围换来的绿色**，正是路线图 L43「不为获得绿色状态而隐藏真实 FAIL」
+    禁止的事。**16b 必须先于或同时于 16a 处理**，且修 16b 会让 FAIL 数字先变大——
+    这是正确方向，不是回归。
+    与"关键事实漏失"同源——都发生在 prefetch 披露侧，属批次 C 的邻接面。
+
+17. ~~**`rolling_7d_attribution_gap_count` 算了但没人读**~~ —— **CC.2 已修复关闭**
+    （定为 INFO 而非 WARN：schema-era 门已无时间界地 FAIL，再加 WARN 是更弱的重复告警；
+    并补做纪元过滤 + 分母键，完成 31 个键的读者普查）。原始诊断保留备查：
+    `exposure_monitor_stats` 计算并返回它，但**全 monitor 无任何引用**——
+    既不判 PASS/WARN/FAIL，也不进 INFO，对任何读者都不存在。
+    与既有的 `exposure_rollup_lag_hours` 是**同一个毛病**（CLAUDE.md 已记
+    "a metric which is merely computed and reported does not close this gap"）。
+    实测当前值 3（新旧判据下均为 3，近 7 天仅 5 行自然行，故本次加宽未改变它）。
+    修法有两条路，需先定性质：**要么**给它一个分级（近 7 天出现归因缺口
+    理应是 WARN——它是"当前是否正在退化"的唯一滚动信号，比 `all_history`
+    的历史债务更有行动价值）；**要么**明确它只是 INFO 并让它进 INFO 通道。
+    不可继续留在"算了不用"的状态。同类排查建议一并做：
+    grep `exposure_monitor_stats` 返回字典的**每个键**，确认都有读者
+    ——CC.1 已用这个方法查出两个新键无读者并当场修掉，
+    但**未对既有键做全面普查**。
+
+18. ~~**`exposure_monitor_stats` 仍有一批键"算了却无人分级、无人读"**~~ ——
+    **CD.1 已修**：逐键定性（3 个新 INFO 条目 + component 定性 + 2 键删除），
+    census 测试钉死键集，未来键必须先定性；census 另抓到手工审计漏掉的
+    未读别名 `attribution_gap_count`（子串键名骗过逐键 grep）。
+    原始清单保留备查（CC.2 普查查出）。
+    扣除内部驱动 `freeze_reasons`/`schema_health` 的 4 个（`telemetry_degraded_count`、
+    `initial_natural_cycle_count`、`production_observation_days`、
+    `budget_pressure_streak_days`）后，真正的孤儿键：
+    - **`schema_era_classified_ratio`** —— **BY.1 当作"数据成熟度"证据引用的那个
+      `0.6506→0.7018` 就是它**，却从未被任何代码读取、更未分级。
+      一个被反复当作论据的数字，其实从未进入任何判定。**优先处理这条。**
+    - **`exposure_rollup_lag_hours`** —— CLAUDE.md 早有记载，本次确认无读者。
+    - **`legacy_unmarked_rollup_count`** —— CC 节把它当作"债务分类"先例来论证
+      归因纪元边界，而它自己也无生产读者：设计上成立，可见性上不合格。
+      （反过来说，本次的 `legacy_unattributed_record_count` 已优于其先例。）
+    - **`rolling_7d_natural_record_count`** —— 且注意它与 `rolling_7d_attribution_gap_count`
+      **域已经不同**（前者自然域、后者纪元域），配对当「缺口/分母」用会算出错的比率；
+      正确分母是 CC.2 新增的 `rolling_7d_attribution_era_record_count`。
+    - `cumulative_selected` / `cumulative_dropped_by_rank` / `cumulative_dropped_by_budget` /
+      `cumulative_eligible` / `exposure_rollup_records_total` /
+      `schema_era_natural_record_count` /
+      `latest_window_start` / `latest_window_end`。
+    每个都需单独定性（该分级 / 该进 INFO / 该删），不宜一次性套同一处理。
+    **方法提醒**：别用纯文本匹配判断"有没有读者"——CC.2 的审计工具第一版把
+    **注释里的提及**算成读者，导致 `exposure_rollup_lag_hours` 被误判为"有读者"，
+    而那两处命中全是新写的注释。必须过滤纯注释行。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2705,3 +4022,247 @@ sannai-community 仓库 README。）
   `substrate_recall_shadow` 完全无时间字段 → 都永远不老化），刻意只记录不修
   （修它等于让两个从未被剪的生产账本首次进入归档计划），见待办第 9 项。
   最终 8 项反事实、**3071 passed / 13 skipped / 0 failed**（+36）。
+- `f40a746..`（CA，本节）：Owner 报告「关键事实漏失」的实测定位 + 三项并行修复。
+  **定位为三个独立成因**：`_turn_summary` 140 字硬截断（正文只落哈希）、
+  `inner_drive.py:294` 无事实抽取（候选正文就是那 280 字）、
+  `_should_include_candidates` 关键词门使未批准候选**与相关性无关地**不可见。
+  **3.200 只读核实推翻本会话两个论断**：完整正文durable 在 `/root/.hermes/sessions/`
+  （468 文件/136MB，单条最长 975,665 字）故 >140 可恢复；off-hot-path LLM 抽取因此可行
+  ——教训是"跨系统边界的否定结论不能只用本仓库证据"，以及不要把热路径约束（INV-5）
+  惯性延伸到 off-hot-path。**生产规模**：助手侧 **67.3%**、用户侧 **19.0%** 的轮次被截断；
+  `session_mirror` **637 次运行累计 findings=0**、每会话只产约 160 字"最后一条消息预览"、
+  且选择仍是**纯队头**故 1575 积压永远排不空。
+  三项修复：③候选相关性下限（**不删那个刻意的权威门**，magic-word 路径行为逐字不变，
+  新增 `_record_body_score >= 2` 相关性路径，阈值 2 有实测依据）；
+  F `recall_golden` **裁决反转为保留并接线**（它是①唯一的度量仪器），
+  **但查出其 authority 维度是死代码**，§3.3 退出条件只满足 hit/miss 两项；
+  `continuity_freshness` monitor 可见性（**刻意不引入新 WARN 码**，避开 clean-host
+  未注册即 FAIL 的坑）+ 并发单测（未发现竞态，但查出
+  `cli.py::_check_vector_available()` 急切 import torch 致 `status` 耗时 17–29 秒，
+  **很可能是待办 3 生产 flake 的成因**，已登记未修）。
+  整合评审纠正了 agent 报告里说反的预算优先级方向（候选段 50 是**最先被淘汰**的，
+  挤不掉已批准内容）。①设计定案：按 `fact_judge` 模板建新 cron lane、
+  复用 `_call_hermes_runtime_model`（Hermes 自身模型，已有两个先例），未实现。
+  3071 → **3089 passed / 13 skipped / 0 failed**（+18），四门全过；
+  **仅 `local_pass`，三项均未部署 3.200**（按 Owner 裁定全部完成后统一部署）。
+- `（CA.1，本节）`：按 CA 节逐条对 3.200 做**只读**核对与复盘（无部署/重启/写入）。
+  **4 项与文档一致**（`deployed_head=01356df` 且 manifest 与 `/opt` 本次无漂移；
+  C 未部署经三角互证；26 job = 7 enabled + 19 paused 且 tick 分钟逐字一致；
+  lane 停用审计记录完整）。**Full Monitor 基线由 97/6/1 变为 102 PASS / 5 WARN / 1 FAIL**
+  （本次由整合分支发起而非已部署的 `01356df`，须扣除本轮新增的 PASS 码——与 BY.1 同一口径问题）。
+  **两处文档漂移**：① BY.1 记的「LLM 判断器因额度耗尽 WARN」已过期，现为 PASS，
+  `fact_judge` 最近 80 次 `none:58 / llm_empty_content:22` 佐证通路可用但约 27.5% 返回空
+  ——**实测验证了待办 12 必须照抄 `fact_judge` 的失败处理而非继承裸 `""`**；
+  ② 路线图 P1-4 的「唯一 FAIL 正在推进」**当前不成立**——`exposure_rollup` 08-01/02/03
+  每天开 envelope 但只有 08-01 产出账本行（**此条的诊断在 CA.2 被推翻，见下**）。
+  由此得出本轮最重要的结论并登记为待办 14：**系统观测"跑过了"，不观测"产出了"**
+  （`exposure_rollup` / `session_mirror` 637 次 0 findings / `_call_hermes_runtime_model`
+  返回 `""` 三个同型实例），而批次 C 账本的迁移去重 + unknown 计数器正是其反面，应推广。
+  **另如实记下本次我自己的两次误报**（「26 vs 8」、「周 lane 4 天未跑 = 漏报」），
+  两次都是结论跑在证据前面——与本会话早先三次同一个毛病。
+- `（CA.2，本节）`：查结待办 15，并**推翻 CA.1 自己对那个 FAIL 的诊断**（3.200 全程只读）。
+  先穷举 `run_exposure_rollup_cycle` 的两条"不产出"退出路径（L141 良性跳过 /
+  L128 `source_cursor_not_found` 永久失败，**两者都在开 envelope 前 return，证据侧不可区分**），
+  再据此设计判别式实测：游标 `msrc_20260801T075108673109Z_4d466577` 命中 index 987/988
+  ⇒ `new_records = 0` ⇒ **走良性分支，非缺陷；上游 `memory_sources.jsonl` 自 08-01T07:51Z 零增长**。
+  **待办 15 结案。** 同时纠正 CA.1 与路线图共同的方法错误：**monitor 中不存在 lag 门控**
+  （`grep exposure_rollup_lag` 零命中），`exposure_rollup_lag_hours` 只计算上报、从不判定，
+  拿它论证 FAIL 推进与否方向对错都无意义。
+  **那个唯一 FAIL 的真实根因随之定位**：码为 `v2_exposure_schema_era_unhealthy`，
+  由 `schema_era_attribution_gap_count = 69` **单独驱动**（conservation / telemetry 均 0）；
+  按 `source_class` 分组后 **69 个缺口 100% 在 `working`**（dropped 41 + selected 28），
+  `crystallized` 133 段零缺口——prefetch 披露工作记忆时报了 `chars`/`count` 却从不填
+  `source_ids`；且 `_extract_record_ids_from_section` 只认 `crystallized:`/`candidate:` 前缀，
+  故 `working` 即使填了 ID 也无法分类，这正是 `classified_ratio = 0.7018` 的同源解释。
+  再按顾问提示追完调用链，发现**量级远大于此**：`section_source_ids` 全函数
+  **只有一个赋值点**（`prefetch.py:614`，crystallized 专属），而
+  `attributable_classes`（`exposure_rollup.py:509`）里 `entity_graph`/`indexed_recall`/
+  `vector`/`hindsight` **四个名字全项目无生产者**，生产者实发的是
+  `indexed`/`graph_layer`/`substrate_recall`/`event`/`candidate` —— 名字对不上，门就静默失效。
+  实测：**门统计 69 个缺口，静默跳过 1093 个**（其中 `candidate`/`indexed`/`event`/
+  `substrate_recall` 共 299 个是明确可引用的）。该集合无测试引用，夹具还把
+  `source_class` 写死成 `crystallized`，12 个类从未被测试触达。
+  **由此得出关键约束并拆成待办 16a/16b：只补 `working` 的 ID 会让 FAIL 归零、monitor 变绿，
+  而 1093 个真实缺口继续不可见——那是靠缩小度量范围换来的绿色**（路线图 L43 明令禁止），
+  故 16b 必须先于或同时于 16a，且修 16b 会让 FAIL 数字先变大，那是正确方向。
+  可行性亦已确证：`working:<stem>:<id>` 规范引用格式已在 `deep_reflection.py:639` 生产使用。
+  方法教训两条：**穷举分支 → 设计判别式 → 取证 → 才下结论**；以及"被计算并上报"≠"会告警"。
+  **另记我在本节自己又犯了第六次"结论跑在证据前面"**：§4 定位到 69 全在 `working` 后
+  直接写成"prefetch 有 bug + 新增 `working:` 前缀"，跳过了"这份测量有几种读法"，
+  而 `0/69 从未填过`本身就是要求换读法的信号。
+- `（CB，本节）`：实现①会话事实抽取 lane，关闭待办 12（**仅 `local_pass`，未部署**）。
+  新增 `plugins/modules/cognition/session_fact_extraction.py` + lane helper + 2 行 gate shim
+  + 2 个测试文件；改 `cron_registry.py`（lane 21→22，`tick_evidence` 成员，active-closure
+  覆盖 19→20，**不新增 cron job**）、`knob_overrides.py`（6 个 knob）、
+  `install_memory_os_plugin.py`、`memory_os_3_200_monitor.py`。
+  设计要点：**只处理 >140 字符的消息**（≤140 本就完整存活，绑定 `_turn_summary` 的 clip）、
+  先脱敏再判长度、持久指纹账本 + 最新未处理优先（**刻意不照搬 `session_mirror` 的纯队头**）、
+  三重有界 + 每条消息 4000 字符入参上限（生产单条消息可达 97 万字符）、
+  只产出未批准候选。LLM 全程照 `fact_judge`：同一私有导入、分类失败码、fail-closed 回退，
+  **绝不继承那个裸 `""`**。每次运行落盘 11 项产出计数器 + 封闭 `SKIPPED_REASON_CODES`，
+  三条 skip 路径**都在 return 前写 run report** ⇒ 本 lane 是待办 14 的正面样板。
+  **整合评审我改掉子 agent 的 2 个缺陷**（均补反事实并实测确认会失败）：
+  ① `candidate_id` 含 mtime ⇒ 活跃会话每次追加都绕开
+  `append_candidate_queue` 的去重、把同一事实反复灌入候选队列（旧实现实测 3 行 vs 应为 2 行）；
+  ② `sessions_skipped_already_processed` 重复扣减 stat 失败数（旧式实测报 0 而应为 1）。
+  **全量套件另抓出 3 个回归，全在子 agent 白名单之外**：新组件未登记进
+  `ERROR_RECORD_EMITTING_COMPONENTS`；以及安装器 `_write_operational_helper_scripts`
+  逐个列举 helper、漏登记 ⇒ onboarding 直接 `blocked`、**一个 job 都不建**（0 vs 9）。
+  由此补出"新增 lane 的六处登记清单"并写入 CLAUDE.md
+  （含"不需要动 `LEGACY_PER_LANE_CRON_JOBS`"的理由，已复核子 agent 该判断为对）。
+  **另核实并记下一个静默失效点**：`cron_group_runner._load_group` 优先读已安装的 registry
+  快照且**成员非空就不回退**，故已 onboarding 主机上新 lane 会**无任何报错地不被 tick 调用**
+  ——统一部署必须重新生成快照并事后核对；子 agent 报的"会报 `unknown_registry_key`"不准确，
+  实际比那更隐蔽。生产形状已实测核对（3.200 上 `session_*.json` 命中 141 个，
+  `messages[0]` 含 `content`/`role`，与实现假设一致），排空速率 8 个/天 ⇒ 约 18 天。
+  3089 → **3115 passed / 13 skipped / 0 failed**（+26，含 CB.1 的 3 个），四门全过，
+  空白检查按推送区间干净。
+- `（CB.1，本节）`：顾问复审①又抓出 3 处，第一处**会让整条 lane 失去意义**：
+  **LLM 失败后仍无条件把会话指纹记为已处理 ⇒ 那些事实永久丢失**
+  （`newly_processed_fingerprints.append` 在每会话循环末尾、每消息循环之外）。
+  生产实测 `llm_empty_content` 占 27.5%，是常态而非边缘；而"丢事实"正是本 lane 要消除的缺陷。
+  并暴露出**我派单指令本身的错误**：我让照抄 `fact_judge` 的确定性回退，
+  但 fact_judge 判的是"已存在内容"的布尔，本 lane 要**生成**摘要，**没有启发式能做摘要**；
+  marker 命中的 500 字符原文切片不是恢复出的事实，恰是本 lane 要消除的截断，
+  且 `_DURABLE_MARKERS` 含 `"用"`（实测），模型故障期几乎每条长中文消息都会变成
+  这种切片候选，还都是 resolver 可自动提升为**临时结晶**的 —— 治理问题，不只是噪声。
+  **两半一起改**：失败即**延后不臆造**（删除 `_heuristic_extract_fact`）；
+  指纹账本增加 `status`（`processed`/`deferred`/`abandoned`）与 `attempt`，
+  仅终态抑制重跑，`MAX_EXTRACTION_ATTEMPTS=3` 后记 `abandoned`
+  （终态但与成功可区分，使"放弃"看得见），并新增两个延后计数器。
+  第二处：两个新账本**重复了待办 9** —— 原写 `processed_at`（`_record_created_at` 不认）
+  且**根本未在 `metadata_retention` 注册** ⇒ 永久 `retained_records` + 对保留计划不可见；
+  已改 `created_at` 并双双注册。第三处（流程）：空白检查须按**推送区间**做而非逐提交。
+  三条反事实均实测确认会失败（`assert 0 == 1` / `assert False` / `assert None is not None`），
+  且保留那条**经真实生产者取证**（断言 lane 实跑写出的行，不是手写夹具）。
+  另重写 4 个原本断言"臆造行为"的测试，并删掉 `heuristic_only`（它命名的 knob 从不存在）。
+  3089 → **3115 passed / 13 skipped / 0 failed**（+26），四门全过。
+  **方法记账**：这 3 处我逐行读完 785 行仍全部漏掉。第一处漏因值得记——
+  我问的是"这段代码做什么"，而没问"**依赖失效时**它做什么"。
+  `fingerprint_outcomes` 的赋值点语法上毫不显眼，但它与失败路径的交互决定整条 lane 有无意义。
+  **教训：读一个有外部依赖的循环，必须把"依赖失效"那条路径当成独立的一遍来走。**
+- `（CC，本节）`：修复并关闭待办 16（16a + 16b）。Owner 裁定
+  **resolver 保持自动提升、尽量减少人工介入** ⇒ ①候选的 `bridge_state` 不改。
+  **16b：门的词表与生产者词表不匹配 ⇒ 静默什么都不检查。**
+  硬编码的 6 个名字里**后 4 个全项目无生产者**，而生产者实发的
+  `indexed`/`graph_layer`/`event`/`candidate`/`substrate_recall` 全不在表内
+  ⇒ 生产实测：**统计 69 个缺口、静默跳过 1093 个段落**。改法不是补名字，
+  而是**让不匹配可测**：生产者词表提升为模块级 `SECTION_SOURCE_CLASS_BY_TITLE`
+  （原为函数内局部 dict，**任何测试都看不见**，这正是漂移能存在的原因），
+  门侧拆为 `ATTRIBUTABLE_SOURCE_CLASSES`(6) 与
+  `NON_ATTRIBUTABLE_SOURCE_CLASSES`(11，逐类写明豁免理由)，
+  守卫测试**双向断言**：每个生产者类都被分类 + 契约里无死名字。只断言一个方向抓不到本缺陷。
+  **16a：生产者只有一个赋值点（crystallized 专属）**，其余段落一律落空 `{}`，
+  `working` 是 0/69。已为 `working`/`candidate`/`event`/`indexed`/`graph_layer`
+  五类补齐 ID，并扩 `_extract_record_ids_from_section` 前缀白名单
+  （原只认 `crystallized:`/`candidate:`，所以 `working` **填了也无法分类**——
+  与 `classified_ratio=0.7018` 同源）。用**可选出参**而非改返回类型，
+  因 `_event_lines`/`_graph_layer_shadow_lines` 被测试直接断言返回值，
+  且 `seen`/`error_records` 本就是本文件既有惯例；但可选出参正是规则 4 的陷阱默认值，
+  故真护栏是**结果级测试**（真实 prefetch 零缺口 + 显式断言三类确实出现以防空过），
+  反事实实测：删任一 `source_ids=` 实参 ⇒ 双双失败。
+  **关键设计：必须有归因纪元边界。** 门对全部自然行算缺口，
+  而那 69 个有缺口的行**全是自然行**、已写入、**无法追溯补 ID** ⇒
+  只修生产者永远清不掉 FAIL。故新记录带 `ATTRIBUTION_SCHEMA_VERSION`，
+  门只判带标记的记录，未带标记者计入 `legacy_unattributed_record_count`
+  并仍留在 `all_history_attribution_gap_count`（**分类为债务，不是抹掉**），
+  与同文件 `legacy_unmarked_rollup_count` 同模式同理由。
+  **该边界开了个比原缺陷更坏的口子**：部署当天无人带标记 ⇒ 缺口 0 ⇒ 报 PASS，
+  那就是靠缩小度量买绿。故加诚实护栏：纪元为空时报 **`healthy_no_sample`**
+  （monitor `:1389` 早已当 PASS 值收下，但字面写明"无样本"）而非 PASS，
+  并追加 freeze reason `attribution_era_no_sample`，clearance 在出现真实归因流量前不解冻。
+  **3.200 只读投影实测**：988 行/170 自然行/0 纪元行；
+  旧 69→FAIL，新 0 缺口 + 170 债务 + `healthy_no_sample` + 冻结。
+  **覆盖面是升的**：新词表套全部自然行命中 **129 行**（旧 69），
+  新纳入检查的是 `event` 115、`indexed` 46、`candidate` 5 个段落；
+  `substrate_recall` 的 133 个现在**明确豁免**（按契约就是 `advisory_only`
+  派生投影），比原先"名字碰巧对不上所以不检查"诚实。
+  **额外收获**：X.3 防火墙**扫源文本不只扫 import**，我的解释性注释里写了
+  `exposure_rollup` 就被全量套件抓出。本改动无 import、无数据依赖（归因是单向），
+  故**改注释、保留防火墙**——为迁就一句注释削弱架构测试是划不来的交易。
+  也再次印证：新增的 10 个测试全绿也发现不了它，**只跑自己加的测试不够**。
+  3115 → **3126 passed / 13 skipped / 0 failed**（+11），四门全过，
+  `surface_count` 154 不变。因本机 C: 盘曾占满、后台进程被回收，
+  全量套件分三段前台跑完（2086 + 1015 + 25 = 3126），三段均为最终代码状态。
+- `（CC.1，本节）`：顾问复审提三点，**全是"我加宽了判据但没审计它的消费者"**。
+  ① `_memory_source_has_attribution_gap` 有**三个**调用点，我只给驱动 FAIL 那个套了纪元；
+  另两个（`all_history` 全量、`rolling_7d` 近 7 天）也在跑新的 6 类判据。
+  已 3.200 只读补测：`all_history` **778→844**、`rolling_7d` **3→3 不变**、
+  `migration_debt` 709→844、`schema_era` **69→0**。四者中**只有 schema_era 驱动 FAIL**，
+  另三个均为 `info` 专用或无人引用 ⇒ **本次部署不引入任何新 WARN/FAIL**。
+  但"没出事"是运气不是设计，且是事后才验证的。
+  ② **新加的两个计数器算了却没人读** —— 探针整字典透传（`:5565`/`:4691`，无白名单）
+  所以它们进得了快照，**但 monitor 不读**，那 170 行债务对任何读者都不存在，
+  正是我刚写进 CLAUDE.md 的反模式。已让其搭既有 INFO 通道，
+  并把 `legacy_unattributed_record_count > 0` 加入触发条件——
+  否则债务是唯一信号时整条 INFO 不发出；反事实实测 `StopIteration`，已确认。
+  ③ 三段式 `working:a:b` ID 安全：`_extract_record_ids_from_section` 无跨文件消费者，
+  `exposure_rollup.py` 内无任何 `split(":")`，三个使用点全把 ID 当不透明键。
+  另登记**待办 17**：`rolling_7d_attribution_gap_count` 算了没人读（与
+  `exposure_rollup_lag_hours` 同病），并建议对 `exposure_monitor_stats`
+  返回字典的每个键做一次"有无读者"普查——本节只查了自己新加的两个。
+  **教训：加宽一个共用判据前，先 grep 全部调用点，逐个问"这数字变大会不会告警、谁在读"。**
+- `（CC.2，本节）`：修复关闭待办 17，并**第一次按新流程执行**——
+  写代码 → 全量套件 + 四门 → **顾问复审** → 折叠 → **才提交一次**。
+  此前 CB.1/CC.1 都是"先提交、后复审"，复审抓到的每处都变成又一个补救提交
+  （`f4a3ccf`→`6b34976`、`47a077a`→`c261072`），这是流程错误不是手误。
+  **折叠已做**：6 个提交合为 3 个，折叠前后内容逐字节一致。
+  **待办 17 定为 INFO 而非 WARN**，理由：`schema_era_attribution_gap_count`
+  已对纪元内任意一条缺口记录**无时间界地 FAIL**，再加 WARN 只是更弱的重复告警；
+  滚动窗口的真实价值是**诊断**（FAIL 是正在退化还是纪元内历史债务），故给读者不给分级。
+  **顺带修掉我自己刚引入的语义错误**：`rolling_gap` 原先没做纪元过滤，
+  若不改，生产者修好后头 7 天会因窗口内仍有旧行而报缺口，而生产者其实正确；
+  已改为对 `rolling_era_records` 计数，并加 `rolling_7d_attribution_era_record_count`
+  作分母——**0 缺口 / 0 记录是"近期无归因流量"，不是"近期干净"**。
+  两条反事实均实测：改回 `rolling_records` ⇒ `1 == 0` 失败；去掉 INFO ⇒ `StopIteration`。
+  **31 个键读者普查**（待办 17 第二半）：15 有生产读者 / 9 仅测试 / 3 仅文档 / 4 全无。
+  **最重要的教训来自审计工具自己先给了错答案**：第一版把**注释里的提及**算成读者，
+  于是 `exposure_rollup_lag_hours` 显示"有读者"，而那两处命中**全是我刚写的注释**
+  （把它当"已知无人读"举例）。过滤纯注释行后结论翻转。
+  第二个局限：排除生产者文件会漏掉**内部消费**，实测核对后
+  `telemetry_degraded_count` 等 4 个并非孤儿（内部驱动 `freeze_reasons`/`schema_health`）。
+  两条值得记的发现：**`schema_era_classified_ratio` 正是 BY.1 当作"数据成熟度"
+  证据的 `0.6506→0.7018`，却无任何代码读取、更未分级**——一个数字可以在论证里承重、
+  却不参与任何判定；**`legacy_unmarked_rollup_count`（我用来论证纪元边界正当性的先例）
+  自己也无生产读者**，设计成立而可见性不合格，反过来说本次的
+  `legacy_unattributed_record_count` 已优于其先例。余下孤儿键登记为**待办 18**，
+  故意不在本节顺手扩大改动面。另修复我在上一轮编辑中弄坏的一处文档段落
+  （item 17 插入时吞掉了"（原 4、5 两项"的段首，导致后半段被焊接到 17 末尾）。
+  **新流程第一次就见效**：提交前的顾问复审当场抓到一处真缺陷——我给新 INFO 条目的
+  守卫写的是 `if v2_exposure:`（存在性），但采集失败时它是
+  `{"schema_era_health": "unavailable", "error_code": ...}`——**truthy**，
+  于是条目照发、三个 `.get(...) or 0` 全取 0，
+  **与「近期确实很干净」的输出逐字节相同**，而探针其实根本没跑成。
+  这正是本会话一直在记录的那个形状（两种状态留下相同证据），
+  而近邻的 migration_debt 条目用的是**值守卫**、本来就是对的，是我偏离了既有约定。
+  已改为守卫「采集是否成功」；脚本外独立复验：修前 `True`、修后 `False`。
+  **同一处缺陷按旧流程会变成又一个补救提交。**
+  另记：`rolling_7d_attribution_gap_count` 已是纪元域而
+  `rolling_7d_natural_record_count` 仍是自然域，配对当「缺口/分母」会算错，
+  正确分母是新增的 `rolling_7d_attribution_era_record_count`（登记在待办 18）。
+  3127 → **3130 passed / 13 skipped / 0 failed**（+3），四门全过。
+- `28dbf8a..（CD，本节）`：残留待办一轮清扫，按优先级 18→14→11→9→13→10→2/3 七项
+  关闭 + 一项部分关闭。18：孤儿键逐个定性（3 个新 INFO 条目 + component 定性 +
+  删 2 键），census 测试钉死键集使"算了没人读"不能再无声出生，且当场抓到
+  手工审计漏掉的未读别名 `attribution_gap_count`（子串键名骗过逐键 grep）。
+  14：exposure_rollup 每次运行落盘 `last_run` 封闭原因码（两条字节相同的
+  不产出退出从此可区分）、session_mirror auto-apply 每条退出落盘原因
+  （无 scan 的路径省略 counters 而非填零）、`_call_hermes_runtime_model`
+  六个调用方清查——clearance_cycle 死判官恒 `clear` 改 fail-closed
+  `judge_unavailable`，contradiction lane 空回复记 `llm_empty_content`；
+  **顺链抓到未登记真缺陷**：contradiction lane 的 prompt 模板大括号未转义，
+  找到候选对就必崩 KeyError，该循环此前从未被任何测试触达。
+  11：`_check_vector_available` 改 `find_spec`+缓存，status/doctor 不再执行
+  torch（17–29s 归零，待办 3 疑似成因随之消除）。9：两个 shadow 账本
+  writer 补 `created_at`（forward-only，历史行留 owner）。13：session_mirror
+  改"从未导入优先"稳定排序，信号从 mirrored 事件派生、删 state 重建后仍存活，
+  活跃会话不再以新内容版本反复霸占队头。10：recall_golden authority 维度
+  真实现（归因从实际命中 section 派生，`source_authority_issue`/
+  `context_insufficient` 均可达；`min_score` 删除 + loader 容忍未知键）。
+  2：安装器五处 `.as_posix()`（Windows 本机反事实实测）。
+  12 条反事实全部 revert→FAIL→restore→PASS。3130 → **3153 passed /
+  13 skipped / 0 failed**（+23，逐文件对账吻合），四门全过
+  （write surface 154→156 / unclassified 0）。提交后独立复审：无 Critical，
+  3 Important 中 1 修（write_failed 时快照 status 不再谎报 ok）、2 推回
+  （status 语义有意、monitor 接线已显式登记），拼接错位的测试归位，
+  recorder 改原子写；全部 fold 回同一提交。仅 `local_pass`，未部署、未推送。

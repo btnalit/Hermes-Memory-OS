@@ -894,3 +894,91 @@ class TestSweepUnavailableOpenProposalsOnFlagFlip:
         assert result["status"] == "ok", (
             "a single per-proposal failure must not flip status when others swept fine"
         )
+
+
+def test_dead_judge_returning_empty_for_every_pair_fails_closed(tmp_path: Path) -> None:
+    """Backlog 14 (completion is not output): _call_hermes_runtime_model
+    reports most failures as "" (27.5% measured on fact_judge). With per-pair
+    skips alone, a judge whose every call comes back empty falls through every
+    pair and returns "clear" -- clearing a provisional record on the strength
+    of a judge that never judged, the constant verdict the constitution
+    forbids.
+
+    Counterfactual: without the pairs_evaluated guard this returns "clear";
+    with it, "unknown"/"judge_unavailable" (fail-closed, same as the
+    availability-probe path).
+    """
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _judge_against_permanents
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+
+    perm_records_list = [
+        {"id": "perm_dead_judge", "body": "The sky is blue.",
+         "frontmatter": {"id": "perm_dead_judge", "provisional": False}},
+    ]
+    mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value="",
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        verdict, conflict_refs, _entities, _mode, unknown_reason = (
+            _judge_against_permanents(
+                store, "cand_dead_judge", "The sky is green.", {},
+                perm_records_list, max_pairs=5,
+            )
+        )
+
+    assert verdict == "unknown", (
+        f"a judge that never judged must fail closed, got {verdict!r}"
+    )
+    assert unknown_reason == "judge_unavailable"
+    assert conflict_refs == []
+
+    # The dual: one real (parseable) judgment among the pairs keeps "clear"
+    # reachable -- the guard must only catch the zero-evaluations case.
+    responses = iter([
+        "",
+        '{"claim_a": {"subject": "sky", "predicate": "color", "object": "green", '
+        '"confidence": 0.2}, "claim_b": {"subject": "sky", "predicate": "color", '
+        '"object": "blue", "confidence": 0.2}}',
+    ])
+    two_pairs = [
+        {"permanent": perm_records_list[0], "similarity": 0.9},
+        {"permanent": perm_records_list[0], "similarity": 0.8},
+    ]
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=two_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        side_effect=lambda prompt, config: next(responses),
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        verdict, _refs, _entities, _mode, unknown_reason = (
+            _judge_against_permanents(
+                store, "cand_partial_judge", "The sky is green.", {},
+                perm_records_list, max_pairs=5,
+            )
+        )
+    assert verdict == "clear"
+    assert unknown_reason == ""
