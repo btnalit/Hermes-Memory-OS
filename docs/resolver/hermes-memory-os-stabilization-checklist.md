@@ -3193,6 +3193,121 @@ clearance 保持冻结；随新流量产生带标记记录，`attribution_era_re
 **教训：加宽一个判据前，先 grep 它的全部调用点，并对每个调用点问
 "这个数字变大了会不会触发告警、以及谁在读它"。**
 
+#### CC.2 — 待办 17：给滚动窗口一个读者，并把 31 个键全查一遍
+
+本节是**第一次按新流程做的**：写代码 → 全量套件 + 四门 → **顾问复审** → 折叠 → **才提交一次**。
+此前 CB.1 与 CC.1 都是"先提交、后复审"，于是复审抓到的每一处都变成又一个补救提交
+（`f4a3ccf`→`6b34976`、`47a077a`→`c261072`）。这是流程错误，不是手误。
+折叠已完成：6 个提交合为 3 个，且折叠前后内容逐字节一致（`git diff --stat` 为空）。
+
+**修法判定：`rolling_7d_attribution_gap_count` 定为 INFO，不给它单独的 WARN。**
+待办 17 原本列了两条路。选 INFO 的理由是**它作为告警是冗余的**：
+`schema_era_attribution_gap_count` 已经对**归因纪元内任意一条**有缺口的记录
+无时间界地 FAIL，所以"近 7 天有缺口"必然已经被那条 FAIL 覆盖，
+再加一个 WARN 只是更弱的重复告警。滚动窗口真正提供的是**诊断价值**——
+一个 schema-era FAIL 到底是**正在退化**还是**纪元内的历史债务**。
+所以给它读者（`v2_exposure_attribution_recent_window`，INFO），但不给它分级。
+
+**顺带修掉一个我自己刚引入的语义错误**：`rolling_gap` 原先**没有**做纪元过滤。
+若不改，生产者修好后的**头 7 天**里，它会因为窗口内还有修复前的旧行而报出缺口，
+而生产者其实是正确的——一个"当前是否正在退化"的滚动信号，
+用无法归因的历史行是答不出来的。已改为对 `rolling_era_records` 计数，
+并新增 `rolling_7d_attribution_era_record_count` 作为分母：
+**0 缺口 / 0 记录 是"近期没有归因流量"，不是"近期很干净"**。
+反事实实测：改回 `rolling_records` ⇒ 断言 `1 == 0` 失败；
+去掉 monitor 那段 INFO ⇒ `StopIteration`。两条都实测确认。
+
+#### 31 个键的读者普查（待办 17 的第二半）
+
+写脚本枚举 `exposure_monitor_stats` **真实返回**的键（调用函数取键，不解析源码），
+再全项目扫 503 个文件找读者。**关键教训在于这个审计工具本身先给了我错答案。**
+
+第一版把**注释里的提及**也算成"有读者"，于是 `exposure_rollup_lag_hours`
+显示为"有生产读者"——而它在 monitor 里的两次出现**全是我自己刚写的注释**
+（把它当作"已知无人读的指标"举例）。加上"跳过纯注释行"的过滤后，结论翻转。
+**一个用文本匹配判断"有没有读者"的工具，会把谈论 X 误判为使用 X。**
+
+修正后的准确结论：
+
+| 分类 | 数量 | 说明 |
+|---|---|---|
+| 有生产读者 | 15 | 含本次新加的两个滚动键 |
+| 仅测试断言 | 9 | 生产侧无消费者 |
+| 仅文档提及 | 3 | |
+| 任何地方都无读者 | 4 | |
+
+**但要注意我这个审计的第二个局限**：它排除了生产者文件本身，
+所以**内部消费**的键会被误判为孤儿。实测核对后，以下 4 个**并非孤儿**——
+它们在 `exposure_rollup.py` 内部驱动 `freeze_reasons` / `schema_health`（`:542-558`），
+而那两个是有读者的：`telemetry_degraded_count`、`initial_natural_cycle_count`、
+`production_observation_days`、`budget_pressure_streak_days`。
+
+**扣除内部消费后，真正"算了却无人分级、无人读"的键**（登记为待办 18）：
+
+- **`schema_era_classified_ratio`** —— 最值得注意的一个。**这正是 BY.1 当作
+  "数据成熟度"证据引用的那个 `0.6506→0.7018`**。它被计算、被写进快照、
+  被写进本文档，但**没有任何代码读它、更没有分级**。
+  一个被当作论据反复引用的数字，其实从未进入任何判定。
+- **`exposure_rollup_lag_hours`** —— CLAUDE.md 早已记载它"从不分级"，本次确认无误
+  （且我的审计工具一度把它误判为有读者，见上）。
+- **`legacy_unmarked_rollup_count`** —— **这条最讽刺：我在 CC 节用它作为
+  "把不可追溯的旧行分类为债务"的先例来论证归因纪元边界的正当性，
+  而它自己也没有生产读者。**先例在**设计**上成立（分类而非抹除），
+  但在**可见性**上同样不合格。反过来说，本次的
+  `legacy_unattributed_record_count` 已经比它所仿照的先例更好——那个有读者。
+- 其余：`cumulative_selected` / `cumulative_dropped_by_rank` /
+  `cumulative_dropped_by_budget` / `cumulative_eligible` /
+  `exposure_rollup_records_total` / `rolling_7d_natural_record_count` /
+  `schema_era_natural_record_count` / `latest_window_start` / `latest_window_end`。
+  这些多为快照上下文性质，未必都需要分级，但需要**逐个明确定性**，
+  不能继续停在"算了不用"。
+
+#### 新流程第一次见效：复审在提交前抓到一个真缺陷
+
+这是本会话第一次**在提交前**跑顾问复审，它当场抓到一处——而且正是我整个会话
+一直在记录的那个形状：**两种不同状态留下完全相同的证据**。
+
+我给新 INFO 条目的守卫是**存在性**判断 `if v2_exposure:`。但采集失败时
+`v2_exposure` **并不是空的**，它是 `{"schema_era_health": "unavailable",
+"error_code": ...}`（`:4697`/`:4714` 两条填充路径都这么写，
+`test_memory_os_3_200_monitor.py:526` 还钉了这个形状）——**truthy**。
+于是条目照发，三个 `.get(...) or 0` 全取 0，
+monitor 就会公布 `rolling_7d_attribution_gap_count: 0`、
+`rolling_7d_attribution_era_record_count: 0`，
+**与「近期确实很干净」的输出逐字节相同**，而实际上探针根本没跑成。
+采集失败另有 WARN 上报，但这条 INFO 是在**把默认值当测量值发布**。
+
+对照就在我这段代码上方：`v2_exposure_all_history_migration_debt` 用的是
+**值守卫**（`migration_debt_gap_count > 0 or ...`），所以采集失败时它正确地保持沉默。
+我偏离了近邻的既有约定。
+
+已改为守卫「采集是否**成功**」（无 `error_code` 且 health 不在
+`{unavailable, unavailable_remote_projection}`）。脚本外独立复验：
+修前 `INFO entry emitted on collection FAILURE: True`，修后 `False`。
+并补测试断言三件事：采集失败不发条目、失败本身仍有 WARN（沉默不等于整体沉默）、
+**采集成功但近期确实为 0 时仍要发**——否则「沉默」与「测得 0」就分不开了。
+
+**这正是把复审移到提交前的全部意义**：同一处缺陷，按旧流程会变成又一个补救提交。
+
+**另记一处已知不一致**（顾问指出，非阻塞，登记在待办 18）：
+`rolling_7d_attribution_gap_count` 现在是**纪元域**，而
+`rolling_7d_natural_record_count` 仍是**自然域**。谁把这两个当成
+「缺口/分母」配对使用就会算出错的比率。本次新增的
+`rolling_7d_attribution_era_record_count` 才是正确分母。
+
+#### CC.2 测试与门
+
+**3127 → 3130 passed / 13 skipped / 0 failed（+3）**：纪元过滤（phase1）、
+monitor INFO、以及复审抠出的采集失败静默各一。分三段前台跑：`tests/plugins` 2087、
+`tests/scripts`+`seam`+`system_modularization` 1018、`tests/ev*` 25 = 3130。
+四门全过，`surface_count` 154 不变、`unclassified_count=0`，空白检查干净。
+（计数溯源：CC 节记的 3126 是 `47a077a` 时的状态；CC.1 的 monitor 测试使其成为 3127。）
+证据级别：**仅 `local_pass`**，未部署、未推送。
+
+**本节不修这批**——那是独立范围，且每个都需要单独的定性判断
+（该分级、该进 INFO、还是该删）。**故意不做**，登记为待办 18，
+而不是顺手扩大改动面。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -3342,7 +3457,9 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     这是正确方向，不是回归。
     与"关键事实漏失"同源——都发生在 prefetch 披露侧，属批次 C 的邻接面。
 
-17. **`rolling_7d_attribution_gap_count` 算了但没人读**（CC.1 查出，未修）。
+17. ~~**`rolling_7d_attribution_gap_count` 算了但没人读**~~ —— **CC.2 已修复关闭**
+    （定为 INFO 而非 WARN：schema-era 门已无时间界地 FAIL，再加 WARN 是更弱的重复告警；
+    并补做纪元过滤 + 分母键，完成 31 个键的读者普查）。原始诊断保留备查：
     `exposure_monitor_stats` 计算并返回它，但**全 monitor 无任何引用**——
     既不判 PASS/WARN/FAIL，也不进 INFO，对任何读者都不存在。
     与既有的 `exposure_rollup_lag_hours` 是**同一个毛病**（CLAUDE.md 已记
@@ -3354,7 +3471,32 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     不可继续留在"算了不用"的状态。同类排查建议一并做：
     grep `exposure_monitor_stats` 返回字典的**每个键**，确认都有读者
     ——CC.1 已用这个方法查出两个新键无读者并当场修掉，
-    但**未对既有键做全面普查**。——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
+    但**未对既有键做全面普查**。
+
+18. **`exposure_monitor_stats` 仍有一批键"算了却无人分级、无人读"**（CC.2 普查查出，未修）。
+    扣除内部驱动 `freeze_reasons`/`schema_health` 的 4 个（`telemetry_degraded_count`、
+    `initial_natural_cycle_count`、`production_observation_days`、
+    `budget_pressure_streak_days`）后，真正的孤儿键：
+    - **`schema_era_classified_ratio`** —— **BY.1 当作"数据成熟度"证据引用的那个
+      `0.6506→0.7018` 就是它**，却从未被任何代码读取、更未分级。
+      一个被反复当作论据的数字，其实从未进入任何判定。**优先处理这条。**
+    - **`exposure_rollup_lag_hours`** —— CLAUDE.md 早有记载，本次确认无读者。
+    - **`legacy_unmarked_rollup_count`** —— CC 节把它当作"债务分类"先例来论证
+      归因纪元边界，而它自己也无生产读者：设计上成立，可见性上不合格。
+      （反过来说，本次的 `legacy_unattributed_record_count` 已优于其先例。）
+    - **`rolling_7d_natural_record_count`** —— 且注意它与 `rolling_7d_attribution_gap_count`
+      **域已经不同**（前者自然域、后者纪元域），配对当「缺口/分母」用会算出错的比率；
+      正确分母是 CC.2 新增的 `rolling_7d_attribution_era_record_count`。
+    - `cumulative_selected` / `cumulative_dropped_by_rank` / `cumulative_dropped_by_budget` /
+      `cumulative_eligible` / `exposure_rollup_records_total` /
+      `schema_era_natural_record_count` /
+      `latest_window_start` / `latest_window_end`。
+    每个都需单独定性（该分级 / 该进 INFO / 该删），不宜一次性套同一处理。
+    **方法提醒**：别用纯文本匹配判断"有没有读者"——CC.2 的审计工具第一版把
+    **注释里的提及**算成读者，导致 `exposure_rollup_lag_hours` 被误判为"有读者"，
+    而那两处命中全是新写的注释。必须过滤纯注释行。
+
+（原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
 sannai-community 仓库 README。）
 
@@ -3838,3 +3980,42 @@ sannai-community 仓库 README。）
   `exposure_rollup_lag_hours` 同病），并建议对 `exposure_monitor_stats`
   返回字典的每个键做一次"有无读者"普查——本节只查了自己新加的两个。
   **教训：加宽一个共用判据前，先 grep 全部调用点，逐个问"这数字变大会不会告警、谁在读"。**
+- `（CC.2，本节）`：修复关闭待办 17，并**第一次按新流程执行**——
+  写代码 → 全量套件 + 四门 → **顾问复审** → 折叠 → **才提交一次**。
+  此前 CB.1/CC.1 都是"先提交、后复审"，复审抓到的每处都变成又一个补救提交
+  （`f4a3ccf`→`6b34976`、`47a077a`→`c261072`），这是流程错误不是手误。
+  **折叠已做**：6 个提交合为 3 个，折叠前后内容逐字节一致。
+  **待办 17 定为 INFO 而非 WARN**，理由：`schema_era_attribution_gap_count`
+  已对纪元内任意一条缺口记录**无时间界地 FAIL**，再加 WARN 只是更弱的重复告警；
+  滚动窗口的真实价值是**诊断**（FAIL 是正在退化还是纪元内历史债务），故给读者不给分级。
+  **顺带修掉我自己刚引入的语义错误**：`rolling_gap` 原先没做纪元过滤，
+  若不改，生产者修好后头 7 天会因窗口内仍有旧行而报缺口，而生产者其实正确；
+  已改为对 `rolling_era_records` 计数，并加 `rolling_7d_attribution_era_record_count`
+  作分母——**0 缺口 / 0 记录是"近期无归因流量"，不是"近期干净"**。
+  两条反事实均实测：改回 `rolling_records` ⇒ `1 == 0` 失败；去掉 INFO ⇒ `StopIteration`。
+  **31 个键读者普查**（待办 17 第二半）：15 有生产读者 / 9 仅测试 / 3 仅文档 / 4 全无。
+  **最重要的教训来自审计工具自己先给了错答案**：第一版把**注释里的提及**算成读者，
+  于是 `exposure_rollup_lag_hours` 显示"有读者"，而那两处命中**全是我刚写的注释**
+  （把它当"已知无人读"举例）。过滤纯注释行后结论翻转。
+  第二个局限：排除生产者文件会漏掉**内部消费**，实测核对后
+  `telemetry_degraded_count` 等 4 个并非孤儿（内部驱动 `freeze_reasons`/`schema_health`）。
+  两条值得记的发现：**`schema_era_classified_ratio` 正是 BY.1 当作"数据成熟度"
+  证据的 `0.6506→0.7018`，却无任何代码读取、更未分级**——一个数字可以在论证里承重、
+  却不参与任何判定；**`legacy_unmarked_rollup_count`（我用来论证纪元边界正当性的先例）
+  自己也无生产读者**，设计成立而可见性不合格，反过来说本次的
+  `legacy_unattributed_record_count` 已优于其先例。余下孤儿键登记为**待办 18**，
+  故意不在本节顺手扩大改动面。另修复我在上一轮编辑中弄坏的一处文档段落
+  （item 17 插入时吞掉了"（原 4、5 两项"的段首，导致后半段被焊接到 17 末尾）。
+  **新流程第一次就见效**：提交前的顾问复审当场抓到一处真缺陷——我给新 INFO 条目的
+  守卫写的是 `if v2_exposure:`（存在性），但采集失败时它是
+  `{"schema_era_health": "unavailable", "error_code": ...}`——**truthy**，
+  于是条目照发、三个 `.get(...) or 0` 全取 0，
+  **与「近期确实很干净」的输出逐字节相同**，而探针其实根本没跑成。
+  这正是本会话一直在记录的那个形状（两种状态留下相同证据），
+  而近邻的 migration_debt 条目用的是**值守卫**、本来就是对的，是我偏离了既有约定。
+  已改为守卫「采集是否成功」；脚本外独立复验：修前 `True`、修后 `False`。
+  **同一处缺陷按旧流程会变成又一个补救提交。**
+  另记：`rolling_7d_attribution_gap_count` 已是纪元域而
+  `rolling_7d_natural_record_count` 仍是自然域，配对当「缺口/分母」会算错，
+  正确分母是新增的 `rolling_7d_attribution_era_record_count`（登记在待办 18）。
+  3127 → **3130 passed / 13 skipped / 0 failed**（+3），四门全过。

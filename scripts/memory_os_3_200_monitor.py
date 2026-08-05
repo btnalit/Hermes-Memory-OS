@@ -1440,6 +1440,43 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "attribution_era_record_count": attribution_era_count,
             },
         })
+    # Item 17: rolling_7d_attribution_gap_count was computed, returned, and read
+    # by nothing -- the same defect as exposure_rollup_lag_hours. It gets a
+    # reader here as INFO rather than its own WARN, deliberately:
+    # schema_era_attribution_gap_count already FAILs on ANY gap in an
+    # attribution-era record with no time bound, so a rolling WARN would be a
+    # strictly weaker duplicate alert. What the rolling window adds is
+    # DIAGNOSTIC -- whether a schema-era FAIL is an active regression or
+    # historical debt inside the marked set -- so it is surfaced, not graded.
+    # The record count travels with it because a gap count of 0 over 0 records
+    # means "no recent attributed traffic", not "recent traffic was clean".
+    # Gate on collection having SUCCEEDED, not merely on the dict being present.
+    # On a collection failure v2_exposure is {"schema_era_health": "unavailable",
+    # "error_code": ...} -- truthy -- so a presence check would fire and every
+    # .get(...) or 0 would yield 0, publishing zeros that are byte-identical to a
+    # genuinely quiet window. That is exactly exposure_rollup's two-no-write-exits
+    # defect: two different states leaving indistinguishable evidence. The
+    # collection failure is already reported as its own WARN, so this entry stays
+    # silent rather than fabricating a measurement -- matching the value-guarded
+    # migration-debt entry above.
+    v2_collection_succeeded = (
+        bool(v2_exposure)
+        and not v2_exposure.get("error_code")
+        and v2_health not in {"unavailable", "unavailable_remote_projection"}
+    )
+    if v2_collection_succeeded:
+        info.append({
+            "code": "v2_exposure_attribution_recent_window",
+            "value": {
+                "rolling_7d_attribution_gap_count": int(
+                    v2_exposure.get("rolling_7d_attribution_gap_count") or 0
+                ),
+                "rolling_7d_attribution_era_record_count": int(
+                    v2_exposure.get("rolling_7d_attribution_era_record_count") or 0
+                ),
+                "schema_era_attribution_gap_count": schema_era_gap_count,
+            },
+        })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:
         passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
 

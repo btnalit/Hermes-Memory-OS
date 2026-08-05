@@ -7691,3 +7691,112 @@ def test_v2_exposure_surfaces_pre_attribution_era_debt_and_evidence_volume():
     assert any(
         item["code"] == "v2_exposure_schema_era_unhealthy" for item in with_real_gap["fail"]
     )
+def test_rolling_attribution_window_is_surfaced_as_info_not_a_duplicate_alert():
+    """Item 17: the rolling window gets a READER, deliberately as INFO.
+
+    It is not graded because schema_era_attribution_gap_count already FAILs on
+    any gap in an attribution-era record with no time bound -- a rolling WARN
+    would be a strictly weaker duplicate. What it adds is the active-vs-historical
+    distinction, which is diagnostic.
+
+    Counterfactual: without the monitor change this INFO entry does not exist
+    (StopIteration), which is the state the backlog item described.
+    """
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "FAIL",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 4,
+            "schema_era_attribution_gap_count": 4,
+            "rolling_7d_attribution_gap_count": 3,
+            "rolling_7d_attribution_era_record_count": 12,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_attribution_gap_count"] == 3
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 12
+    assert entry["value"]["schema_era_attribution_gap_count"] == 4
+
+    # Deliberately NOT its own warn/fail code -- the gate above already covers it.
+    for bucket in ("warn", "fail"):
+        assert not any(
+            item["code"] == "v2_exposure_attribution_recent_window"
+            for item in snapshot[bucket]
+        ), f"rolling window must not duplicate the schema-era gate in {bucket}"
+
+    # A clean window still reports, so a reader can tell "clean" from "no data".
+    clean = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 40,
+        },
+    })
+    clean_entry = next(
+        item for item in clean["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert clean_entry["value"]["rolling_7d_attribution_era_record_count"] == 40
+def test_attribution_recent_window_stays_silent_when_collection_failed():
+    """A failed collection must not be published as a measurement of zero.
+
+    On collection failure v2_exposure_monitor is
+    {"schema_era_health": "unavailable", "error_code": ...} -- truthy -- so a
+    presence-based guard fires and every .get(...) or 0 yields 0, producing an
+    INFO entry byte-identical to a genuinely quiet window. Same defect shape as
+    exposure_rollup's two no-write exits leaving indistinguishable evidence.
+
+    Counterfactual: guarding on `if v2_exposure:` instead of on collection
+    success makes this fail -- verified, the entry appears with all-zero values.
+    """
+    failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {"schema_era_health": "unavailable", "error_code": "ImportError"},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_attribution_recent_window" for item in failed["info"]
+    ), "zeros from a failed collection must never be published as a measurement"
+    # The failure itself must still be reported -- silence here is not silence overall.
+    assert any(
+        item["code"] == "v2_exposure_monitor_collection_failed" for item in failed["warn"]
+    )
+
+    # Remote-projection failure uses a different sentinel; same rule applies.
+    remote_failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {"schema_era_health": "unavailable_remote_projection"},
+    })
+    assert not any(
+        item["code"] == "v2_exposure_attribution_recent_window"
+        for item in remote_failed["info"]
+    )
+
+    # And a successful collection with genuinely zero recent traffic DOES report,
+    # so "silent" and "measured zero" stay distinguishable.
+    quiet = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "healthy_no_sample",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "rolling_7d_attribution_gap_count": 0,
+            "rolling_7d_attribution_era_record_count": 0,
+        },
+    })
+    entry = next(
+        item for item in quiet["info"]
+        if item["code"] == "v2_exposure_attribution_recent_window"
+    )
+    assert entry["value"]["rolling_7d_attribution_era_record_count"] == 0

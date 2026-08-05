@@ -370,3 +370,54 @@ def test_legacy_unmarked_rollups_counted_separately_and_excluded_from_natural_ga
     assert stats["initial_natural_cycle_count"] == 0
     assert stats["budget_pressure_streak_days"] == 0
     assert stats["v2c_unfreeze_ready"] is False
+def test_rolling_attribution_window_is_era_scoped_and_has_a_reader(tmp_path):
+    """Item 17: rolling_7d_attribution_gap_count was computed and read by nothing.
+
+    Two properties are asserted together because either alone is insufficient:
+      - era-scoped: a recent PRE-marker row must not count, or the window would
+        report gaps for 7 days after the producer fix while the producer is
+        correct;
+      - denominated: the era record count travels with it, so 0 gaps over 0
+        records cannot be misread as "recent traffic was clean".
+
+    Counterfactual: computing rolling_gap over rolling_records instead of
+    rolling_era_records makes the first assertion fail (1 != 0).
+    """
+    store = _store(tmp_path)
+    now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+
+    # Recent, natural, gapped -- but PRE-marker, so unattributable retroactively.
+    append_memory_source_record(store.roots, {
+        "record_id": "recent-pre-marker-gap",
+        "created_at": "2026-08-03T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "selected": [_section(source_ids=[])],
+        "dropped": [],
+    })
+
+    stats = exposure_monitor_stats(store, now=now)
+    assert stats["rolling_7d_attribution_gap_count"] == 0, (
+        "a pre-marker row must not be counted as a recent attribution gap"
+    )
+    assert stats["rolling_7d_attribution_era_record_count"] == 0, (
+        "no attributed traffic in the window, so the denominator must say so"
+    )
+
+    # Now a recent MARKED row with a real gap: that is an active regression.
+    append_memory_source_record(store.roots, {
+        "record_id": "recent-marked-gap",
+        "created_at": "2026-08-03T12:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
+        "selected": [_section(source_ids=[])],
+        "dropped": [],
+    })
+
+    stats = exposure_monitor_stats(store, now=now)
+    assert stats["rolling_7d_attribution_gap_count"] == 1
+    assert stats["rolling_7d_attribution_era_record_count"] == 1
+    # And it still drives the real gate, so the rolling number stays diagnostic.
+    assert stats["schema_era_attribution_gap_count"] == 1
+    assert stats["schema_era_health"] == "FAIL"

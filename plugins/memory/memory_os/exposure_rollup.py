@@ -449,15 +449,24 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     # fixed retroactively -- the disclosure already happened without capturing
     # IDs -- so they are surfaced as debt rather than folded into the gate.
     # Same treatment as legacy_unmarked_rollup_count above.
-    attribution_era_records = [
-        record for record in natural_records
-        if str(record.get("attribution_schema") or "") == MEMORY_SOURCES_ATTRIBUTION_SCHEMA
-    ]
+    def _in_attribution_era(record: dict[str, Any]) -> bool:
+        return str(record.get("attribution_schema") or "") == MEMORY_SOURCES_ATTRIBUTION_SCHEMA
+
+    attribution_era_records = [r for r in natural_records if _in_attribution_era(r)]
     legacy_unattributed_record_count = len(natural_records) - len(attribution_era_records)
     schema_gap = sum(
         1 for record in attribution_era_records if _memory_source_has_attribution_gap(record)
     )
-    rolling_gap = sum(1 for record in rolling_records if _memory_source_has_attribution_gap(record))
+    # Item 17: era-scoped for the same reason schema_gap is. Counting pre-marker
+    # rows here would report gaps for the first 7 days after the producer fix
+    # ships while the producer is in fact correct -- a rolling window is supposed
+    # to answer "is it degrading RIGHT NOW", and unattributable legacy rows
+    # cannot answer that. rolling_era_record_count is reported alongside so a
+    # zero can be read as "no recent attributed traffic" rather than "clean".
+    rolling_era_records = [r for r in rolling_records if _in_attribution_era(r)]
+    rolling_gap = sum(
+        1 for record in rolling_era_records if _memory_source_has_attribution_gap(record)
+    )
     telemetry_degraded_count = sum(
         1 for record in natural_records
         if isinstance(record.get("boundary"), dict)
@@ -566,6 +575,9 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         "legacy_unattributed_record_count": legacy_unattributed_record_count,
         "attribution_era_record_count": len(attribution_era_records),
         "rolling_7d_attribution_gap_count": rolling_gap,
+        # Denominator for the above: 0 means "no recent attributed traffic", which
+        # is NOT the same as "recent traffic was clean" (item 17).
+        "rolling_7d_attribution_era_record_count": len(rolling_era_records),
         "schema_era_conservation_failure_count": conservation_failures,
         "schema_era_natural_record_count": len(natural_records),
         "rolling_7d_natural_record_count": len(rolling_records),
