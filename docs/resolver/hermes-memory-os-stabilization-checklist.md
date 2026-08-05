@@ -4266,3 +4266,53 @@ sannai-community 仓库 README。）
   3 Important 中 1 修（write_failed 时快照 status 不再谎报 ok）、2 推回
   （status 语义有意、monitor 接线已显式登记），拼接错位的测试归位，
   recorder 改原子写；全部 fold 回同一提交。仅 `local_pass`，未部署、未推送。
+
+### CD.D — 统一部署 3.200 并端到端验证（2026-08-05）
+
+PR #19 合并为 `53880cd` 后统一部署（含此前未部署的 BZ/CA/CB/CC/CD 全部批次）。
+
+- `/opt` 由 `01356df` ff 到 `53880cd`；数据备份
+  `/root/.hermes/backups/memory-os-pre-cd-20260805T065914Z.tar.gz`（49M，源 325M）。
+- `deploy_memory_os.py` production-safe：preflight / apply / postcheck 全程
+  `fail=[]`，manifest 绑定 `53880cd`，四探针 pass，未重启 Gateway。
+  **工具坑**：Git Bash 下 `/opt/...`、`/root/.hermes` 参数被 MSYS 路径转换改写成
+  `D:/Git/...` 导致首跑 preflight 假失败——须带 `MSYS_NO_PATHCONV=1`。
+- **陷阱①（cron 快照）闭合并端到端证实**：apply 重新生成
+  `memory_os_cron_registry.json`，`tick_evidence` 成员 5→6 含
+  `session_fact_extraction`；部署后第一个 `:12` tick（07:12Z）lane 即首跑：
+  **141 会话扫描 / 处理 2（per-tick 上限）/ 提取 5 事实 / 写 5 候选**，
+  envelope 有效、boundary 全 false、raw_body_included=false。
+  CB.1 的关键修复在生产第一跑兑现：40 次 LLM 调用 19 次 `llm_empty_content`
+  （**47.5%**，比 fact_judge 的 27.5% 实测更差），2 个会话正确
+  `sessions_deferred_llm_failure`、0 个被错标已处理——事实未丢失。
+- 安装拷贝 sha 与 `/opt` 逐字节一致（owner_actions / exposure_rollup /
+  session_mirror / recall_golden / cli 五文件抽验）；runtime 布局 fresh import：
+  `EXPOSURE_ROLLUP_RUN_OUTCOMES`、`_record_auto_apply_last_run`、
+  `RecallEvaluationItem.expected_authority`、`find_spec` 探测全部在线。
+- **Full Monitor live：0 FAIL / 4 WARN（全部已知家族）**，159.996s < 180s 目标。
+  对比 BY.3 基线（97 PASS / 6 WARN / 1 FAIL）：唯一长期 FAIL
+  `v2_exposure_schema_era_unhealthy` 按 16a 纪元边界设计转为
+  `healthy_no_sample` 类 PASS（170 自然行全为 pre-marker，era 集为空），
+  `attribution_era_no_sample` 在 freeze_reasons、清算闸门保持冻结——
+  绿色来自诚实无样本申报，不是靠缩小度量（16b 教训的正确形状）。
+  `shell_alias_no_env_ok` 部署后首跑即 PASS（待办 3 观察点首个数据点，
+  BY.3 时同位置曾 FAIL）。
+- 生产实测 CD 各新键：`schema_era_classified_ratio 0.7018`（与 CA.2 一致，
+  待新 rollup 推动）、`all_history_attribution_gap_count 844`、
+  `legacy_unmarked_rollup_count 8`、`rolling_7d natural 5 / era 0`、
+  `last_run_outcome "unrecorded"`（旧快照的诚实 legacy 标记，
+  明日 00:05Z daily tick 后应转真实 outcome）；census 32 键、
+  两个已删键确认不在。
+- **陷阱②（attribution_schema）如实登记为未闭合**：近 7 天 5 条自然行
+  全部无标记——prefetch 是 Gateway 进程内路径，**新生产者代码待 Gateway
+  重载才生效**（沿 BT/BY 边界不擅自重启）。在那之前 `healthy_no_sample`
+  即设计内状态；重载后 `rolling_7d_natural − rolling_7d_era` 归零
+  即为闭合信号（CD.1 把该差值设计为部署验证信号，正为此刻）。
+- 证据级别：**`deploy_pass` + `live_monitor_pass`（0 FAIL）**。
+- `53880cd..（CD.D，本节）`：统一部署 3.200——preflight/apply/postcheck 全 `fail=[]`，
+  manifest 绑定 `53880cd`；cron 快照重生成、`session_fact_extraction` 部署后
+  第一个 tick 首跑即产出（141 扫描/2 处理/5 事实/5 候选，19 次 llm_empty_content
+  全部正确 defer 不丢失）；Full Monitor **0 FAIL / 4 已知 WARN**、160s 达标，
+  长期唯一 FAIL 按纪元边界设计转 `healthy_no_sample` 且清算闸门保持冻结；
+  attribution_schema 端到端验证如实登记为待 Gateway 重载。
+  证据级别 `deploy_pass` + `live_monitor_pass`。纯文档记录。
