@@ -138,8 +138,14 @@ DEEP_REFLECTION_CONFIG_DEFAULTS: dict[str, object] = {
 
 
 MEMORY_SOURCES_PRESETS: dict[str, dict[str, object]] = {
+    # CE: production-safe now ENABLES the disclosure ledger. "Safe" lives in
+    # mode=metadata_only (no raw bodies ever), not in switching the recorder
+    # off: this was the only preset that shipped it dark, a production-safe
+    # install could silently flip a live host's recorder off, and the whole
+    # attribution/exposure observation chain starves without it (the four-day
+    # outage of CD.E). test-host/operational already enabled it.
     "production-safe": {
-        "enabled": False,
+        "enabled": True,
         "mode": "metadata_only",
         "retention_days": 30,
         "record_live_prefetch": True,
@@ -1866,29 +1872,72 @@ def _ensure_config_defaults(
     *,
     dry_run: bool = False,
 ) -> dict[str, object]:
-    """Apply safe defaults to existing config.json without overwriting user values."""
-    # Lazy-import to avoid circular import during install before plugin is copied
-    from plugins.memory.memory_os.config import load_config, save_config
+    """Apply safe defaults to existing config.json without overwriting user values.
 
+    Reads and writes the raw JSON directly, NEVER through
+    load_config/save_config: that round-trip normalizes the whole file and
+    strips keys outside the schema (e.g. the ``preset`` markers other
+    installer steps just wrote) -- the same key-laundering mechanism that let
+    a config rewrite silently flip production switches (CD.E).
+    """
     config_path = hermes_home / "memory-os" / "config.json"
     if not config_path.exists():
         return {"status": "no_config", "reason": "config.json not found"}
-    cfg = load_config(hermes_home)
+    cfg = _read_json_config(config_path)
     changed: list[str] = []
 
     if cfg.get("prefetch_char_budget", 0) < 5500:
         cfg["prefetch_char_budget"] = 5500
         changed.append("prefetch_char_budget: 2200 → 5500")
 
+    # CE: core observability must not ship dark on an upgraded host. The
+    # disclosure ledger (memory_sources, metadata_only -- no raw bodies) is
+    # the input of the whole attribution/exposure observation chain; a July
+    # config rewrite left it off and production ran a silent four-day
+    # disclosure outage. This is deliberately the ONLY switch auto-enabled
+    # here: modes with a shadow->apply graduation contract (context_router,
+    # recall_arbitration, owner_review, ...) are REPORTED below, never
+    # flipped, because auto-flipping them would bypass their graduation
+    # governance. External/optional integrations (hindsight, v3) stay
+    # untouched.
+    ms_cfg = dict(cfg.get("memory_sources") or {})
+    if not ms_cfg.get("enabled"):
+        ms_cfg["enabled"] = True
+        cfg["memory_sources"] = ms_cfg
+        changed.append(
+            "memory_sources.enabled: False → True (core disclosure ledger; "
+            "metadata_only, required by the attribution observation chain)"
+        )
+
+    # Drift visibility for the graduated-mode core switches: report current
+    # values so an upgrade never silently runs with a core surface off, while
+    # leaving every decision with the owner/graduation flow.
+    core_mode_report = {
+        "memory_sources.enabled": bool((cfg.get("memory_sources") or {}).get("enabled")),
+        "low_clue_recall.enabled": bool((cfg.get("low_clue_recall") or {}).get("enabled")),
+        "context_router.mode": str((cfg.get("context_router") or {}).get("mode") or ""),
+        "recall_arbitration.mode": str((cfg.get("recall_arbitration") or {}).get("mode") or ""),
+        "owner_review.enabled": bool((cfg.get("owner_review") or {}).get("enabled")),
+        "owner_review.mode": str((cfg.get("owner_review") or {}).get("mode") or ""),
+    }
+
     if not changed:
-        return {"status": "already_current", "changes": changed}
+        return {
+            "status": "already_current",
+            "changes": changed,
+            "core_mode_report": core_mode_report,
+        }
 
     if not dry_run:
-        save_config(cfg, hermes_home)
+        config_path.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     return {
         "status": "updated" if not dry_run else "would_update",
         "changes": changed,
+        "core_mode_report": core_mode_report,
     }
 
 

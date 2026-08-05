@@ -3503,6 +3503,79 @@ installer 1）。复审处置 fold 后受影响三文件定向重跑 260 passed�
 public checkout probe --strict exit 0、`git diff --check` 干净。
 证据级别：**仅 `local_pass`**，未部署、未推送。
 
+## CE — 核心开关守护：升级自动开、安装预设纠偏、断流探测器（2026-08-05）
+
+Owner 指令：安装/升级脚本要保证核心功能自动打开、核心定时任务配置注册齐全；
+外部对接可选项另说。审计后按三层收口（cron 注册链核查后判定已有兜底，见末段）。
+
+### CE.1 翻转来源实锤：`production-safe` 预设本身就写 `enabled: False`
+
+审计直接找到了 CD.E 断流的最可能翻转来源——不是"意外洗键"，而是**有意的
+预设**：`MEMORY_SOURCES_PRESETS["production-safe"]["enabled"] = False`，
+且有既有测试 `..._preset_is_explicitly_off` 把它钉死为设计。而
+test-host / operational 两个预设都是 True——**唯独"生产安全"预设让生产
+观测链全盲**。"safe" 的正确含义在 `mode=metadata_only`（永不含原文），
+不在关掉记录器。已翻转预设并反转该测试语义
+（`..._preset_enables_metadata_only`，docstring 记录 CE 裁定）。
+
+### CE.2 升级自动开 + 归一化洗键根除
+
+- `_ensure_config_defaults`（每次 install/upgrade 必经）新增**唯一一个**
+  自动纠偏：`memory_sources.enabled` False→True。刻意只此一个——带
+  shadow→apply 毕业管治的模式（context_router / recall_arbitration /
+  owner_review …）**报告不翻**（`core_mode_report`），自动翻会绕过毕业管治；
+  外部对接（hindsight / v3）不动。
+- **顺链抓到并修掉一个真回归途径**：该函数原走 `load_config→save_config`
+  往返，归一化会**剥离 schema 外的键**（其他安装步骤刚写入的 `preset`
+  标记被洗掉——新增测试当场以 KeyError 复现）。改为 `_read_json_config`
+  直读直写。这与 CD.E 的"配置重写翻开关"同族——**config 的 load→save
+  往返本身就是键清洗器**。全项目余 3 处 `save_config` 调用点
+  （cli.py:326 hindsight adoption、__init__.py:823、installer:1687）
+  登记为待逐个核查的观察项，不在本轮扩面。
+
+### CE.3 status 暴露记录器状态 + monitor 双检查
+
+- `build_status_report` 新增 `memory_sources_recording`
+  块（enabled/raw_enabled/mode）——开关状态首次有了可被 monitor 读到的面。
+- monitor 新增两个 WARN 码（均注册 clean-host 分类、
+  `production_behavior=fail_if_production`，沿 BD.1 机制生产升级 FAIL）：
+  - `memory_sources_recording_disabled`：生产上记录器被关即红
+    （CD.E 那四天的形状，今后活不过一次 monitor）；
+  - `memory_sources_disclosure_outage`：**断流签名**——stats 窗口
+    （24h）内零披露而同窗口内存在 provider 捕获的对话事件。事件时间戳
+    由 correlation probe 顺手带出（`latest_conversation_turn_ts`，
+    同 writer 统一 isoformat，分类端解析比较不做字符串比较——BF.3 教训），
+    旧快照无该块时按值守卫静默（不造零、不误报）。
+    "安静≠坏"的对偶有测试钉住：对话在窗口外、或披露正常时不告警。
+
+### cron 注册链核查结论（不改代码）
+
+- 快照重生成已由 install/onboarding 归口（CB 部署要求，CD.D 端到端证实）；
+- job 缺失/漂移已有兜底：per-lane helper-completion freshness（due 窗口内
+  必 WARN）、unregistered drift 分类、owner_review 专项 job missing 检查——
+  核心 group job 消失最迟一个 due 周期内可见；
+- onboarding 创建 job 保持 owner-gated（`--owner-approved` 经 ResolverGate），
+  deploy 不自动创建——这是边界不是缺口。
+
+### CE 反事实覆盖与测试
+
+新文件 `test_memory_os_core_switch_guard.py` 6 测 + 预设语义测试反转，
+revert 三源文件实测 5 红 1 绿（绿的一个是守卫型负向断言，天然非反事实）。
+`preset` 洗键回归由既有 `..._llm_judge_active_config` 测试以 KeyError
+复现、修后转绿。
+
+### CE 测试与门
+
+定向 281 passed（monitor/cli/runtime/install/guard 五文件）+ 四门全过
+（import cycle / write surface 156 不变 unclassified 0 / static hygiene /
+public checkout probe --strict）、`git diff --check` 干净。
+全量 **3158 passed / 13 skipped / 1 failed**——唯一失败为
+`test_execution_gate_runner_serializes_parallel_sidecar_updates`，
+已登记在案的并发环境 flake（与本批改动无调用关系），隔离重跑
+整文件 11 passed + 单测 passed，判定非回归。
+证据级别：`local_pass`；monitor 双检查的 `live_monitor_pass` 待下一次
+统一部署后取得。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -4316,6 +4389,13 @@ PR #19 合并为 `53880cd` 后统一部署（含此前未部署的 BZ/CA/CB/CC/C
   长期唯一 FAIL 按纪元边界设计转 `healthy_no_sample` 且清算闸门保持冻结；
   attribution_schema 端到端验证如实登记为待 Gateway 重载。
   证据级别 `deploy_pass` + `live_monitor_pass`。纯文档记录。
+- `（CE，本节）`：核心开关守护三层收口——`production-safe` 预设翻转
+  （它是唯一让披露记录器全黑的预设，翻转来源实锤）、升级路径自动重开
+  `memory_sources.enabled`（毕业管治模式只报告不翻）、`_ensure_config_defaults`
+  改直读直写根除 load→save 归一化洗键（新测试以 KeyError 当场复现该回归）、
+  monitor 新增 `memory_sources_recording_disabled` + `memory_sources_disclosure_outage`
+  两红线（CD.E 那四天的形状今后活不过一次 monitor）。cron 注册链核查为已有
+  兜底，不改。6+1 反事实实测，四门全过。
 
 ### CD.E — 披露断流四天的根因、修复与归因链首次全绿（2026-08-05）
 

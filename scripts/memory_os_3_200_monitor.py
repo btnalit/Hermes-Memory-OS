@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -460,6 +460,20 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "living_memory_stale_open_evaluation_unavailable": {
         "classification": "expected_clean_host",
         "reason": "clean-host may not have a warmed crystallized-record store, so stale-open evaluation can be unavailable during compatibility smoke",
+        "production_behavior": "fail_if_production",
+    },
+    # CE: core-switch guard family. On a clean host the disclosure ledger is
+    # legitimately off/quiet; on production a disabled recorder or a frozen
+    # ledger beside fresh conversation traffic is the four-day-outage
+    # signature and must go red.
+    "memory_sources_recording_disabled": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host smoke may run with the disclosure recorder at its safe-off default",
+        "production_behavior": "fail_if_production",
+    },
+    "memory_sources_disclosure_outage": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host smoke has no production conversation traffic, so a quiet ledger there is idle, not an outage",
         "production_behavior": "fail_if_production",
     },
 }
@@ -3259,6 +3273,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             passed.append({"code": "memory_sources_stats_ok"})
         else:
             warn.append({"code": "memory_sources_no_records_yet", "value": memory_sources})
+        # CE: core-switch guard + disclosure-outage detector. The July config
+        # rewrite turned memory_sources.enabled off and NOTHING alarmed for
+        # four days -- the ledger froze while conversation events kept
+        # flowing, and record_count: 0 sat in every snapshot unread. Two
+        # complementary checks:
+        #   1. the switch itself (from status.memory_sources_recording;
+        #      absent on old snapshots -> silent, value-guarded), and
+        #   2. the outage signature: zero disclosures in the stats window
+        #      while a provider-captured conversation happened inside that
+        #      same window (timestamps parsed, not string-compared).
+        # Both are WARN codes registered fail_if_production, mirroring BD.1.
+        recording = (
+            snapshot.get("status", {}).get("memory_sources_recording")
+            if isinstance(snapshot.get("status"), dict)
+            else None
+        )
+        recording = recording if isinstance(recording, dict) else {}
+        if recording.get("enabled") is False:
+            warn.append({"code": "memory_sources_recording_disabled", "value": recording})
+        elif int(memory_sources.get("record_count") or 0) == 0:
+            latest_turn_raw = str(
+                (session_mirror or {}).get("latest_conversation_turn_ts") or ""
+            )
+            latest_turn_at = _parse_utc_timestamp(latest_turn_raw)
+            window_hours = int(memory_sources.get("hours") or 0)
+            if (
+                latest_turn_at is not None
+                and window_hours > 0
+                and datetime.now(timezone.utc) - latest_turn_at <= timedelta(hours=window_hours)
+            ):
+                warn.append({
+                    "code": "memory_sources_disclosure_outage",
+                    "value": {
+                        "latest_conversation_turn_ts": latest_turn_raw,
+                        "window_hours": window_hours,
+                        "record_count": 0,
+                    },
+                })
         memory_sources_surface = (
             snapshot.get("owner_review_surface", {})
             .get("operations", {})
@@ -7148,6 +7200,14 @@ provider_counts = count_groups(
         if event.get("kind") == "conversation_turn"
     ]
 )
+# Disclosure-outage detector input (CE): the newest provider-captured
+# conversation timestamp. String max is safe here because every event ts is
+# produced by the same datetime.isoformat() writer (uniform format); the
+# classifier parses it before comparing against the stats window.
+latest_conversation_turn_ts = max(
+    (str(event.get("ts") or "") for event in event_records if event.get("kind") == "conversation_turn"),
+    default="",
+)
 mirrored_counts = count_groups(
     [
         " ".join(
@@ -7173,6 +7233,7 @@ result = {
     "status": "ok",
     "dry_run_only": True,
     "raw_private_body_printed": False,
+    "latest_conversation_turn_ts": latest_conversation_turn_ts,
     "written_event_ids_count": 0,
     "state_rebuilt": bool(state_rebuilt),
     "finding_count": len(findings),
@@ -7399,6 +7460,7 @@ def session_mirror_summary():
       "correlation_schema_version": correlation.get("schema_version") if isinstance(correlation, dict) else None,
       "correlation_status": correlation.get("status") if isinstance(correlation, dict) else None,
       "correlation_finding_count": correlation.get("finding_count") if isinstance(correlation, dict) else None,
+      "latest_conversation_turn_ts": correlation.get("latest_conversation_turn_ts") if isinstance(correlation, dict) else None,
       "raw_private_body_printed": correlation.get("raw_private_body_printed") if isinstance(correlation, dict) else None,
       "written_event_ids_count": correlation.get("written_event_ids_count") if isinstance(correlation, dict) else None,
       "apply_status_schema_version": apply_status.get("schema_version") if isinstance(apply_status, dict) else None,
