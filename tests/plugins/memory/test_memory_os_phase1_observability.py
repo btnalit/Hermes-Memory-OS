@@ -4,7 +4,10 @@ import json
 from datetime import datetime, timezone
 
 from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
-from plugins.memory.memory_os.memory_sources import append_memory_source_record
+from plugins.memory.memory_os.memory_sources import (
+    ATTRIBUTION_SCHEMA_VERSION,
+    append_memory_source_record,
+)
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -84,6 +87,9 @@ def test_exposure_stats_separate_legacy_debt_from_schema_era_health_and_freeze_g
         "created_at": "2026-07-14T00:00:00Z",
         "natural_production": True,
         "traffic_class": "production",
+        # Current-era, fully attributed: this is what makes schema_era_health
+        # PASS rather than healthy_no_sample (item 16a).
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
         "selected": [_section(source_ids=["crystallized:one"])],
         "dropped": [],
     })
@@ -123,6 +129,10 @@ def test_budget_pressure_streak_requires_consecutive_calendar_days(tmp_path):
         "created_at": "2026-07-01T00:00:00Z",
         "natural_production": True,
         "traffic_class": "production",
+        # Stands for a fully healthy current-era record. Unfreeze readiness now
+        # also requires real attributed evidence rather than an empty gated set
+        # (item 16a's era boundary).
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
         "selected": [_section(source_ids=["crystallized:one"])],
         "dropped": [],
     })
@@ -156,6 +166,10 @@ def test_budget_pressure_streak_accepts_seven_recent_completed_calendar_days(tmp
         "created_at": "2026-07-01T00:00:00Z",
         "natural_production": True,
         "traffic_class": "production",
+        # Stands for a fully healthy current-era record. Unfreeze readiness now
+        # also requires real attributed evidence rather than an empty gated set
+        # (item 16a's era boundary).
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
         "selected": [_section(source_ids=["crystallized:one"])],
         "dropped": [],
     })
@@ -213,6 +227,11 @@ def test_exposure_stats_fail_current_window_on_schema_attribution_gap(tmp_path):
         "created_at": "2026-07-15T00:00:00Z",
         "natural_production": True,
         "traffic_class": "production",
+        # Item 16a: the gate only holds records to the attribution contract when
+        # they were written by the attribution-complete producer. This fixture
+        # must therefore sit INSIDE that era -- its point is that a gapped
+        # current-era record still FAILs, which is unchanged.
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
         "selected": [_section(source_ids=[])],
         "dropped": [],
     })
@@ -222,6 +241,48 @@ def test_exposure_stats_fail_current_window_on_schema_attribution_gap(tmp_path):
     assert stats["schema_era_attribution_gap_count"] == 1
     assert stats["schema_era_health"] == "FAIL"
     assert "schema_era_health_not_pass" in stats["freeze_reasons"]
+    assert stats["attribution_era_record_count"] == 1
+    assert stats["legacy_unattributed_record_count"] == 0
+
+
+def test_pre_attribution_era_gaps_are_surfaced_as_debt_not_gated(tmp_path):
+    """Records written before the attribution fix cannot be attributed
+    retroactively -- the disclosure already happened without capturing IDs.
+
+    Gating on them would keep the FAIL red forever no matter how correct the
+    producer becomes: on production all 69 gapped rows are natural rows, so
+    they sit inside the gated era permanently. They are surfaced as debt
+    instead, exactly like legacy_unmarked_rollup_count does for rollup rows
+    written before trigger_class existed.
+
+    Counterfactual: without the era boundary this record is counted, health is
+    FAIL, and no producer fix can ever clear it.
+    """
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "pre-attribution-natural-gap",
+        "created_at": "2026-07-15T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        # No attribution_schema: this is a pre-fix row.
+        "selected": [_section(source_ids=[])],
+        "dropped": [],
+    })
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 7, 15, 1, tzinfo=timezone.utc))
+
+    assert stats["legacy_unattributed_record_count"] == 1, "the debt must be visible"
+    assert stats["attribution_era_record_count"] == 0
+    assert stats["schema_era_attribution_gap_count"] == 0, "pre-fix rows must not be gated"
+    # NOT "PASS": with an empty gated set the attribution check has judged
+    # nothing, and reporting PASS there would be green bought by narrowing the
+    # measurement -- the exact trap item 16b warns about. Clearance also stays
+    # frozen until real attributed traffic exists.
+    assert stats["schema_era_health"] == "healthy_no_sample"
+    assert "attribution_era_no_sample" in stats["freeze_reasons"]
+    assert stats["v2c_unfreeze_ready"] is False
+    # Still counted in the all-history debt view, so it is never simply erased.
+    assert stats["all_history_attribution_gap_count"] == 1
 
 
 def test_manual_trigger_rollups_do_not_count_toward_natural_cycle_gate(tmp_path):

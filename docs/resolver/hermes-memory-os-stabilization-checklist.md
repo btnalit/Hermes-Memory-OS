@@ -2984,6 +2984,215 @@ marker 命中的 500 字符原文切片不是"恢复出的事实"，
 
 ---
 
+### CC — 修复 16a/16b：归因契约（2026-08-04，未部署）
+
+关闭待办 16。Owner 裁定：**resolver 保持自动提升，尽量减少人工介入** ⇒
+①的候选 `bridge_state` **不改**，`RESOLVER_ELIGIBLE_BRIDGE_STATES` 不新增成员。
+该裁定已记录，本节不再讨论。
+
+#### 两个缺陷各自的修法
+
+**16b：门的词表与生产者词表不匹配 ⇒ 静默失效。**
+`exposure_rollup._memory_source_has_attribution_gap` 原本硬编码
+`{crystallized, working, entity_graph, indexed_recall, vector, hindsight}`，
+其中**后四个全项目无任何生产者**；而生产者
+（`prefetch._section_source_class`）实发的是 `indexed` / `graph_layer` /
+`event` / `candidate` / `substrate_recall` 等。名字对不上，那几类就从不被检查。
+
+改法不是"补几个名字"，而是**让不匹配变成可测**：
+- 生产者词表提升为模块级常量 `SECTION_SOURCE_CLASS_BY_TITLE` +
+  `SECTION_SOURCE_CLASS_FALLBACK`（原先是函数内局部 dict，**任何测试都看不见它**，
+  这正是漂移能存在的原因）。
+- 门侧拆成两个显式集合：`ATTRIBUTABLE_SOURCE_CLASSES`（6 个）与
+  `NON_ATTRIBUTABLE_SOURCE_CLASSES`（11 个，**逐类写明豁免理由**）。
+- 守卫测试 `test_attributable_source_classes_cover_the_producer_vocabulary`
+  断言两件事：生产者能发出的每个类都被显式分类（漏分类＝静默不检查），
+  且契约里**没有无生产者的死名字**（死名字＝该类检查静默为空）。
+  两个方向都断言，才能同时挡住原缺陷和未来新增段落。
+
+**豁免的 11 类及理由**（派生/聚合视图，无 1:1 规范记录可引，
+要求 `source_ids` 是**不可满足**而非"未满足"）：
+`foreground`（任务锚点，派生态）、`recall_guard`（固定守卫串，自带合成标记）、
+`identity`（整文件片段）、`state_overlay`（跨记录聚合）、`bridge`（连续性桥，派生）、
+`last_session`（会话摘要，派生）、`carryover`（深省卡，派生）、
+`relationship`（整文件片段）、`substrate_recall`（**按契约就是
+`advisory_only` / `authority_class="derived_projection"`**，见 `substrates/base.py`）、
+`diagnostic`（诊断接地，派生）、`other`（未映射标题，定义上未知）。
+
+**16a：生产者只为 crystallized 一个类填 ID。**
+`section_source_ids` 在 `_build_prefetch_sections` 内**只有一个赋值点**
+（crystallized 专属），其余段落一律落到 `_section_metadata` 的空 `{}` 分支。
+已为 `working` / `candidate` / `event` / `indexed` / `graph_layer` 五个类补齐：
+- `working` → `working:<file_stem>:<item_id>`（规范格式已在
+  `deep_reflection.py:639` 生产使用，前缀在 `v3_body_packet.py:21` 允许表内）
+- `candidate` → `candidate:<candidate_id>`
+- `event` → `event:<event_id>`
+- `indexed` / `graph_layer` → `<record_type>:<record_id>`
+- 并扩 `_extract_record_ids_from_section` 的前缀白名单
+  （原只认 `crystallized:`/`candidate:`，所以 `working` **即使填了 ID 也无法分类**
+  ——这正是 `classified_ratio = 0.7018` 的同源解释）
+
+**实现方式选择**：用**可选出参** `source_ids: list[str] | None = None`，
+而非改返回类型。理由：`_event_lines` / `_graph_layer_shadow_lines` 被测试直接导入
+并断言其列表返回值，改签名会连带打破多个测试文件；而 `seen` 与 `error_records`
+本来就是本文件既有的同款可选出参惯例。
+**代价与对策**：可选出参正是 Section W 规则 4 说的那种"陷阱默认值"——
+调用方忘了传就静默无归因。所以真正的护栏不是签名而是
+**结果级测试** `test_real_prefetch_leaves_no_attribution_gap`：
+跑一次真实 prefetch，断言产出的披露记录零缺口，
+且**显式断言 working/event/candidate 三类确实出现**（否则测试会空过）。
+反事实实测：删掉任一 `source_ids=` 实参 ⇒ 该测试与端到端那条**双双失败**，已确认。
+
+#### 关键设计问题：为什么必须有"归因纪元"边界
+
+只修生产者**永远清不掉那个 FAIL**。门是对**全部自然行**算缺口的，
+而 3.200 上那 69 个有缺口的行**全都是自然行**——它们已经写入、
+披露动作已经发生、ID 当时就没被采集，**无法追溯补齐**。
+
+故引入 `memory_sources.ATTRIBUTION_SCHEMA_VERSION`
+（`memory-os.memory_sources_attribution.v1`），新记录带此标记；
+门**只对带标记的记录**判定归因健康，未带标记的自然行计入
+`legacy_unattributed_record_count` 并继续留在
+`all_history_attribution_gap_count` 里（**不是抹掉，是分类为债务**）。
+这与同文件既有的 `legacy_unmarked_rollup_count`（处理 `trigger_class`
+出现之前写的 rollup 行）**是同一个模式、同一个理由**，不是新发明。
+
+#### 诚实护栏：不许"清零即变绿"
+
+上一步有个显而易见的滥用空间：部署当天所有旧行都成了"债务"、
+带标记的行为 0 ⇒ 缺口 0 ⇒ 报 PASS。**那就是靠缩小度量换绿色**，
+正是待办 16 自己警告的事。故加：
+- 当存在自然行但**归因纪元为空**时，`schema_era_health` 报
+  **`healthy_no_sample`**（monitor 早已把它当 PASS 值收下，见 `:1389`，
+  但字面上写明"没有样本"），**不报 PASS**；
+- 同时追加 freeze reason `attribution_era_no_sample`，
+  **clearance 在出现真实归因流量前不得解冻**。
+
+#### 实测投影（3.200 只读，无部署）
+
+用新判据在生产数据上跑一遍（本地重实现判据，不落任何文件）：
+
+| | 值 |
+|---|---|
+| 总行 / 自然行 | 988 / 170 |
+| 归因纪元行（部署前） | **0**（预期） |
+| **旧**：`schema_era_attribution_gap_count` | **69 → FAIL** |
+| **新**：`schema_era_attribution_gap_count` | **0** |
+| **新**：`legacy_unattributed_record_count` | **170** |
+| **新**：`schema_era_health` | **`healthy_no_sample`**（非 PASS） |
+| **新**：freeze reason | `attribution_era_no_sample` |
+
+**覆盖面是升了不是降了**（这条最关键，用来证明不是"买绿"）：
+把**新**词表套到全部自然行上会命中 **129 行**（旧词表只有 69 行）。
+新被检查到的段落：`event` 115、`indexed` 46、`candidate` 5
+（`working` 69 原本就在检查内）。也就是说 CA.2 记的"静默跳过 1093 个段落"
+在按行折算后确实存在，且现在这些类**已进入检查范围**——
+只是那批行属于修复前、无法追溯，故落入债务侧。
+（`substrate_recall` 的 133 个段落现在**明确豁免**，理由是它按契约就是
+`advisory_only` 的派生投影，不是本地规范记录的引用——这比原先"名字对不上所以
+碰巧不检查"诚实得多。）
+
+**部署后的预期演进**：FAIL 立即转为 `healthy_no_sample`（不是 PASS），
+clearance 保持冻结；随新流量产生带标记记录，`attribution_era_record_count` 上升，
+届时**任何一条新记录漏归因都会重新 FAIL**。这是把一个"永远红且无人能修"的门，
+换成一个"当前干净、且能真正检出新缺陷"的门。
+
+#### 一个额外收获：注释也能触发架构防火墙
+
+`test_x3_exposure_firewall::test_prefetch_ranking_not_contaminated_by_exposure`
+**不只查 import，它扫 `prefetch.py` 的源文本**，禁止出现
+`exposure_rollup` / `selected_count` / `exposure_rollup_lag` 三个串
+（X.3：曝光数据不得回流进 prefetch 排序）。我写的解释性注释里写了
+`exposure_rollup.ATTRIBUTABLE_SOURCE_CLASSES`，于是全量套件把它抓出来了。
+
+本次改动**没有**新增 import、也没有数据依赖——归因是
+"生产者写 ID → 审计侧读 ID"的**单向**关系。所以正确处置是**改注释、
+保留防火墙**，而不是放宽那条测试。为了迁就一句注释去削弱一条架构测试，
+是明显划不来的交易。已在三处注释中改为"审计侧"的说法并注明为何不点名。
+
+（也再次印证：只跑自己新加的测试是不够的。这条是全量套件抓出来的，
+新增的 10 个归因测试全绿也不会发现它。）
+
+#### 测试与门
+
+新增 `tests/plugins/memory/test_memory_os_attribution_contract.py`（10 个）：
+词表双向守卫、每个可归因类都有可识别前缀、提取器认 `working:`/`event:`、
+非规范 ID 仍被忽略、`working` 无 ID 即缺口、豁免类无 ID 不算缺口、
+映射是唯一真源（含降级后缀）、新记录带纪元标记、
+**真实 prefetch 零缺口（含防空过断言）**、端到端纪元内且干净。
+另在 `test_memory_os_phase1_observability.py` 新增
+`test_pre_attribution_era_gaps_are_surfaced_as_debt_not_gated`。
+
+**改了 3 个既有测试的夹具**（保持原意，非削弱断言）：两个 `natural-anchor`
+与一个 `natural-good` 都代表"当前纪元的健康记录"，故补上 `attribution_schema`
+标记——否则它们会落到"无样本"侧，而它们的原意正是"健康且可解冻"。
+
+**3115 → 3126 passed / 13 skipped / 0 failed（+11）**，数字对得上：
+归因契约 10 + phase1 纪元债务 1。四门全过；`surface_count` 154 不变、
+`unclassified_count=0`；空白检查按推送区间干净。
+
+本轮全量套件因本机环境（C: 盘曾占满、后台进程被回收）分三段前台跑完，
+三段均为最终代码状态、无过期分段：
+`tests/plugins` 2086、`tests/scripts`+`seam`+`system_modularization` 1015、
+`tests/ev*` 25 —— 合计 3126。
+
+证据级别：**仅 `local_pass`**，未部署。**部署要点**：本节改的是判据与生产者，
+不新增 lane，无需重生成 cron 注册快照；但 `memory_sources` 记录格式新增了
+`attribution_schema` 字段，部署后应确认新写入的行确实带该字段
+（否则门会一直停在 `healthy_no_sample`，而那正是"没有样本"的诚实读数）。
+
+#### CC.1 — 复审：把"被我加宽的东西"的下游全查一遍
+
+顾问复审提的三点，全部属同一类——**我加宽了判据，但没查判据的所有消费者**。
+这正是 CLAUDE.md"越过被指出的问题、追整条调用链"那条规则的适用场景，
+而我第一轮只查了自己**故意改的**那两个数。
+
+**① `_memory_source_has_attribution_gap` 有三个调用点，我只给其中一个套了纪元。**
+`all_history_gap`（全量 `ms_records`）与 `rolling_gap`（近 7 天）现在也在跑
+**6 类**判据而非原来的**实际 2 类**，数字必然上涨——而我的投影脚本只算了
+`schema_era` 一个。已补测（3.200 只读）：
+
+| 计数器 | 旧 | 新 | 是否触发告警 |
+|---|---|---|---|
+| `schema_era_attribution_gap_count`（**唯一 FAIL 驱动**）| 69 | **0** | FAIL→清除 |
+| `all_history_attribution_gap_count` | 778 | **844** | **否**，`info` 专用（Fix 2c 明写"绝不单独驱动 FAIL/WARN"）|
+| `rolling_7d_attribution_gap_count` | 3 | **3**（不变）| **否**，**全 monitor 无任何引用** |
+| `migration_debt_attribution_gap_count` | 709 | **844** | 否，同为 `info` |
+
+结论：**本次部署不引入任何新的 WARN/FAIL**，只让 INFO 侧的债务数字更诚实
+（+66 行，正是原先被静默跳过的那批）。`rolling_7d` 恰好不变，因为近 7 天只有 5 行。
+另注：`rolling_7d_attribution_gap_count` **算了但没人读**，与
+`exposure_rollup_lag_hours` 是同一个既有毛病，**本节未修**，登记为待办 17。
+
+**② 新计数器"算了但没人读" —— 已修。**
+`legacy_unattributed_record_count` / `attribution_era_record_count` 原本只是
+被 `exposure_monitor_stats` 返回。远程与本地探针都是**整字典**透传
+（`:5565`、`:4691`，无白名单），所以它们进得了快照——**但 monitor 不读**，
+于是那 170 行债务与"有多少真实归因证据"这两个数**对任何读者都不存在**。
+这正是我刚写进 CLAUDE.md 的反模式。已让它们搭既有 INFO 通道
+（`v2_exposure_all_history_migration_debt`，天然就是"可见但绝不驱动 FAIL/WARN"），
+并把 `legacy_unattributed_record_count > 0` 加入该 INFO 的触发条件——
+否则当债务是**唯一**信号时（迁移债务为 0），整条 INFO 根本不发出。
+反事实实测：去掉该触发条件 ⇒ 测试报 `StopIteration`（条目压根不存在），已确认。
+
+**③ 三段式 `working:a:b` ID 从未走过 rollup 循环。**
+已查：`_extract_record_ids_from_section` **无跨文件消费者**，
+`exposure_rollup.py` 内**没有任何 `split(":")`/`partition(":")`**，
+三个使用点（`:261`、`:269`、`:315`）一律把 ID 当**不透明键**用
+（`id_classification[rid] = ...`、`selected_rids.update(...)`、`sorted(...)`）。
+故三段式 ID 与 `indexed`/`graph_layer` 的 `<record_type>:<record_id>` 均安全，
+**无需改动**。
+
+**未采纳的一条**：`substrate_recall`（133 段）的豁免是全节最可能被质疑的判断，
+但它有 `substrates/base.py` 的 `advisory_only` / `derived_projection` 契约依据，
+且已写明理由，保持豁免。
+
+**方法记账**：三点全是"消费者未审计"。我把 `ATTRIBUTABLE_SOURCE_CLASSES`
+从实际 2 类扩到 6 类时，只想着"这样才检得全"，没想到
+**同一个判据还被两个报告口径共用**。
+**教训：加宽一个判据前，先 grep 它的全部调用点，并对每个调用点问
+"这个数字变大了会不会触发告警、以及谁在读它"。**
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -3082,7 +3291,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     压缩一旦移除游标记录即永久静默失败，已并入待办 14 的产出可观测性要求）。
     附带纠正：本条原文（以及路线图 P1-4）都在用 lag 论证，而 monitor 中**并不存在
     lag 门控**，`exposure_rollup_lag_hours` 只计算上报、从不参与判定。
-16. **那个唯一 FAIL 的真实根因，以及"修了它反而更糟"的陷阱**（CA.2 §4-§6 实测，未修）。
+16. ~~**那个唯一 FAIL 的真实根因，以及"修了它反而更糟"的陷阱**~~ —— **CC 已修复关闭**
+    （16a + 16b 一并修，词表双向守卫 + 归因纪元边界 + `healthy_no_sample` 诚实护栏；
+    实测投影：69→0 缺口、170 债务、覆盖面 69→129 行，**升而非降**）。
+    以下为原始诊断记录，保留备查（CA.2 §4-§6 实测）。
     **这是代码缺陷、不是数据成熟度问题——再等多久都不会自己好**（BY.1 记的分类率
     `0.6506→0.7018`，本次实测仍精确为 `0.7018`，曲线早已停住）。
     FAIL 码是 `v2_exposure_schema_era_unhealthy`，由 `schema_era_attribution_gap_count = 69`
@@ -3129,7 +3341,20 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
     禁止的事。**16b 必须先于或同时于 16a 处理**，且修 16b 会让 FAIL 数字先变大——
     这是正确方向，不是回归。
     与"关键事实漏失"同源——都发生在 prefetch 披露侧，属批次 C 的邻接面。
-（原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
+
+17. **`rolling_7d_attribution_gap_count` 算了但没人读**（CC.1 查出，未修）。
+    `exposure_monitor_stats` 计算并返回它，但**全 monitor 无任何引用**——
+    既不判 PASS/WARN/FAIL，也不进 INFO，对任何读者都不存在。
+    与既有的 `exposure_rollup_lag_hours` 是**同一个毛病**（CLAUDE.md 已记
+    "a metric which is merely computed and reported does not close this gap"）。
+    实测当前值 3（新旧判据下均为 3，近 7 天仅 5 行自然行，故本次加宽未改变它）。
+    修法有两条路，需先定性质：**要么**给它一个分级（近 7 天出现归因缺口
+    理应是 WARN——它是"当前是否正在退化"的唯一滚动信号，比 `all_history`
+    的历史债务更有行动价值）；**要么**明确它只是 INFO 并让它进 INFO 通道。
+    不可继续留在"算了不用"的状态。同类排查建议一并做：
+    grep `exposure_monitor_stats` 返回字典的**每个键**，确认都有读者
+    ——CC.1 已用这个方法查出两个新键无读者并当场修掉，
+    但**未对既有键做全面普查**。——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
 sannai-community 仓库 README。）
 
@@ -3552,3 +3777,64 @@ sannai-community 仓库 README。）
   我问的是"这段代码做什么"，而没问"**依赖失效时**它做什么"。
   `fingerprint_outcomes` 的赋值点语法上毫不显眼，但它与失败路径的交互决定整条 lane 有无意义。
   **教训：读一个有外部依赖的循环，必须把"依赖失效"那条路径当成独立的一遍来走。**
+- `（CC，本节）`：修复并关闭待办 16（16a + 16b）。Owner 裁定
+  **resolver 保持自动提升、尽量减少人工介入** ⇒ ①候选的 `bridge_state` 不改。
+  **16b：门的词表与生产者词表不匹配 ⇒ 静默什么都不检查。**
+  硬编码的 6 个名字里**后 4 个全项目无生产者**，而生产者实发的
+  `indexed`/`graph_layer`/`event`/`candidate`/`substrate_recall` 全不在表内
+  ⇒ 生产实测：**统计 69 个缺口、静默跳过 1093 个段落**。改法不是补名字，
+  而是**让不匹配可测**：生产者词表提升为模块级 `SECTION_SOURCE_CLASS_BY_TITLE`
+  （原为函数内局部 dict，**任何测试都看不见**，这正是漂移能存在的原因），
+  门侧拆为 `ATTRIBUTABLE_SOURCE_CLASSES`(6) 与
+  `NON_ATTRIBUTABLE_SOURCE_CLASSES`(11，逐类写明豁免理由)，
+  守卫测试**双向断言**：每个生产者类都被分类 + 契约里无死名字。只断言一个方向抓不到本缺陷。
+  **16a：生产者只有一个赋值点（crystallized 专属）**，其余段落一律落空 `{}`，
+  `working` 是 0/69。已为 `working`/`candidate`/`event`/`indexed`/`graph_layer`
+  五类补齐 ID，并扩 `_extract_record_ids_from_section` 前缀白名单
+  （原只认 `crystallized:`/`candidate:`，所以 `working` **填了也无法分类**——
+  与 `classified_ratio=0.7018` 同源）。用**可选出参**而非改返回类型，
+  因 `_event_lines`/`_graph_layer_shadow_lines` 被测试直接断言返回值，
+  且 `seen`/`error_records` 本就是本文件既有惯例；但可选出参正是规则 4 的陷阱默认值，
+  故真护栏是**结果级测试**（真实 prefetch 零缺口 + 显式断言三类确实出现以防空过），
+  反事实实测：删任一 `source_ids=` 实参 ⇒ 双双失败。
+  **关键设计：必须有归因纪元边界。** 门对全部自然行算缺口，
+  而那 69 个有缺口的行**全是自然行**、已写入、**无法追溯补 ID** ⇒
+  只修生产者永远清不掉 FAIL。故新记录带 `ATTRIBUTION_SCHEMA_VERSION`，
+  门只判带标记的记录，未带标记者计入 `legacy_unattributed_record_count`
+  并仍留在 `all_history_attribution_gap_count`（**分类为债务，不是抹掉**），
+  与同文件 `legacy_unmarked_rollup_count` 同模式同理由。
+  **该边界开了个比原缺陷更坏的口子**：部署当天无人带标记 ⇒ 缺口 0 ⇒ 报 PASS，
+  那就是靠缩小度量买绿。故加诚实护栏：纪元为空时报 **`healthy_no_sample`**
+  （monitor `:1389` 早已当 PASS 值收下，但字面写明"无样本"）而非 PASS，
+  并追加 freeze reason `attribution_era_no_sample`，clearance 在出现真实归因流量前不解冻。
+  **3.200 只读投影实测**：988 行/170 自然行/0 纪元行；
+  旧 69→FAIL，新 0 缺口 + 170 债务 + `healthy_no_sample` + 冻结。
+  **覆盖面是升的**：新词表套全部自然行命中 **129 行**（旧 69），
+  新纳入检查的是 `event` 115、`indexed` 46、`candidate` 5 个段落；
+  `substrate_recall` 的 133 个现在**明确豁免**（按契约就是 `advisory_only`
+  派生投影），比原先"名字碰巧对不上所以不检查"诚实。
+  **额外收获**：X.3 防火墙**扫源文本不只扫 import**，我的解释性注释里写了
+  `exposure_rollup` 就被全量套件抓出。本改动无 import、无数据依赖（归因是单向），
+  故**改注释、保留防火墙**——为迁就一句注释削弱架构测试是划不来的交易。
+  也再次印证：新增的 10 个测试全绿也发现不了它，**只跑自己加的测试不够**。
+  3115 → **3126 passed / 13 skipped / 0 failed**（+11），四门全过，
+  `surface_count` 154 不变。因本机 C: 盘曾占满、后台进程被回收，
+  全量套件分三段前台跑完（2086 + 1015 + 25 = 3126），三段均为最终代码状态。
+- `（CC.1，本节）`：顾问复审提三点，**全是"我加宽了判据但没审计它的消费者"**。
+  ① `_memory_source_has_attribution_gap` 有**三个**调用点，我只给驱动 FAIL 那个套了纪元；
+  另两个（`all_history` 全量、`rolling_7d` 近 7 天）也在跑新的 6 类判据。
+  已 3.200 只读补测：`all_history` **778→844**、`rolling_7d` **3→3 不变**、
+  `migration_debt` 709→844、`schema_era` **69→0**。四者中**只有 schema_era 驱动 FAIL**，
+  另三个均为 `info` 专用或无人引用 ⇒ **本次部署不引入任何新 WARN/FAIL**。
+  但"没出事"是运气不是设计，且是事后才验证的。
+  ② **新加的两个计数器算了却没人读** —— 探针整字典透传（`:5565`/`:4691`，无白名单）
+  所以它们进得了快照，**但 monitor 不读**，那 170 行债务对任何读者都不存在，
+  正是我刚写进 CLAUDE.md 的反模式。已让其搭既有 INFO 通道，
+  并把 `legacy_unattributed_record_count > 0` 加入触发条件——
+  否则债务是唯一信号时整条 INFO 不发出；反事实实测 `StopIteration`，已确认。
+  ③ 三段式 `working:a:b` ID 安全：`_extract_record_ids_from_section` 无跨文件消费者，
+  `exposure_rollup.py` 内无任何 `split(":")`，三个使用点全把 ID 当不透明键。
+  另登记**待办 17**：`rolling_7d_attribution_gap_count` 算了没人读（与
+  `exposure_rollup_lag_hours` 同病），并建议对 `exposure_monitor_stats`
+  返回字典的每个键做一次"有无读者"普查——本节只查了自己新加的两个。
+  **教训：加宽一个共用判据前，先 grep 全部调用点，逐个问"这数字变大会不会告警、谁在读"。**

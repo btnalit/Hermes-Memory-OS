@@ -1410,7 +1410,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     migration_debt_conservation_issue = (
         all_history_conservation_ok is False and schema_era_conservation_failure_count == 0
     )
-    if v2_exposure and (migration_debt_gap_count > 0 or migration_debt_conservation_issue):
+    # Item 16a: natural rows written before the attribution-complete producer
+    # cannot be attributed retroactively, so the gate excludes them. That debt
+    # must still have a READER -- a counter that is merely returned by
+    # exposure_monitor_stats and never surfaced alerts nobody (the same defect
+    # already recorded for exposure_rollup_lag_hours). It rides the existing
+    # INFO channel: visible, never driving FAIL/WARN on its own.
+    legacy_unattributed_count = int(v2_exposure.get("legacy_unattributed_record_count") or 0)
+    attribution_era_count = int(v2_exposure.get("attribution_era_record_count") or 0)
+    if v2_exposure and (
+        migration_debt_gap_count > 0
+        or migration_debt_conservation_issue
+        or legacy_unattributed_count > 0
+    ):
         # All-history migration debt (pre-schema-era data) is visible but must
         # never drive FAIL/WARN on its own (Fix 2c).
         info.append({
@@ -1420,6 +1432,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "all_history_attribution_gap_count": all_history_gap_count,
                 "schema_era_attribution_gap_count": schema_era_gap_count,
                 "conservation_total_passes": all_history_conservation_ok,
+                # Pre-attribution-era natural rows, and how much real attributed
+                # evidence exists to judge. attribution_era_record_count == 0
+                # means schema_era_health is healthy_no_sample rather than a
+                # green earned on evidence.
+                "legacy_unattributed_record_count": legacy_unattributed_count,
+                "attribution_era_record_count": attribution_era_count,
             },
         })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:

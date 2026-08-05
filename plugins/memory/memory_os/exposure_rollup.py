@@ -23,6 +23,59 @@ from .execution_gate import (
 SCHEMA_VERSION = "memory-os.exposure_rollup.v0"
 SNAPSHOT_SCHEMA_VERSION = "memory-os.exposure_rollup_snapshot.v0"
 
+# ── Attribution contract (backlog item 16b) ─────────────────────────────
+# Which prefetch disclosure sections must name the canonical records they drew
+# from. This vocabulary MUST match what prefetch._section_source_class()
+# actually emits: a name with no producer silently disables the check for that
+# class. The original set had six names of which four (entity_graph,
+# indexed_recall, vector, hindsight) had no producer anywhere in the project,
+# while the names the producer really emits (indexed, graph_layer, event,
+# candidate, substrate_recall) were absent -- so on production the gate counted
+# 69 gaps and silently skipped 1093. test_attributable_source_classes_cover_
+# the_producer_vocabulary keeps the two in sync from now on.
+#
+# Attributable: the section cites individual canonical records AND the producer
+# can supply their IDs.
+ATTRIBUTABLE_SOURCE_CLASSES = frozenset({
+    "crystallized",   # crystallized:<record_id>
+    "candidate",      # candidate:<candidate_id>
+    "working",        # working:<file_stem>:<item_id>
+    "event",          # event:<event_id>
+    "indexed",        # <record_type>:<record_id> from the FTS index
+    "graph_layer",    # <record_type>:<record_id> reached by graph traversal
+})
+
+# Deliberately NOT attributable, one reason per class. These are derived or
+# aggregate views with no 1:1 canonical record to cite, so requiring source_ids
+# would be unsatisfiable rather than merely unmet. Listing them explicitly (as
+# opposed to "anything not attributable") is what lets the guard test prove the
+# union covers the producer's whole vocabulary, so a newly added section title
+# cannot slip through unclassified.
+NON_ATTRIBUTABLE_SOURCE_CLASSES = frozenset({
+    "foreground",        # active task anchor -- derived state, not a record
+    "recall_guard",      # fixed guard string; carries its own synthetic marker
+    "identity",          # whole-file identity snippet
+    "state_overlay",     # aggregate overlay across many records
+    "bridge",            # continuity bridge -- derived
+    "last_session",      # session summary -- derived
+    "carryover",         # deep-reflection cards -- derived
+    "relationship",      # whole-file relationship snippet
+    "substrate_recall",  # advisory_only derived_projection by contract (substrates/base.py)
+    "diagnostic",        # diagnostic grounding -- derived
+    "other",             # unmapped section title: unknown by definition
+})
+
+# Prefixes that mark a source_id as naming a canonical record. Used by the
+# rollup's per-record classification, so widening this widens what gets
+# classified (which is the point: classified_ratio was 0.70 precisely because
+# working/event/indexed IDs could not be recognised even in principle).
+CANONICAL_SOURCE_ID_PREFIXES = (
+    "crystallized:",
+    "candidate:",
+    "working:",
+    "event:",
+)
+
 
 def _rollup_path(store: Any) -> Path:
     return store.roots.memory_os_root / "system" / "exposure_rollup.jsonl"
@@ -81,7 +134,7 @@ def _extract_record_ids_from_section(
     if isinstance(raw, list):
         for sid in raw:
             sid_str = str(sid)
-            if sid_str.startswith("crystallized:") or sid_str.startswith("candidate:"):
+            if sid_str.startswith(CANONICAL_SOURCE_ID_PREFIXES):
                 source_ids.append(sid_str)
     return source_ids
 
@@ -366,7 +419,10 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     """Return monitor-facing V2 exposure telemetry without mutating state."""
     from datetime import timedelta, timezone as _tz
 
-    from .memory_sources import read_memory_source_records
+    from .memory_sources import (
+        ATTRIBUTION_SCHEMA_VERSION as MEMORY_SOURCES_ATTRIBUTION_SCHEMA,
+        read_memory_source_records,
+    )
     from .natural_row import is_natural
 
     current = (now or datetime.now(_tz.utc)).astimezone(_tz.utc)
@@ -388,7 +444,19 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     ]
 
     all_history_gap = sum(1 for record in ms_records if _memory_source_has_attribution_gap(record))
-    schema_gap = sum(1 for record in natural_records if _memory_source_has_attribution_gap(record))
+    # Item 16a's era boundary: only records written by the attribution-complete
+    # producer can be held to the attribution contract. Earlier rows cannot be
+    # fixed retroactively -- the disclosure already happened without capturing
+    # IDs -- so they are surfaced as debt rather than folded into the gate.
+    # Same treatment as legacy_unmarked_rollup_count above.
+    attribution_era_records = [
+        record for record in natural_records
+        if str(record.get("attribution_schema") or "") == MEMORY_SOURCES_ATTRIBUTION_SCHEMA
+    ]
+    legacy_unattributed_record_count = len(natural_records) - len(attribution_era_records)
+    schema_gap = sum(
+        1 for record in attribution_era_records if _memory_source_has_attribution_gap(record)
+    )
     rolling_gap = sum(1 for record in rolling_records if _memory_source_has_attribution_gap(record))
     telemetry_degraded_count = sum(
         1 for record in natural_records
@@ -469,9 +537,17 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         freeze_reasons.append(f"budget_pressure_streak:{pressure_streak}/7")
     if schema_gap or conservation_failures or telemetry_degraded_count:
         freeze_reasons.append("schema_era_health_not_pass")
+    if natural_records and not attribution_era_records:
+        # Honesty guard for item 16a's era boundary: right after the producer
+        # fix ships, every existing row is pre-marker, so the gated set is empty
+        # and the attribution check has nothing to judge. Reporting PASS there
+        # would be green bought by narrowing the measurement -- the exact thing
+        # item 16b warns against. Report no-sample and keep clearance frozen
+        # until real attributed traffic exists.
+        freeze_reasons.append("attribution_era_no_sample")
 
     schema_health = "FAIL" if schema_gap or conservation_failures or telemetry_degraded_count else (
-        "healthy_no_sample" if not natural_records else "PASS"
+        "healthy_no_sample" if not natural_records or not attribution_era_records else "PASS"
     )
     return {
         "schema_version": "memory-os.exposure_monitor_stats.v1",
@@ -486,6 +562,9 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         "attribution_gap_count": all_history_gap,
         "all_history_attribution_gap_count": all_history_gap,
         "schema_era_attribution_gap_count": schema_gap,
+        # Pre-fix natural rows: real debt, surfaced, never gated (see item 16a).
+        "legacy_unattributed_record_count": legacy_unattributed_record_count,
+        "attribution_era_record_count": len(attribution_era_records),
         "rolling_7d_attribution_gap_count": rolling_gap,
         "schema_era_conservation_failure_count": conservation_failures,
         "schema_era_natural_record_count": len(natural_records),
@@ -506,7 +585,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
 
 
 def _memory_source_has_attribution_gap(record: dict[str, Any]) -> bool:
-    attributable_classes = {"crystallized", "working", "entity_graph", "indexed_recall", "vector", "hindsight"}
+    attributable_classes = ATTRIBUTABLE_SOURCE_CLASSES
     sections: list[dict[str, Any]] = []
     for key in ("selected", "dropped"):
         raw_values = record.get(key)

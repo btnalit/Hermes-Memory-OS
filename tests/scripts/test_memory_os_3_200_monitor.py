@@ -7627,3 +7627,67 @@ def test_execution_gate_helper_completion_warn_codes_are_clean_host_classified()
         assert code in table, f"{code} would fail the clean-host monitor as unclassified"
         # Registering must not escalate today's production WARNs into FAILs.
         assert table[code]["production_behavior"] == "warn_if_production"
+def test_v2_exposure_surfaces_pre_attribution_era_debt_and_evidence_volume():
+    """Item 16a: the era boundary excludes pre-fix natural rows from the gate,
+    so the excluded volume must have a READER. A counter that exposure_monitor_stats
+    merely returns alerts nobody -- the defect already on record for
+    exposure_rollup_lag_hours.
+
+    Counterfactual: without the monitor change this INFO entry omits both keys
+    (KeyError), and with legacy debt as the only signal the entry is not emitted
+    at all.
+    """
+    # Legacy debt is the ONLY signal: no migration gap, no conservation issue.
+    # Pre-change this emitted no INFO entry, so 170 excluded production rows
+    # would have been invisible.
+    debt_only = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "healthy_no_sample",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 0,
+            "schema_era_attribution_gap_count": 0,
+            "legacy_unattributed_record_count": 170,
+            "attribution_era_record_count": 0,
+        },
+    })
+    entry = next(
+        item for item in debt_only["info"]
+        if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert entry["value"]["legacy_unattributed_record_count"] == 170
+    assert entry["value"]["attribution_era_record_count"] == 0
+
+    # healthy_no_sample must remain a PASS-class value (monitor already accepts
+    # it), so the era boundary does not turn into a spurious exposure FAIL on
+    # deploy day. Asserted per-code rather than on overall status: this minimal
+    # snapshot omits every unrelated check, so the aggregate status is FAIL for
+    # reasons that have nothing to do with attribution (same reason the
+    # conservation test above only inspects codes).
+    assert not any(
+        item["code"] == "v2_exposure_schema_era_unhealthy" for item in debt_only["fail"]
+    )
+    assert any(
+        item["code"] == "v2_exposure_schema_era_healthy"
+        and item["value"] == "healthy_no_sample"
+        for item in debt_only["pass"]
+    )
+
+    # And once real attributed traffic exists with a genuine gap, it still FAILs.
+    with_real_gap = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "FAIL",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 5,
+            "schema_era_attribution_gap_count": 5,
+            "legacy_unattributed_record_count": 170,
+            "attribution_era_record_count": 40,
+        },
+    })
+    assert with_real_gap["status"] == "FAIL"
+    assert any(
+        item["code"] == "v2_exposure_schema_era_unhealthy" for item in with_real_gap["fail"]
+    )
