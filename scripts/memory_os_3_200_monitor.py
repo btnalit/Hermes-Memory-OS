@@ -4433,6 +4433,9 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "provisional_sweep",
     "runtime",
     "session_fact_extraction",
+    # CF: provisional_write_failed containment records from the aggregation
+    # lane's _try_write_resolver_provisional boundary.
+    "candidate_aggregation",
     "session_mirror",
     "shadow_recall",
     "sqlite",

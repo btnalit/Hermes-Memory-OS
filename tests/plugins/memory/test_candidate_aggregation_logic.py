@@ -805,11 +805,22 @@ class TestA1Boundary:
             raise OSError("synthetic canonical write failure")
 
         monkeypatch.setattr(CrystallizedMemoryService, "write_approved_record", fail_write)
-        with pytest.raises(OSError, match="synthetic canonical write failure"):
-            run_candidate_aggregation_lane(
-                store,
-                execution_gate_envelope_id=_VALID_ENVELOPE_ID,
-            )
+        # CE.2 semantics change: the write failure must still leave a "failed"
+        # envelope completion (asserted below, unchanged), but it must no
+        # longer propagate out of the tick -- on production one gate-rejected
+        # candidate re-crashed the lane on every due tick (rc=1, no helper
+        # report), starving every other candidate. The failure now surfaces as
+        # a bounded provisional_write_failed error record on the lane report
+        # and the candidate is routed to owner review.
+        result = run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+        assert result["status"] == "warning"
+        assert any(
+            record.get("error_code") == "provisional_write_failed"
+            for record in result["error_records"]
+        )
 
         gate_path = store.roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
         records = [json.loads(line) for line in gate_path.read_text().splitlines() if line.strip()]

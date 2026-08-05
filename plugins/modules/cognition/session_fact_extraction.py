@@ -97,8 +97,10 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os.ids import new_event_id
 from plugins.memory.memory_os.jsonl_io import build_error_record, read_jsonl
 from plugins.memory.memory_os.low_clue_recall import _call_hermes_runtime_model, _extract_json_object
+from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.structural_write_gate import append_governed_jsonl
 
@@ -478,6 +480,52 @@ def extract_fact_from_message(
 # ── Candidate construction ──────────────────────────────────────────────
 
 
+def _build_provenance_event(
+    *,
+    store: MemoryOSStore,
+    session_id: str,
+    platform: str,
+    fingerprint: str,
+) -> EventEnvelope:
+    """Build the per-session provenance event that extracted facts cite.
+
+    CE.2: the crystallized write gate requires non-empty source_event_ids on
+    EVERY approval path (owner included), so a candidate born without event
+    provenance can never be crystallized -- the lane's first five production
+    candidates took the durable-fact bypass and crashed every
+    candidate_aggregation tick. One metadata-only event per session per tick
+    gives the whole chain a real anchor: crystallized -> event -> session.
+    Mirrors session_mirror's event shape: candidate_allowed=False so the
+    heartbeat candidate generator cannot mint a SECOND candidate from the
+    provenance event itself (the facts already became candidates directly).
+    """
+    now = datetime.now(timezone.utc)
+    unique = hashlib.sha256(f"{fingerprint}|{session_id}".encode("utf-8")).hexdigest()[:10]
+    safe_session_id = _clip(str(session_id), 120)
+    return EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=new_event_id(now, unique=unique),
+        ts=now.isoformat(),
+        profile=store.roots.profile or "default",
+        source="session_fact_extraction",
+        kind="session_fact_extracted",
+        summary=f"Durable facts extracted from session {safe_session_id} ({platform or 'unknown'}).",
+        safe_ref={
+            "source_module": "session_fact_extraction",
+            "session_id": safe_session_id,
+            "platform": str(platform or "unknown"),
+            "session_fingerprint": fingerprint,
+            "candidate_allowed": False,
+            "body_policy": "bounded_summary",
+        },
+        tags=["session", "fact_extraction", str(platform or "unknown")],
+        sensitivity="private",
+        body_policy="bounded_summary",
+        hashes={},
+        promotion_state="raw",
+    )
+
+
 def _build_candidate(
     *,
     session_id: str,
@@ -486,6 +534,7 @@ def _build_candidate(
     message_index: int,
     role: str,
     fact_text: str,
+    source_event_ids: list[str],
 ) -> CrystallizedCandidate:
     # Identity material deliberately EXCLUDES the session fingerprint: the
     # fingerprint carries mtime, so an appended-to session gets a new one, and
@@ -503,7 +552,9 @@ def _build_candidate(
         candidate_id=candidate_id,
         kind="moment",
         body=body,
-        source_event_ids=[],
+        # CE.2: never empty -- the crystallized write gate rejects
+        # provenance-less candidates on every approval path.
+        source_event_ids=list(source_event_ids),
         sensitivity="private",
         tags=["session_fact_extraction", "long_message_fact", str(platform or "unknown")],
         bridge_state="inner_drive_candidate",
@@ -771,6 +822,7 @@ def run_session_fact_extraction_lane(
 
         session_fact_count = 0
         session_llm_failed = False
+        provenance_event_id: str | None = None
         for idx, message, redacted_content in bounded_eligible:
             if session_fact_count >= max_facts_per_session:
                 break
@@ -812,6 +864,19 @@ def run_session_fact_extraction_lane(
             session_fact_count += 1
 
             try:
+                # Lazy per-session provenance event: minted once, on the first
+                # fact, and cited by every fact candidate from this session.
+                # Written BEFORE the candidate so a candidate can never exist
+                # without its anchor (the reverse order could).
+                if provenance_event_id is None:
+                    provenance_event = _build_provenance_event(
+                        store=store,
+                        session_id=session_id,
+                        platform=platform,
+                        fingerprint=fingerprint,
+                    )
+                    store.append_event(provenance_event)
+                    provenance_event_id = provenance_event.id
                 candidate = _build_candidate(
                     session_id=session_id,
                     platform=platform,
@@ -819,6 +884,7 @@ def run_session_fact_extraction_lane(
                     message_index=idx,
                     role=str(message.get("role") or "unknown"),
                     fact_text=fact_text,
+                    source_event_ids=[provenance_event_id],
                 )
                 append_candidate_queue(store, candidate)
                 candidates_written += 1
