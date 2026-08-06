@@ -4601,6 +4601,34 @@ digest 干跑"零写盘"不变量。目标测试全绿、只有全量套件抓�
 **测试计数**：3163 → **3175 passed**（+12 反事实）+ 13 skipped，全量套件
 10m27s 零失败。分析文档本体已按修复结果二次更新（已修项标 ✅、开放项如实
 保留）并经 owner 授权 `git add -f` 纳入仓库跟踪。
+
+### CG 部署与生产验证（2026-08-06）
+
+- PR #25 CI 双 `verify` pass（7m22s/7m16s）后合并为 `eadef89`，远程分支已删。
+- 备份 `memory-os-pre-cg-20260806T013931Z.tar.gz`（48M，excl. WAL/SHM）；
+  `/opt` ff `d08dc90 → eadef89`（连带补上未部署的纯文档 PR #24），工作树干净。
+- `deploy_memory_os.py` production-safe upgrade（`--timeout 300` +
+  `MSYS_NO_PATHCONV=1`，两个已知坑均按 CD.D 记录预防）：preflight 30 pass /
+  0 warn / 0 fail，dry-run pass，**apply=applied、postcheck=pass**（compat
+  复检 30/0/0），六探针全 pass（cron_adapter / boundary_runtime / llm_judge /
+  manifest write+status / projection refresh）。**未重启 Gateway**。
+- 部署核验：manifest `deployed_head=eadef89`；owner_actions / index /
+  clearance_receipts / store / wandering_journal 五文件 sha 与 `/opt` 逐字节
+  一致（`verify-3200-deployed-commit` 规程）。
+- **Full Monitor（live）：101 PASS / 5 WARN / 0 FAIL**。四条 WARN 属已知集
+  （suppressed_errors、owner 停用 lane 的 completion_disabled +
+  boundary_unobserved、Windows/SSH 发起的 runtime_over_target 183-186s）；
+  第五条 `casual_context_needs_review`（casual 探针渲染出 Memory State
+  Overlay + Conversation Carryover）经主机 monitor_artifacts 考古证实
+  **08-04/08-05 每日产物中已存在**——部署前既有、数据驱动，两个区块均不在
+  本批次改动面。**0 FAIL，无部署引入回归**。
+- 顺带实测更正一则：生产 `prefetch_char_budget=20000`（preflight 实测），
+  不是代码默认 2200——R10 的"对齐生产"严格说是"对齐代码默认"；golden 评估
+  走默认路径，与主机配置无关，修复结论不变，但表述以此为准。
+- 证据级别：`deploy_pass` + `live_monitor_pass`（0 FAIL）。
+- `（CG 部署，本节）`：CI 过 → 合并 PR #25 → 备份 + ff + production-safe
+  部署全绿 → 五文件 sha 核验 → Full Monitor 101/5/0，唯一新面孔 WARN 经
+  产物考古证实部署前已存在——十项修复批次生产落地，零回归。
 - `（CG，本节）`：深度拆解文档 35 条声明逐条审计（推翻 1、半真 4、4 项加重）
   并把十项真实缺陷一次修复：D2 崩溃循环、M2 三层漂移+sync 抹平、M6 隔离膨胀、
   M9/探针超时、M3 逐回执水位+实体归因（清关激活前置关闭）、M8 六处原子写、
