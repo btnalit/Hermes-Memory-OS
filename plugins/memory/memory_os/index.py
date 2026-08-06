@@ -437,7 +437,7 @@ class MemoryOSIndex:
         conn.row_factory = sqlite3.Row
         try:
             _initialize_schema(conn)
-            return transition_edge_state(conn, edge_id, new_state, now=now)
+            return transition_edge_state(conn, edge_id, new_state, now=now, roots=self.roots)
         except Exception:
             return {}
         finally:
@@ -1443,6 +1443,35 @@ def write_governed_edge(
 
     Returns the edge dict, or {} on failure.
     """
+    # ── W1 dedup authority (E2) ────────────────────────────────────────
+    # The write boundary is the ONLY dedup authority: proposer-side
+    # pre-checks queried the projection with limit=1000 and were silently
+    # defeated once the backlog crossed that cap (measured on production:
+    # 769 redundant rows, 36% of the ledger).  This check has no limit.
+    # structural dedups per unordered PAIR (a structural link between two
+    # records is one fact regardless of relation label); semantic proposers
+    # dedup per exact (from, to, relation) triple.
+    try:
+        if proposed_by == "structural":
+            dup = conn.execute(
+                "select edge_id from memory_edges where state != 'invalidated'"
+                " and proposed_by = 'structural'"
+                " and ((from_record_id = ? and to_record_id = ?)"
+                "   or (from_record_id = ? and to_record_id = ?)) limit 1",
+                (from_record_id, to_record_id, to_record_id, from_record_id),
+            ).fetchone()
+        else:
+            dup = conn.execute(
+                "select edge_id from memory_edges where state != 'invalidated'"
+                " and from_record_id = ? and to_record_id = ?"
+                " and relation_type = ? limit 1",
+                (from_record_id, to_record_id, relation_type),
+            ).fetchone()
+    except sqlite3.Error:
+        dup = None  # fail-open on the check; the write itself may still proceed
+    if dup:
+        return {"skipped_duplicate": True, "edge_id": str(dup[0])}
+
     now = datetime.now(timezone.utc).isoformat()
     edge = {
         "edge_id": _edge_id(),
@@ -1494,12 +1523,23 @@ def write_governed_edge(
         return {}
 
 
+# Edge governance state machine (module constant so guard tests can assert
+# producer/consumer vocabulary against it — see W3 词表双向守卫).
+EDGE_STATE_TRANSITIONS: dict[str, set[str]] = {
+    "candidate": {"owner_eligible", "active", "invalidated"},
+    "owner_eligible": {"active", "invalidated"},
+    "active": {"invalidated"},
+    "invalidated": set(),
+}
+
+
 def transition_edge_state(
     conn: sqlite3.Connection,
     edge_id: str,
     new_state: str,
     *,
     now: str | None = None,
+    roots: MemoryOSRoots,
 ) -> dict[str, Any]:
     """Transition an edge's governance state with validation.
 
@@ -1507,6 +1547,15 @@ def transition_edge_state(
         candidate → owner_eligible → active → invalidated
         candidate → active  (auto-approve for low-risk edges)
         candidate → invalidated  (rejection)
+
+    Durability (W0/E7): the canonical store is graph/edges.jsonl and the
+    memory_edges table is a projection that index_sync/rebuild re-derive from
+    it (clear + insert-or-replace in file order, so the LAST row per edge_id
+    wins).  A transition therefore appends the FULL updated edge row to the
+    canonical ledger BEFORE updating the projection — a DB-only update would
+    be silently reverted within one sync cycle (≤30 min).  ``roots`` is a
+    required keyword for exactly that reason: an optional default would make
+    non-durable transitions possible again by omission.
 
     Returns the updated edge dict, or {} on failure/illegal transition.
     """
@@ -1523,19 +1572,32 @@ def transition_edge_state(
     cur = str(current.get("state", ""))
     if cur == new_state:
         return current  # no-op
-    _valid = {
-        "candidate": {"owner_eligible", "active", "invalidated"},
-        "owner_eligible": {"active", "invalidated"},
-        "active": {"invalidated"},
-        "invalidated": set(),
-    }
-    allowed = _valid.get(cur, set())
+    allowed = EDGE_STATE_TRANSITIONS.get(cur, set())
     if new_state not in allowed:
         return {}
     _now = now or datetime.now(timezone.utc).isoformat()
     updates: dict[str, Any] = {"state": new_state}
     if new_state == "invalidated":
         updates["invalidated_at"] = _now
+    updated_edge = {
+        "edge_id": str(current.get("edge_id", "")),
+        "from_record_type": str(current.get("from_record_type", "")),
+        "from_record_id": str(current.get("from_record_id", "")),
+        "to_record_type": str(current.get("to_record_type", "")),
+        "to_record_id": str(current.get("to_record_id", "")),
+        "relation_type": str(current.get("relation_type", "")),
+        "weight": float(current.get("weight") or 0.0),
+        "created_at": str(current.get("created_at", "")),
+        "source_event_id": str(current.get("source_event_id") or ""),
+        "state": updates["state"],
+        "invalidated_at": updates.get("invalidated_at"),
+        "proposed_by": str(current.get("proposed_by", "structural")),
+    }
+    # Canonical-first (same order as write_governed_edge): if the ledger
+    # append fails, the projection is NOT touched — a projection-only
+    # transition would be a lie that the next sync erases.
+    if not _write_edge_canonical(roots, updated_edge):
+        return {}
     try:
         conn.execute(
             "update memory_edges set state = ?, invalidated_at = ? where edge_id = ?",
@@ -1546,4 +1608,6 @@ def transition_edge_state(
         current["invalidated_at"] = updates.get("invalidated_at")
         return current
     except sqlite3.Error:
+        # Canonical row is already written — the projection will catch up on
+        # the next index_sync, so the transition is durably applied.
         return {}
