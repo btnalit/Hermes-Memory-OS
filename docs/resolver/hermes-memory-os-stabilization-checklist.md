@@ -3658,6 +3658,108 @@ compact 会归档 demoted 行）／对 agent 直接口述这些事实走正常�
 再一次证明"定向绿≠全量绿"（BV/CC 同款教训）。登记后
 monitor 文件 235 passed，全量 3162+1 → **3163 passed / 13 skipped**。
 
+## CH — 图谱层+Overlay+V3 前置十项单批修复 W0–W9（2026-08-06，提交 `1f65fde..`）
+
+Owner 决策：不分批——全部修完一次提交合并部署验证。审计与方案见
+DEEP_ANALYSIS 第 11–13 节（图谱 E1–E7、Overlay S1–S6、任务表 W0–W9），
+本节只记根因、修法、反事实与实测更正。全程严格 TDD（每项反事实先红后绿）。
+
+### 修复十项（根因 → 修法）
+
+1. **W0/E7 边状态迁移易失**（二次审查新发现）：`transition_edge_state`
+   只写 SQLite，`index_sync` 每 30 分钟 clear+全量重投影 → owner 的
+   approve/reject 最多存活 30 分钟。修：迁移前把整行更新记录追加进
+   `graph/edges.jsonl`（canonical-first；投影 last-writer-wins per edge_id
+   由守卫测试钉死）；`roots` 设为必需关键字（可选默认=非耐久迁移的地雷，
+   W 规则 4）。反事实：迁移后跑 sync/rebuild 状态必须保持（无修复必红实测）。
+2. **W1/E2+E3 去重超穿+队头配对偏置**：proposer 侧 `query_edges limit=1000`
+   被 2118 存量超穿（生产 769 冗余行/36%，周产出 78% 为原样重提）；配对
+   `order by created_at` 升序+200 对截断永远只嚼最老 ~20 条记录。修：
+   `write_governed_edge` 成为唯一去重权威（structural 无向配对级、其余
+   三元组级、无 limit）；**structural 收回 refines/contradicts 提名权**
+   （词元重叠只证相关不证语义——refines 占 91% 的毛球根源），相似度/共享
+   溯源一律 co_occurs；配对改未建边记录优先稳定序（per-proposer 覆盖判定）。
+   3 条旧测试按新词表反转（T2.1.1/T2.1.2/T2.1.8）。
+3. **W2 存量压缩**：`memory_os_graph_edges_compaction.py`——按三元组
+   keep-earliest、其余经 W0 机制转 invalidated（G3 不删）、默认 dry-run、
+   幂等、apply 落 `system/graph_edges_compaction_report.json`。
+4. **W3/E1 审批断链**：全库无 candidate→owner_eligible 路径而 digest 只查
+   owner_eligible → owner 从未见过边审批项（旧测试直接调 transition 走通
+   状态机=fixture 词表陷阱）。修：新增 `edge_promotion` 认知循环步骤
+   （每轮 top-10 by weight 晋升 + 30 天 TTL 有界作废）；digest 改 top-10+
+   待审计数+批量语法；approve_edge/reject_edge 支持逗号批量（全部存在才
+   过校验，单 id 返回形状不变）；**词表双向守卫**把
+   `EDGE_STATE_TRANSITIONS`/`EDGE_REVIEW_DIGEST_STATE`/`PROMOTION_*_STATE`/
+   `GRAPH_INJECTION_EDGE_STATE` 四方常量绑死——"消费者查询无人生产的状态"
+   不可再静默复发。
+5. **W4 溯源边**：`edge_provenance` 步骤从 source_event_ids 挖
+   event→crystallized evidence_for auto-active 边（元数据结晶时已过
+   OwnerGate；方向使 event 锚点一跳可达结晶目标——shadow 账本月命中 4 次
+   的根源是图里只有结晶↔结晶边）；注入侧对非 crystallized 目标不落
+   `[unresolved:]` 兜底（事件被 retention 清理属可容忍悬挂）。
+6. **W5/E4 llm 通道死亡一个月（根因与预判不同，如实更正）**：非 wrapper
+   env 问题——`43da529`（6/18 agent/→memory_os_agent/ 改名）后 /opt 检出
+   残留 `agent/__pycache__` 空壳目录成为 **namespace 包**，被 provider ABC
+   探测缓存进 sys.modules，此后 hermes_cli 的 `import agent.portal_tags`
+   永远命中幽灵包（namespace 动态 `__path__` 收不进 regular 包）。修：
+   resolver 回退分支驱逐 `__file__ is None` 的幽灵缓存后重试（真宿主包
+   永不驱逐），任何主机的残留壳目录免疫；三个 proposer step 包装器透传
+   reason/code/计数（skipped 不见原因=拖一个月才发现的直接原因）。
+   反事实：幽灵包生产同款机制复现，先红后绿。
+7. **W6 观测面**：monitor 新增 `v2_graph_governance_state` INFO（五个图谱
+   步骤 status/reason/counters；旧报告不捏造测量）+
+   `v2_output_knob_override_state` INFO + `v2_output_knob_override_expired`
+   WARN（E5：注入 knob 07-01 静默过期无人知晓）+ collection_failed WARN；
+   两个新 WARN 码注册 `CLEAN_HOST_WARN_CLASSIFICATIONS`（BJ 教训），
+   测试含注册断言。
+8. **W7/S1-S3+S6 Overlay 陈旧缓存族**：快路径无条件用缓存而 live 锚点只在
+   慢路径被读（docstring "or stale" 撒谎；retriever 同款被 shadow 掩盖）。
+   修：live 锚点覆盖 active_projects 一节（其余 section 保持缓存，O(1)
+   不变），投影抽单一生产者 `extract_task_anchor_line` +
+   `override_active_projects_with_live_anchor`，覆盖时中和
+   task_revision/task_source_at/task_record_id；S6（owner 决策）：
+   casual_continuity 路由排除 Memory State Overlay（路由屏蔽前台任务，
+   Overlay 不得开侧门——该泄漏今日已在发生，非修复引入）。反事实两条：
+   缓存空+live 非空→含锚点；**缓存旧 A+live B→必须 B**（防"仅填空"蒙混）。
+9. **W8/S4-S5 quiet gate fail-open**：前台判定读同一陈旧缓存且读取失败
+   放行漫游；生产 `wandering_enabled` 已 true、唯一拦截是
+   activation_evidence_ready 自动计算值（R4 复查日 09-05 硬前置）。修：
+   改读耐久台账 `read_effective_current_task` + fail-closed
+   （task_state_unreadable 判"在忙"）+ 24h 有界年龄防僵尸锚点反向压制。
+   `evaluate_v3_quiet_gate` 此前**零测试覆盖**，本批 4 条反事实为第一道防线。
+10. **W9/E6 实体抽取质量**：24 实体中 21 个为 path/url/uuid/ip 碎片。修：
+    `INDEXABLE_ENTITY_CLASSES` 只收 proper_noun（classify 词表保持，未来类
+    显式 opt-in）；`entity_index_enabled` 保持开启（生产 config 显式
+    `require_shared_entity: true`——关停即冻死 V3 激活门）。8 条旧测试按
+    新词表反转（附带修正 fixture 句首大写被贪婪并入专名的共享失配）。
+
+### 全量首跑抓到的漏网（BV/CC/CF 同款教训第四次应验）
+
+定向全绿后全量首跑 2 failed：W9 的索引过滤**静默改变了共享谓词**——
+`_looks_like_operation_context` 用 `extract_entities` 判"动作词+具体目标"，
+需要的是引用**探测**语义（path/URL/UUID 正是证据）而非入索引资格。修：
+`extract_entities` 显式 `classes` 参数 + `REFERENCE_DETECTION_CLASSES`，
+三个调用方清查各归其位（entity_index/index 走索引默认，operation gate
+显式探测集）。正是 W 规则"改共享谓词前 grep 每个调用点"的又一实例。
+
+### 测试与门
+
+- 新增反事实/守卫测试 **41 条**（graph_layer 8、edge_promotion 11、
+  edge_provenance 4、compaction 4、low_clue 幽灵包 1、cognitive census+
+  reason 2、monitor 2、state_overlay 4、context_router 1、wandering 4、
+  entity 1），全部先红后绿实测；语义反转旧测试 12 条。
+- 四门全过（import_cycle / write_surface 163 面 0 未分类 / static_hygiene /
+  public_checkout_probe PASS）+ `git diff --check` 干净。
+- 全量复跑（最终集成态）：**3233 passed / 13 skipped / 0 failed**。
+
+### 部署要求（见 DEEP_ANALYSIS §13.2a 部署清单）
+
+要点：①删除主机幽灵目录 `/opt/Hermes-Memory-OS/agent/`（仅剩 __pycache__）
+及 runtime 布局同名残留;②compaction 先 dry-run 核对（预期 332 组/769 行）
+再 apply;③手动触发一次 cognitive loop 验证 llm 复活/新步骤产出;
+④Full Monitor **预期新增 `v2_output_knob_override_expired` WARN**（E5 的
+告警终于响，owner 决策注入续期前持续存在，预期而非回归），0 FAIL 为准。
+
 ## 待办
 
 **V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
@@ -4762,3 +4864,10 @@ external_state_roots 已写入（**budget 对 prefetch 生效需 Gateway 重启*
 **终验 Full Monitor：102 PASS / 5 已知 WARN / 0 FAIL**；apply 窗口的
 rendered+agenda digest 双 unavailable 复跑双双回 PASS——瞬时争用家族第
 五、六例（apply 安装窗口采集碰撞）。
+
+- **CH**（2026-08-06）：图谱层+Overlay+V3 前置十项单批修复 W0–W9——
+  边迁移持久化地基（E7）、写入口去重+refines 收权+配对去偏置、存量压缩、
+  candidate→owner_eligible 晋升通道+词表双向守卫（E1 断链闭合）、溯源边、
+  幽灵 namespace agent 包驱逐（llm 死亡一个月的真根因）、knob 过期 WARN、
+  Overlay live 锚点覆盖+S6 路由抑制、quiet gate fail-closed、实体碎片过滤;
+  新增测试 41 条全部先红后绿，全量 3233 passed / 13 skipped。

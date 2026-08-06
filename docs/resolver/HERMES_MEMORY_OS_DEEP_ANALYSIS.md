@@ -954,6 +954,38 @@ Hermes-Memory-OS/
 - **13.3 决策 #3（放宽 V3 激活判据）必须晚于 W8 部署**：生产 `wandering_enabled` 已为 true、六 knob 齐全，`activation_evidence_ready` 是当前唯一拦截 —— 判据一放宽即等于带着 S4/S5 的坏 quiet gate 上线。单批交付内 W8 随批落地即自然满足，但该约束必须显式记录，防止判据决策先行。
 - **注入 knob 续期不在本轮范围**：属 owner 决策（见 13.3），且必须晚于 W1–W3 —— 当前 active 边仅 31 条（全为 llm 自动边），先开注入没有内容可注。
 
+### 13.2a 实施记录（2026-08-06，单批交付，分支 worktree-graph-audit-doc-update）
+
+**W0–W9 已全部实现**，严格 TDD（每项反事实先红后绿实测）；S6 按 owner
+决策取"路由抑制"。四个静态门 PASS。全量首跑抓到 1 项定向漏网并当场修复：
+W9 的索引过滤静默改变了 `_looks_like_operation_context` 的共享谓词
+（该门需要引用**探测**语义而非入索引资格）— 修法为 `extract_entities`
+显式 `classes` 参数 + `REFERENCE_DETECTION_CLASSES`，三个调用方清查归位。
+又一次证明"定向绿≠全量绿"（BV/CC/CF 同款）。
+
+**W5 根因与预判不同，如实更正**：非 wrapper env 问题 — `43da529`（6/18
+agent/→memory_os_agent/ 改名）后 /opt 检出残留 `agent/__pycache__` 空壳
+目录成为 namespace 包，被 provider ABC 探测缓存进 sys.modules，此后
+hermes_cli 的 `import agent.portal_tags` 永远命中幽灵包（namespace 动态
+`__path__` 收不进 regular 包）。修复在 resolver（驱逐 `__file__ is None`
+的幽灵缓存后重试），对任何主机的残留壳目录免疫；installer 不需改动。
+
+**部署清单（单批一次合并部署验证）**：
+1. 备份 memory-os（excl. WAL/SHM）；
+2. **删除主机幽灵目录** `/opt/Hermes-Memory-OS/agent/`（仅剩 __pycache__）
+   及 runtime 布局同名残留（如存在）；
+3. 正常 deploy（plan→preflight→dry-run→apply→postcheck）；
+4. 跑 `memory_os_graph_edges_compaction.py`：先 dry-run 核对（预期 332 组
+   /769 行），再 `--apply`，核对 `system/graph_edges_compaction_report.json`；
+5. 手动触发一次 cognitive loop（`systemctl --user start
+   hermes-memory-os-cognitive-loop.service`），验证：llm proposer 复活
+   （reason 不再是 llm_runtime_unavailable）、edge_provenance/edge_promotion
+   步骤出现、structural 不再产 refines；
+6. Full Monitor：**预期新增 `v2_output_knob_override_expired` WARN**
+   （E5 的告警终于响，owner 决策注入续期前持续存在，属预期而非回归）；
+   0 FAIL 为通过标准；
+7. 观察下一期 digest 出现 Pending Edge Review（top-10 + 批量语法）。
+
 ### 13.3 Owner 决策点（不阻塞上表，但阻塞"激活"）
 
 1. **S6**：`casual_continuity` 路由下 Overlay 的 active_projects 是否应一并抑制（当前泄漏锚点首 200 字符，含工具结果片段）—— 影响 W7 的最终形态。
