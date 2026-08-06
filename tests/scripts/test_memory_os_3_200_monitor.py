@@ -8082,6 +8082,31 @@ def test_snapshot_parity_complete_snapshot_is_ok(tmp_path):
     assert parity["fallback_group_keys"] == []
 
 
+def test_snapshot_parity_documented_exclusion_is_not_drift(tmp_path):
+    """Counterfactual for the detector's first-production-run false alarm:
+    clearance_cycle is a DOCUMENTED deferred activation (registry-owned
+    ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS), so its absence from the deployed
+    snapshot — exactly production's shape — must be reported, not graded
+    as drift. An UNdocumented absence in the same group must still drift."""
+    from plugins.memory.memory_os.cron_registry import cron_registry_snapshot
+
+    snapshot = cron_registry_snapshot()
+    governance = next(g for g in snapshot["groups"] if g["key"] == "tick_governance")
+    assert "clearance_cycle" in governance["member_keys"]
+    governance["member_keys"] = [
+        m for m in governance["member_keys"] if m != "clearance_cycle"
+    ]
+    _write_registry_snapshot(tmp_path, snapshot)
+
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "ok"
+    assert parity["silently_missing_lane_ids"] == {}
+    assert parity["documented_exclusions_absent"] == {
+        "tick_governance": ["clearance_cycle"]
+    }
+
+
 def test_snapshot_parity_missing_snapshot_reports_no_sample(tmp_path):
     parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
 
