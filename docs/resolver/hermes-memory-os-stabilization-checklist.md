@@ -3760,6 +3760,35 @@ DEEP_ANALYSIS 第 11–13 节（图谱 E1–E7、Overlay S1–S6、任务表 W0�
 ④Full Monitor **预期新增 `v2_output_knob_override_expired` WARN**（E5 的
 告警终于响，owner 决策注入续期前持续存在，预期而非回归），0 FAIL 为准。
 
+### CH 部署与生产验证（2026-08-06，实测）
+
+- CI（dispatch run 31127471450，分支 push/PR 事件未触发 run 的原因未查明，
+  用 workflow_dispatch 手动拉起）success;PR #34 merge 合入 main `92db7c6`。
+- 备份 `memory-os-pre-ch-20260806T202748Z.tar.gz`（54M，excl. WAL/SHM）;
+  `/opt` ff `968b120 → 92db7c6`。
+- **幽灵目录实测两处并清除**：`/opt/Hermes-Memory-OS/agent/`（仅
+  __pycache__）与 **`~/.hermes/memory-os/runtime/python/agent/`** —— 后者
+  正是 systemd wrapper PYTHONPATH 首位路径，进一步坐实 E4 根因链。
+- deploy production-safe 五阶段全绿（preflight/dry-run pass、apply applied、
+  六探针全 pass、postcheck pass，`fail=[]` 全程）。
+- compaction：dry-run 与审计数字**精确一致**（332 组/769 行，账本已长到
+  2154），apply `invalidated_count=769 / failed=0`，幂等复核 0/0。
+- 手动 cognitive loop（20:41Z）：**llm_edge_proposer 复活**（status ok，
+  不再 llm_runtime_unavailable）;structural 为新记录建边 61 条
+  （record_count 25→32，去偏置生效）;**edge_provenance 首轮产出 30 条
+  跨层溯源边**;edge_promotion 晋升 10 + TTL 作废 100（candidate 1415）;
+  整体 warning 与部署前同源（left_brain_advisor，既有）。
+- Full Monitor 首跑 101 PASS / 6 WARN / 1 FAIL（`shell_alias_no_env_failed`
+  —— 待办 3 记载的部署窗口瞬时争用，**第二次实测同模式**）;原样复跑
+  **0 FAIL / 5 WARN**：`v2_output_knob_override_expired`（本批预期新告警，
+  E5）+ 4 项既有家族（suppressed_errors、helper disabled/boundary 两兄弟、
+  runtime_over_target）;agenda digest WARN 随复跑消失（apply 窗口采集
+  碰撞家族又一例）。
+- 证据级别：`deploy_pass` + `live_monitor_pass`（0 FAIL）。
+- 待观察（非阻塞）：下一期 owner digest 应出现 Pending Edge Review
+  （top-10 + 批量语法）;branch push/PR 未自动触发 CI 的原因待下次遇到
+  再查（dispatch 路径可用）。
+
 ## 待办
 
 **V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
