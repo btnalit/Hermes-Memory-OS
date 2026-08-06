@@ -17,6 +17,12 @@ from .v3_body_packet import (
 )
 from .wandering_journal import ingest_thought_batch
 
+# W8: foreground-anchor age bound for the quiet gate.  A crash can leave an
+# "active" row with no tombstone; without a bound the fail-closed gate would
+# permanently suppress wandering.  Aligned with the provider's
+# ANCHOR_RECOVERY_MAX_AGE_HOURS (24h).
+WANDERING_FOREGROUND_ANCHOR_MAX_AGE_HOURS = 24
+
 WANDERING_PROMPT_CONTRACT = """You receive bounded memory fragments and relations.
 You may associate freely or return {\"entries\":[]}.
 Do not search for insights, summarize meaning, give advice, make plans, call tools,
@@ -171,13 +177,36 @@ def evaluate_v3_quiet_gate(
         evidence = {}
     if evidence.get("activation_evidence_ready") is not True:
         return {"quiet": False, "reason": "seed_evidence_not_ready"}
-    overlay_path = store.roots.memory_os_root / "system" / "state_overlay" / "current.json"
+    # ── W8 (S4/S5): foreground check reads the DURABLE anchor ledger ──
+    # The previous implementation read system/state_overlay/current.json —
+    # a derived cache up to 30 minutes stale (an empty refresh window read
+    # as "owner idle"), and its read-failure branch fell through to
+    # quiet=True: a gate governing autonomous expression that FAILED OPEN.
+    # The durable ledger is the same source the overlay refresh lane itself
+    # projects from.  Age is bounded so a zombie active row (crash without
+    # a tombstone) cannot permanently suppress wandering in the fail-closed
+    # direction.  Residual: read_effective_current_task maps a corrupted
+    # trailing line to None ("no task") — accepted, bounded by the ledger's
+    # own tail-corruption contract.
+    from .task_state import active_task_anchor_path, read_effective_current_task
+
+    ledger_path = active_task_anchor_path(store.roots)
     try:
-        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        overlay = {}
-    active_projects = ((overlay.get("active_projects") or {}).get("data") or []) if isinstance(overlay, dict) else []
-    if active_projects:
+        if ledger_path.exists():
+            ledger_path.read_text(encoding="utf-8")  # readability probe
+    except OSError:
+        # fail-closed: unreadable ledger must read as "owner is busy"
+        return {"quiet": False, "reason": "task_state_unreadable"}
+    try:
+        effective_task = read_effective_current_task(
+            store.roots,
+            profile=store.roots.profile or "default",
+            max_age_hours=WANDERING_FOREGROUND_ANCHOR_MAX_AGE_HOURS,
+            now=current,
+        )
+    except Exception:
+        return {"quiet": False, "reason": "task_state_unreadable"}
+    if effective_task is not None:
         return {"quiet": False, "reason": "foreground_task"}
     window_seconds = int(config["wandering_attempt_window_seconds"])
     cutoff = current - timedelta(seconds=window_seconds)

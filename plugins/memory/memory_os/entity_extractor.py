@@ -58,6 +58,13 @@ _ENTITY_CLASS_RULES: list[tuple[str, str, float]] = [
     (r"\b[A-Za-z_][A-Za-z0-9_]*[A-Z0-9]\b", "identifier", 0.7),
 ]
 
+# W9 (E6): only semantic classes reach the entity index.  path/url/uuid/ip
+# are references to things, not things — production measured 21/24 extracted
+# "entities" being such shards.  `identifier` (code-token shapes) stays out
+# until a quality bar exists for it; opting a class in is a one-line,
+# test-visible change here.
+INDEXABLE_ENTITY_CLASSES: frozenset[str] = frozenset({"proper_noun"})
+
 
 def classify_entity(entity_text: str) -> tuple[str, float]:
     """Classify an entity string and return its (entity_class, weight).
@@ -103,6 +110,14 @@ def extract_entities(body: str, *, record_id: str = "") -> list[dict[str, Any]]:
             return
         seen.add(eid)
         entity_class, weight = classify_entity(text)
+        # W9 (E6) quality filter: identifier classes are references, not
+        # entities.  Production measured 24 extracted "entities" of which
+        # almost all were path/URL regex shards (/.git-credentials, /main)
+        # — noise for the entity graph and for V3's shared_entity edges.
+        # Only semantic classes are indexed; classify_entity keeps the full
+        # vocabulary so future classes can opt in explicitly.
+        if entity_class not in INDEXABLE_ENTITY_CLASSES:
+            return
         entities.append({
             "entity_id": eid,
             "entity_text": text,

@@ -216,3 +216,133 @@ def test_collect_seed_inputs_manual_or_legacy_only_rows_yield_no_seed_inputs(tmp
     _write_daily_rows(store, [manual_row, legacy_row])
 
     assert collect_seed_inputs_from_store(store) == ([], [], {}, {})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W8 (S4/S5) — quiet gate 前台判定:耐久台账 + fail-closed + 有界年龄
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# evaluate_v3_quiet_gate 此前零测试覆盖 — S4(读 30 分钟陈旧派生缓存)与
+# S5(读取失败 fail-open 放行漫游)能存活至生产的直接原因。生产实测
+# wandering_enabled=true、六 knob 齐全,唯一拦截是 activation_evidence_ready
+# (自动计算值)— 本组测试是该门的第一道防线。
+
+
+def _w8_gate_config(now):
+    return {
+        "wandering_enabled": True,
+        "wandering_max_attempts_per_window": 1,
+        "wandering_attempt_window_seconds": 86400,
+        "wandering_model_input_char_budget": 6000,
+        "journal_ttl_days": 3,
+        "journal_max_entry_chars": 1200,
+        "journal_max_lineage_hops": 2,
+        "wandering_quiet_hours_utc": [now.hour],
+    }
+
+
+def _w8_ready_evidence(store):
+    path = store.roots.memory_os_root / "system" / "v3_seed_evidence_snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"activation_evidence_ready": True}), encoding="utf-8")
+
+
+def _w8_anchor_row(store, *, created_at, status="active"):
+    from plugins.memory.memory_os.task_state import active_task_anchor_path
+
+    path = active_task_anchor_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "profile": "default",
+        "status": status,
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: W8 测试前台任务",
+        "created_at": created_at,
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def test_w8_active_anchor_blocks_wandering(tmp_path):
+    """S4 counterfactual:主人在忙(耐久台账 active 锚点)必须挡住漫游。
+
+    旧实现读 state_overlay 缓存 — 缓存不存在/陈旧为空时误判'不忙'。
+    无修复:本场景(台账 active、无缓存)返回 quiet=True → 必红。
+    """
+    from datetime import datetime, timezone
+
+    from plugins.memory.memory_os.v3_wandering import evaluate_v3_quiet_gate
+
+    store = _store(tmp_path)
+    _w8_ready_evidence(store)
+    now = datetime.now(timezone.utc)
+    _w8_anchor_row(store, created_at=now.isoformat().replace("+00:00", "Z"))
+
+    gate = evaluate_v3_quiet_gate(store, _w8_gate_config(now), now=now)
+    assert gate == {"quiet": False, "reason": "foreground_task"}, gate
+
+
+def test_w8_stale_overlay_cache_is_not_consulted(tmp_path):
+    """S4 counterfactual(反向):台账无任务时,陈旧缓存里的旧 active 不得再挡漫游。
+
+    旧实现读缓存 → 本场景(缓存有旧任务、台账无)返回 foreground_task → 必红。
+    """
+    from datetime import datetime, timezone
+
+    from plugins.memory.memory_os.v3_wandering import evaluate_v3_quiet_gate
+
+    store = _store(tmp_path)
+    _w8_ready_evidence(store)
+    now = datetime.now(timezone.utc)
+    overlay_path = store.roots.memory_os_root / "system" / "state_overlay" / "current.json"
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay_path.write_text(json.dumps({
+        "active_projects": {"status": "ok", "data": [{"text": "三小时前的旧任务"}]},
+    }), encoding="utf-8")
+
+    gate = evaluate_v3_quiet_gate(store, _w8_gate_config(now), now=now)
+    assert gate == {"quiet": True, "reason": "off_peak"}, (
+        f"stale derived cache must no longer drive the foreground check: {gate}"
+    )
+
+
+def test_w8_zombie_anchor_beyond_max_age_does_not_block(tmp_path):
+    """有界年龄守卫:崩溃残留的超龄 active 锚点不得永久压制漫游(反向失效)。"""
+    from datetime import datetime, timedelta, timezone
+
+    from plugins.memory.memory_os.v3_wandering import (
+        WANDERING_FOREGROUND_ANCHOR_MAX_AGE_HOURS,
+        evaluate_v3_quiet_gate,
+    )
+
+    store = _store(tmp_path)
+    _w8_ready_evidence(store)
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(hours=WANDERING_FOREGROUND_ANCHOR_MAX_AGE_HOURS + 1)
+    _w8_anchor_row(store, created_at=stale.isoformat().replace("+00:00", "Z"))
+
+    gate = evaluate_v3_quiet_gate(store, _w8_gate_config(now), now=now)
+    assert gate == {"quiet": True, "reason": "off_peak"}, gate
+
+
+def test_w8_unreadable_ledger_fails_closed(tmp_path):
+    """S5 counterfactual:台账不可读必须判'在忙'(fail-closed)。
+
+    管自主表达的门在读取失败时放行 — 旧实现 except → overlay={} →
+    active_projects=[] → 继续走到 quiet=True → 必红。
+    """
+    from datetime import datetime, timezone
+
+    from plugins.memory.memory_os.task_state import active_task_anchor_path
+    from plugins.memory.memory_os.v3_wandering import evaluate_v3_quiet_gate
+
+    store = _store(tmp_path)
+    _w8_ready_evidence(store)
+    now = datetime.now(timezone.utc)
+    # 台账路径被目录占据 → read_text 必抛 OSError 族
+    ledger = active_task_anchor_path(store.roots)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.mkdir()
+
+    gate = evaluate_v3_quiet_gate(store, _w8_gate_config(now), now=now)
+    assert gate == {"quiet": False, "reason": "task_state_unreadable"}, gate
