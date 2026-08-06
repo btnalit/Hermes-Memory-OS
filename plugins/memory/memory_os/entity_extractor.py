@@ -58,6 +58,23 @@ _ENTITY_CLASS_RULES: list[tuple[str, str, float]] = [
     (r"\b[A-Za-z_][A-Za-z0-9_]*[A-Z0-9]\b", "identifier", 0.7),
 ]
 
+# W9 (E6): only semantic classes reach the entity index.  path/url/uuid/ip
+# are references to things, not things — production measured 21/24 extracted
+# "entities" being such shards.  `identifier` (code-token shapes) stays out
+# until a quality bar exists for it; opting a class in is a one-line,
+# test-visible change here.
+INDEXABLE_ENTITY_CLASSES: frozenset[str] = frozenset({"proper_noun"})
+
+# Reference DETECTION is a different question from index WORTHINESS: the
+# operation-context gate (provider `_looks_like_operation_context`) asks
+# "does this text mention a concrete target at all" — for that, paths/URLs/
+# UUIDs are exactly the evidence wanted.  Callers needing detection pass
+# this set explicitly instead of silently widening the index default
+# (the shared-predicate trap CLAUDE.md warns about).
+REFERENCE_DETECTION_CLASSES: frozenset[str] = frozenset(
+    {"path", "url", "uuid", "ip", "proper_noun", "identifier"}
+)
+
 
 def classify_entity(entity_text: str) -> tuple[str, float]:
     """Classify an entity string and return its (entity_class, weight).
@@ -78,18 +95,28 @@ def classify_entity(entity_text: str) -> tuple[str, float]:
     return ("unknown", 0.7)
 
 
-def extract_entities(body: str, *, record_id: str = "") -> list[dict[str, Any]]:
+def extract_entities(
+    body: str,
+    *,
+    record_id: str = "",
+    classes: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
     """Extract entities from a crystallized record body.
 
     Returns a list of entity dicts with keys:
         entity_id, entity_text, record_id, role, proposed_by
 
     role is always "mention" in P1 (subject/object distinction requires
-    LLM, which is P4). P1 captures: paths, URLs, UUIDs, capitalized
-    phrases.
+    LLM, which is P4).
+
+    *classes* selects which entity classes are returned.  The default is
+    ``INDEXABLE_ENTITY_CLASSES`` (W9: index semantics — semantic classes
+    only); detection-style callers pass ``REFERENCE_DETECTION_CLASSES``
+    explicitly.
     """
     if not body or not body.strip():
         return []
+    allowed_classes = INDEXABLE_ENTITY_CLASSES if classes is None else classes
 
     entities: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -103,6 +130,14 @@ def extract_entities(body: str, *, record_id: str = "") -> list[dict[str, Any]]:
             return
         seen.add(eid)
         entity_class, weight = classify_entity(text)
+        # W9 (E6) quality filter: identifier classes are references, not
+        # entities.  Production measured 24 extracted "entities" of which
+        # almost all were path/URL regex shards (/.git-credentials, /main)
+        # — noise for the entity graph and for V3's shared_entity edges.
+        # Only the caller-selected classes pass; classify_entity keeps the
+        # full vocabulary so future classes can opt in explicitly.
+        if entity_class not in allowed_classes:
+            return
         entities.append({
             "entity_id": eid,
             "entity_text": text,

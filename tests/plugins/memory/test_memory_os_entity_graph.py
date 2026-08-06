@@ -70,14 +70,15 @@ class TestEntityIndex:
     def test_refresh_indexes_entities_from_crystallized(self, tmp_path):
         roots = _make_roots(tmp_path)
         _ensure_entity_index_table(roots.index_path)
-        _write_crystallized(roots, "Working on /opt/hermes/memory-os plugin",
+        # W9 语义反转:path 碎片不再入索引,fixture 改用专名
+        _write_crystallized(roots, "Working with Alice Chen on the Memory Plugin",
                             record_id="rec-001")
-        _write_crystallized(roots, "Also touching /etc/config/settings.json",
+        _write_crystallized(roots, "Also reviewing with Bob Zhang the Config Settings",
                             record_id="rec-002")
 
         report = refresh_entity_index(roots.index_path, roots.crystallized_root)
         assert report["status"] == "ok"
-        assert report["entity_count"] >= 2  # at least the two paths
+        assert report["entity_count"] >= 2  # at least two proper nouns
 
     def test_refresh_is_idempotent(self, tmp_path):
         roots = _make_roots(tmp_path)
@@ -106,9 +107,9 @@ class TestEntityIndex:
     def test_query_related_records_finds_shared_entities(self, tmp_path):
         roots = _make_roots(tmp_path)
         _ensure_entity_index_table(roots.index_path)
-        _write_crystallized(roots, "Fixing /opt/hermes bug in index-sync",
+        _write_crystallized(roots, "fixing the Hermes Gateway bug in index-sync",
                             record_id="rec-001")
-        _write_crystallized(roots, "Working on /opt/hermes memory plugin",
+        _write_crystallized(roots, "working on Hermes Gateway memory plugin",
                             record_id="rec-002")
 
         refresh_entity_index(roots.index_path, roots.crystallized_root)
@@ -127,7 +128,7 @@ class TestEntityIndex:
     def test_entity_index_stats(self, tmp_path):
         roots = _make_roots(tmp_path)
         _ensure_entity_index_table(roots.index_path)
-        _write_crystallized(roots, "Service hermes-gateway config at /etc/hermes/config.json",
+        _write_crystallized(roots, "Service Hermes Gateway config reviewed by Alice Chen",
                             record_id="rec-001")
         refresh_entity_index(roots.index_path, roots.crystallized_root)
         stats = entity_index_stats(roots.index_path)
@@ -143,9 +144,9 @@ class TestEntityGraphRetriever:
         from plugins.memory.memory_os.retrievers.entity_graph import EntityGraphRetriever
         roots = _make_roots(tmp_path)
         _ensure_entity_index_table(roots.index_path)
-        _write_crystallized(roots, "Fixing memory-os bug in /opt/hermes/bin",
+        _write_crystallized(roots, "fixing a Memory Plugin bug with Hermes Gateway",
                             record_id="rec-001")
-        _write_crystallized(roots, "Deploying /opt/hermes/bin update",
+        _write_crystallized(roots, "deploying the Hermes Gateway update",
                             record_id="rec-002")
         refresh_entity_index(roots.index_path, roots.crystallized_root)
         store = _make_store(roots)

@@ -1131,13 +1131,24 @@ def _state_overlay_lines(
 ) -> list[str]:
     """Memory State Overlay section — derived projection for conversation context.
 
-    Reads the cron-cached ``current.json`` (refreshed every ~30 min) when
-    available, falling back to a fresh build only when the cache is missing
-    or stale.  Fail-open: any exception returns [] so a broken overlay
-    never blocks normal prefetch.
+    Reads the cron-cached ``current.json`` when available (the cache is
+    refreshed by the state_overlay_refresh lane every 30 minutes and is NOT
+    freshness-checked here — the O(1) fast path is deliberate), falling back
+    to a fresh build only when the cache is missing or unparseable.
+
+    W7 (S1): the cached ``active_projects`` reflects the durable anchor as
+    of the last cron refresh — up to 30 minutes stale, which on production
+    rendered "(insufficient data)" through entire conversations.  When the
+    caller passes a live ``current_task_anchor`` it OVERRIDES the cached
+    active_projects section (other sections keep their cached values); the
+    cache-level task_revision keys are neutralized by the override helper.
+
+    Fail-open: any exception returns [] so a broken overlay never blocks
+    normal prefetch.
     """
     try:
         from .state_overlay import build_state_overlay as _build
+        from .state_overlay import override_active_projects_with_live_anchor as _override
         from .state_overlay_renderer import render_state_overlay_md as _render
         from .state_overlay_schema import OVERLAY_SECTION_FIELDS
     except ImportError:
@@ -1152,6 +1163,11 @@ def _state_overlay_lines(
             overlay = _json.loads(cached_path.read_text(encoding="utf-8"))
         except Exception:
             overlay = None  # fall through to rebuild
+    if overlay is not None and str(current_task_anchor or "").strip():
+        try:
+            _override(overlay, str(current_task_anchor))
+        except Exception:
+            pass  # fail-open: a broken override must not break the cache path
 
     # ── Slow path: rebuild overlay from canonical sources ────────────
     if overlay is None:
@@ -1893,6 +1909,12 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
     return ids
 
 
+# W3 词表守卫锚点:图谱注入只消费此状态的边;owner approve(active 化)
+# 是它的生产者。与 EDGE_STATE_TRANSITIONS / EDGE_REVIEW_DIGEST_STATE /
+# PROMOTION_TARGET_STATE 一起被双向守卫测试钉死。
+GRAPH_INJECTION_EDGE_STATE = "active"
+
+
 def _graph_layer_shadow_lines(
     store: MemoryOSStore,
     anchor_ids: list[str],
@@ -1926,7 +1948,7 @@ def _graph_layer_shadow_lines(
     if index is None or not hasattr(index, "query_edges"):
         return []
     try:
-        edges = index.query_edges(anchor_ids, depth=1, state="active", limit=8)
+        edges = index.query_edges(anchor_ids, depth=1, state=GRAPH_INJECTION_EDGE_STATE, limit=8)
     except Exception:
         return []
     if not edges:
@@ -2041,8 +2063,14 @@ def _graph_layer_injection_lines(
             # Never turn a revoked/demoted canonical target into an unresolved
             # identifier-only recall line; inactive targets are fully suppressed.
             continue
+        elif to_type not in {"crystallized_record", "crystallized"}:
+            # W4: non-crystallized targets (events, working items) age out of
+            # hot storage by design (retention prunes events); an unresolved
+            # identifier line for them is pure noise, not a diagnostic.
+            continue
         else:
-            # Missing targets remain diagnosable without exposing inactive content.
+            # Missing crystallized targets remain diagnosable without
+            # exposing inactive content.
             display_text = f"[unresolved:{to_id}]"
 
         weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")

@@ -235,20 +235,30 @@ def run_llm_proposer(
     finally:
         conn2.close()
 
-    # 2. Collect existing edges for dedup
+    # 2. Collect existing edges to avoid wasted LLM calls.
+    # W1/E2: this is an OPTIMIZATION only — the dedup AUTHORITY lives at the
+    # write boundary (index.write_governed_edge).  The previous query_edges
+    # pre-check was capped at limit=1000 and silently defeated once the
+    # backlog crossed that cap; this scan has no limit.
     existing_edges: set[str] = set()
-    if index and hasattr(index, "query_edges"):
+    try:
+        conn3 = sqlite3.connect(index_path)
         try:
-            all_ids = [r["id"] for r in records if r.get("id")]
-            if all_ids:
-                for state_filter in ("candidate", "active", "owner_eligible"):
-                    raw = index.query_edges(all_ids, depth=1, state=state_filter, limit=1000)
-                    if isinstance(raw, list):
-                        for e in raw:
-                            key = f"{e.get('from_record_id','')}:{e.get('to_record_id','')}:{e.get('relation_type','')}"
-                            existing_edges.add(key)
-        except Exception:
-            pass
+            rows3 = conn3.execute(
+                "select from_record_id, to_record_id, relation_type"
+                " from memory_edges where state != 'invalidated'"
+            ).fetchall()
+        finally:
+            conn3.close()
+        for _a, _b, _r in rows3:
+            existing_edges.add(f"{_a}:{_b}:{_r}")
+    except sqlite3.Error:
+        pass
+
+    # W1/E3 pair de-bias: records the llm proposer has not yet linked come
+    # first, so the oldest records cannot consume the pair budget forever.
+    from .structural_edge_proposer import _order_records_unedged_first
+    records = _order_records_unedged_first(records, index_path, proposed_by="llm")
 
     # 3. Build pairs and call LLM
     pairs = 0
@@ -309,7 +319,9 @@ def run_llm_proposer(
                     proposed_by="llm",
                     state=init_state,
                 )
-                if edge:
+                if edge.get("skipped_duplicate"):
+                    dedup_skipped += 1
+                elif edge:
                     proposed += 1
                     if init_state == "active":
                         auto_active += 1

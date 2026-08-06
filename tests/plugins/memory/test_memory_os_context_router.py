@@ -601,6 +601,36 @@ def test_context_router_casual_and_ambiguous_exclude_working_memory():
     assert any(item["section"] == "Working Memory" and "route_excludes_section" in item["reason_codes"] for item in ambiguous["dropped_sections"])
 
 
+def test_w7_s6_casual_continuity_excludes_state_overlay():
+    """S6 (owner 决策 2026-08-06:该抑制就抑制):casual_continuity 路由必须排除
+    Memory State Overlay。
+
+    泄漏机制:路由排除了 current foreground task,但 Overlay 的
+    active_projects 携带锚点首 200 字符(生产样本含 untrusted_tool_result
+    片段)→ 前台任务内容从 Overlay 侧门漏进闲聊上下文。W7 覆盖修复会把
+    Overlay 的 Active 变得永远新鲜,不堵侧门泄漏就会稳定化。
+    """
+    overlay = ContextSection(
+        section="Memory State Overlay",
+        text="- [Active] 修复图谱治理断链(来自锚点的前台任务内容)",
+        source_class="state_overlay",
+    )
+    carryover = ContextSection(
+        section="Conversation Carryover",
+        text="Concrete carryover task/context: 昨天聊到的花园浇水。",
+    )
+
+    casual = route_context_sections(
+        "你觉得最近怎么样", sections=[overlay, carryover], budget_chars=1200,
+    )
+    assert casual["route"] == "casual_continuity"
+    assert any(
+        item["section"] == "Memory State Overlay"
+        and "route_excludes_section" in item["reason_codes"]
+        for item in casual["dropped_sections"]
+    ), f"Overlay must be excluded on casual route: {casual['dropped_sections']}"
+
+
 def test_prefetch_context_router_apply_casual_does_not_treat_query_anchor_as_task(tmp_path):
     store = _store(tmp_path)
     item = build_working_item(seed=99, source_event_id="evt-noisy")

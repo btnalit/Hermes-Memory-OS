@@ -1,9 +1,16 @@
 """Deterministic structural edge proposer for crystallized↔crystallized relationships.
 
 Runs as a cognitive-loop step. Reads active crystallized records from the
-index, applies heuristics to detect refines / contradicts / depends_on edges,
-and writes candidate edges (state=candidate, proposed_by=structural) to the
-memory_edges table for subsequent owner review and promotion.
+index, applies deterministic heuristics, and writes candidate edges
+(state=candidate, proposed_by=structural) to the memory_edges table for
+subsequent owner review and promotion.
+
+Relation vocabulary (W1/E2): structural similarity can prove that two
+records are RELATED, never HOW they relate semantically — so this proposer
+emits ``co_occurs`` (shared provenance, body similarity, temporal proximity)
+plus ``depends_on`` only for an explicit record-id reference (a hard
+structural fact, not a similarity guess).  ``refines`` and ``contradicts``
+are reserved for the LLM proposer, which actually reads the content.
 """
 
 from __future__ import annotations
@@ -16,8 +23,8 @@ from typing import Any
 from .audit import append_audit
 
 
-# Dice coefficient threshold for body-text similarity — above this is
-# considered a positive match (refines or contradicts, resolved by stance).
+# Dice coefficient threshold for body-text similarity — above this the pair
+# is considered structurally related (co_occurs).
 _DICE_THRESHOLD = 0.30
 
 # Temporal proximity for co_occurs / loose refines (seconds).
@@ -107,7 +114,8 @@ def _detect_relation(
     source_events_a = list(source_events_a)
     source_events_b = list(source_events_b)
 
-    # ── Shared source_event → refines or co_occurs ──
+    # ── Shared source_event → co_occurs (shared provenance is
+    # co-occurrence, not refinement — semantic labels are the LLM's job) ──
     shared_events = set(source_events_a) & set(source_events_b)
     if shared_events:
         shared_event = next(iter(shared_events)) if shared_events else ""
@@ -116,7 +124,7 @@ def _detect_relation(
             "from_record_id": rid_a,
             "to_record_type": "crystallized_record",
             "to_record_id": rid_b,
-            "relation_type": "refines",
+            "relation_type": "co_occurs",
             "weight": 1.0,
             "source_event_id": shared_event,
             "proposed_by": "structural",
@@ -139,13 +147,11 @@ def _detect_relation(
             "state": "candidate",
         })
 
-    # ── Body similarity → refines or contradicts ──
+    # ── Body similarity → co_occurs (W1/E2: token overlap proves
+    # relatedness, not refinement/contradiction — those need the LLM) ──
     dice = _dice_coefficient(body_a, body_b)
     if dice >= _DICE_THRESHOLD:
-        if kind_a != kind_b:
-            rtype = "contradicts"
-        else:
-            rtype = "refines"
+        rtype = "co_occurs"
         # Only write if we haven't already via source_event or depends_on
         has_same = any(
             e["relation_type"] == rtype
@@ -185,6 +191,41 @@ def _detect_relation(
             })
 
     return edges
+
+
+def _order_records_unedged_first(
+    records: list[dict[str, Any]],
+    index_path: str,
+    *,
+    proposed_by: str = "structural",
+) -> list[dict[str, Any]]:
+    """Stable partition: records without a non-invalidated edge from this
+    proposer class first.
+
+    Coverage is judged per proposer (``proposed_by``) — an llm edge on a
+    record must not push it behind the head records the structural reorder
+    exists to starve out, and vice versa.  Fail-open: on any query error the
+    input order is returned.
+    """
+    edged: set[str] = set()
+    try:
+        conn = sqlite3.connect(index_path)
+        try:
+            rows = conn.execute(
+                "select from_record_id, to_record_id from memory_edges"
+                " where state != 'invalidated' and proposed_by = ?",
+                (proposed_by,),
+            ).fetchall()
+        finally:
+            conn.close()
+        for a, b in rows:
+            edged.add(str(a))
+            edged.add(str(b))
+    except sqlite3.Error:
+        return records
+    unedged = [r for r in records if str(r.get("id", "")) not in edged]
+    rest = [r for r in records if str(r.get("id", "")) in edged]
+    return unedged + rest
 
 
 # ── Proposer runner ────────────────────────────────────────────────────────
@@ -253,25 +294,21 @@ def run_structural_proposer(
     # Build all unordered pairs.
     pairs = 0
     proposed = 0
+    boundary_dedup_skipped = 0
+    write_failed = 0
     dedup_keys: set[str] = set()
 
-    # Check existing edges to avoid duplicates.
-    existing_edges: set[str] = set()
-    if index:
-        try:
-            all_records = [r["id"] for r in records if r.get("id")]
-            if all_records:
-                # Check both candidate and active edges for dedup
-                for dedup_state in ("candidate", "active"):
-                    raw = index.query_edges(
-                        all_records, depth=1, state=dedup_state, limit=1000
-                    )
-                    if isinstance(raw, list):
-                        for e in raw:
-                            key = f"{e.get('from_record_id','')}:{e.get('to_record_id','')}:{e.get('relation_type','')}"
-                            existing_edges.add(key)
-        except Exception:
-            pass  # fail-open
+    # ── W1/E3 pair de-bias: unedged records first ──────────────────────
+    # The old created_at-ascending order let the oldest ~20 records consume
+    # the entire max_pairs budget every run (production: top-5 hubs were all
+    # same-day records carrying 189–275 edges each) while newer records never
+    # got a single structural edge.  Records without any non-invalidated
+    # structural edge are examined first; within each group the created_at
+    # order is preserved (stable).  Dedup itself now lives at the write
+    # boundary (index.write_governed_edge) — the previous query_edges
+    # pre-check here was capped at limit=1000 and silently defeated once the
+    # backlog crossed that cap.
+    records = _order_records_unedged_first(records, index_path)
 
     for i in range(len(records)):
         if pairs >= max_pairs:
@@ -287,13 +324,17 @@ def run_structural_proposer(
                     f"{candidate['to_record_id']}:"
                     f"{candidate['relation_type']}"
                 )
-                if dedup_key in dedup_keys or dedup_key in existing_edges:
+                if dedup_key in dedup_keys:
                     continue
                 dedup_keys.add(dedup_key)
                 if index and hasattr(index, "write_governed_edge"):
                     result = index.write_governed_edge(**candidate)
-                    if result:
+                    if result.get("skipped_duplicate"):
+                        boundary_dedup_skipped += 1
+                    elif result:
                         proposed += 1
+                    else:
+                        write_failed += 1
 
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 
@@ -302,7 +343,8 @@ def run_structural_proposer(
         "record_count": len(records),
         "pair_count": pairs,
         "proposed_count": proposed,
-        "dedup_skipped": len(dedup_keys) - proposed,
+        "dedup_skipped": boundary_dedup_skipped,
+        "write_failed_count": write_failed,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
     }

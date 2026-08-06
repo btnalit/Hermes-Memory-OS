@@ -158,7 +158,7 @@ def test_t1_1_6_invalidated_at_nullable(tmp_path):
     )
     assert edge["invalidated_at"] is None
     # After invalidate it should have a value
-    updated = transition_edge_state(conn, edge["edge_id"], "invalidated")
+    updated = transition_edge_state(conn, edge["edge_id"], "invalidated", roots=index.roots)
     assert updated["invalidated_at"] is not None
     conn.close()
 
@@ -313,10 +313,10 @@ def test_t1_3_2_candidate_to_owner_eligible_to_active(tmp_path):
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
     # → owner_eligible
-    r1 = transition_edge_state(conn, edge["edge_id"], "owner_eligible")
+    r1 = transition_edge_state(conn, edge["edge_id"], "owner_eligible", roots=index.roots)
     assert r1["state"] == "owner_eligible"
     # → active
-    r2 = transition_edge_state(conn, edge["edge_id"], "active")
+    r2 = transition_edge_state(conn, edge["edge_id"], "active", roots=index.roots)
     assert r2["state"] == "active"
     conn.close()
 
@@ -329,7 +329,7 @@ def test_t1_3_2b_skip_transition_rejected(tmp_path):
         conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
-    r = transition_edge_state(conn, edge["edge_id"], "active")
+    r = transition_edge_state(conn, edge["edge_id"], "active", roots=index.roots)
     assert r["state"] == "active"
     conn.close()
 
@@ -343,7 +343,7 @@ def test_t1_3_3_active_to_invalidated(tmp_path):
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
-    r = transition_edge_state(conn, edge["edge_id"], "invalidated")
+    r = transition_edge_state(conn, edge["edge_id"], "invalidated", roots=index.roots)
     assert r["state"] == "invalidated"
     assert r["invalidated_at"] is not None
     conn.close()
@@ -360,7 +360,7 @@ def test_t1_3_4_invalidate_not_delete(tmp_path):
     )
     eid = edge["edge_id"]
     count_before = conn.execute("select count(*) from memory_edges").fetchone()[0]
-    transition_edge_state(conn, eid, "invalidated")
+    transition_edge_state(conn, eid, "invalidated", roots=index.roots)
     count_after = conn.execute("select count(*) from memory_edges").fetchone()[0]
     assert count_after == count_before, "Row should not be deleted"
     conn.close()
@@ -375,7 +375,7 @@ def test_t1_3_5_invalidated_excluded_from_query(tmp_path):
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
-    transition_edge_state(conn, edge["edge_id"], "invalidated")
+    transition_edge_state(conn, edge["edge_id"], "invalidated", roots=index.roots)
     conn.close()
 
     results = index.query_edges(["a"], state="active", limit=10)
@@ -658,7 +658,7 @@ def test_transition_edge_state_illegal_transition(tmp_path):
         state="active",
     )
     # active → candidate is illegal
-    result = transition_edge_state(conn, edge["edge_id"], "candidate")
+    result = transition_edge_state(conn, edge["edge_id"], "candidate", roots=index.roots)
     assert result == {}
     conn.close()
 
@@ -667,7 +667,7 @@ def test_transition_edge_state_nonexistent(tmp_path):
     """transition_edge_state returns {} for unknown edge."""
     _, index = _store(tmp_path)
     conn = _conn(index)
-    result = transition_edge_state(conn, "nonexistent_edge_id", "active")
+    result = transition_edge_state(conn, "nonexistent_edge_id", "active", roots=index.roots)
     assert result == {}
 
 
@@ -703,7 +703,11 @@ def _seed_canonical_crystallized(
 
 
 def test_t2_1_1_write_refines_edge(tmp_path):
-    """T2.1.1: Refines edge between two crystallized records via proposer."""
+    """T2.1.1 (W1 语义反转): shared source_event → co_occurs, 不再是 refines。
+
+    原契约:共享溯源事件 → refines。W1/E2 收权后 structural 只可提名
+    co_occurs/depends_on — 共享溯源是共现证据,精化判断归 LLM。
+    """
     store, index = _store(tmp_path)
     _seed_canonical_crystallized(store, [
         {
@@ -737,19 +741,28 @@ def test_t2_1_1_write_refines_edge(tmp_path):
         f"Expected >=1 proposed edge, got {result}"
     )
 
-    # Verify edge is in memory_edges
+    # Verify edge is in memory_edges — co_occurs, and NO structural refines
     conn2 = _conn(index)
     rows = conn2.execute(
-        "select * from memory_edges where relation_type = 'refines'"
+        "select * from memory_edges where relation_type = 'co_occurs'"
     ).fetchall()
+    refines = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'refines'"
+    ).fetchone()[0]
     conn2.close()
     assert len(rows) >= 1
     assert rows[0]["state"] == "candidate"
     assert rows[0]["proposed_by"] == "structural"
+    assert refines == 0, "structural must not emit refines (W1/E2)"
 
 
 def test_t2_1_2_write_contradicts_edge(tmp_path):
-    """T2.1.2: Contradicts edge via dice similarity + different kinds."""
+    """T2.1.2 (W1 语义反转): dice 相似 + 异 kind → co_occurs, 不再是 contradicts。
+
+    原契约:相似 body + 不同 kind → contradicts。词元重叠证明不了矛盾,
+    contradicts 归 LLM 提名(crystallization_gate 的矛盾消费不受影响 —
+    它只读边,不管来源)。
+    """
     store, index = _store(tmp_path)
     body = "The deployment was on 2026-05-27 at 08:44 UTC with codename prod-beta."
     _seed_canonical_crystallized(store, [
@@ -788,12 +801,18 @@ def test_t2_1_2_write_contradicts_edge(tmp_path):
     assert result["proposed_count"] >= 1
 
     conn2 = _conn(index)
-    rows = conn2.execute(
-        "select * from memory_edges where relation_type = 'contradicts'"
-    ).fetchall()
+    contradicts = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'contradicts'"
+    ).fetchone()[0]
+    co_occurs = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'co_occurs'"
+    ).fetchone()[0]
     conn2.close()
-    assert len(rows) >= 1, (
-        f"Expected contradicts edge. Proposer result: {result}"
+    assert contradicts == 0, (
+        f"structural must not emit contradicts (W1/E2). Result: {result}"
+    )
+    assert co_occurs >= 1, (
+        f"similar bodies should still link as co_occurs. Result: {result}"
     )
 
 
@@ -978,7 +997,7 @@ def test_t2_1_7_proposer_detects_co_occurs_temporal(tmp_path):
 
 
 def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
-    """T2.1.8: Similar body text with same kind → refines (not contradicts)."""
+    """T2.1.8 (W1 语义反转): 同 kind 相似 body → co_occurs, 不再是 refines。"""
     store, index = _store(tmp_path)
     body = "The system deployment was verified on 2026-06-01 with all tests green."
     _seed_canonical_crystallized(store, [
@@ -1016,14 +1035,13 @@ def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
     ).fetchall()
     conn2.close()
     types = {str(r[0]): r[1] for r in rows}
-    # With same kind + same body, should produce refines, not contradicts
-    assert types.get("refines", 0) >= 1, (
-        f"Expected refines edge for same-kind similarity. Got types: {types}"
+    # W1/E2: similarity relatedness is co_occurs; refines/contradicts are
+    # LLM-only vocabulary now.
+    assert types.get("co_occurs", 0) >= 1, (
+        f"Expected co_occurs edge for same-kind similarity. Got types: {types}"
     )
-    # contradicts should only come from different kinds with similar body
-    # Since both are 'preference', no contradicts
-    if "contradicts" in types:
-        assert types["contradicts"] == 0
+    assert types.get("refines", 0) == 0
+    assert types.get("contradicts", 0) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1739,3 +1757,313 @@ def test_graph_layer_injection_lines_formats_edges(tmp_path):
     assert any("nonexistent_cry_999" in line for line in lines)
     # seen should contain the successfully resolved record
     assert ("crystallized_record", record_id) in seen
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W0 (E7) — 边状态迁移持久化:迁移必须写回 canonical JSONL,在重投影后存活
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_w0_transition_survives_index_sync(tmp_path):
+    """E7 counterfactual: approve/reject 迁移必须在 index_sync 重投影后保持。
+
+    无 W0 修复时:transition 只更新 SQLite,sync_from_store 从 edges.jsonl
+    clear+全量重投影 → 状态回滚到 candidate → 本测试必红。
+    """
+    store, index = _store(tmp_path)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record",
+        from_record_id="cry_w0_a",
+        to_record_type="crystallized_record",
+        to_record_id="cry_w0_b",
+        relation_type="co_occurs",
+        weight=0.9,
+        proposed_by="structural",
+    )
+    assert edge and edge["state"] == "candidate"
+
+    updated = index.transition_edge_state(edge["edge_id"], "owner_eligible")
+    assert updated and updated["state"] == "owner_eligible"
+
+    index.sync_from_store(store)  # 30 分钟 cron lane 的重投影路径
+
+    row = index.get_edge(edge["edge_id"])
+    assert row is not None
+    assert row["state"] == "owner_eligible", (
+        "edge state transition was reverted by index_sync re-projection "
+        "(E7: transition not persisted to graph/edges.jsonl)"
+    )
+
+
+def test_w0_transition_invalidated_survives_rebuild(tmp_path):
+    """E7 counterfactual (reject 方向 + rebuild 路径): invalidated 必须存活全量重建。"""
+    store, index = _store(tmp_path)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record",
+        from_record_id="cry_w0_c",
+        to_record_type="crystallized_record",
+        to_record_id="cry_w0_d",
+        relation_type="refines",
+        weight=0.5,
+        proposed_by="structural",
+    )
+    updated = index.transition_edge_state(edge["edge_id"], "invalidated")
+    assert updated and updated["state"] == "invalidated"
+
+    index.rebuild_from_store(store)
+
+    row = index.get_edge(edge["edge_id"])
+    assert row is not None
+    assert row["state"] == "invalidated"
+    assert row.get("invalidated_at"), "invalidated_at must survive re-projection"
+
+
+def test_w0_projection_last_writer_wins_per_edge_id(tmp_path):
+    """守卫:W0 依赖的投影语义——同 edge_id 多行时,文件序最后一行胜出。
+
+    这是既有行为(_index_edges 按行序 insert-or-replace on edge_id 主键),
+    本测试将其钉死:若未来投影改为首行胜出或报错,W0 的追加更新机制即失效。
+    """
+    store, index = _store(tmp_path)
+    edges_path = store.roots.memory_os_root / "graph" / "edges.jsonl"
+    edges_path.parent.mkdir(parents=True, exist_ok=True)
+    base = {
+        "edge_id": "edge_lww_1",
+        "from_record_type": "crystallized_record",
+        "from_record_id": "cry_lww_a",
+        "to_record_type": "crystallized_record",
+        "to_record_id": "cry_lww_b",
+        "relation_type": "co_occurs",
+        "weight": 0.8,
+        "created_at": "2026-08-06T00:00:00+00:00",
+        "source_event_id": "",
+        "state": "candidate",
+        "invalidated_at": None,
+        "proposed_by": "structural",
+    }
+    newer = dict(base)
+    newer["state"] = "active"
+    with edges_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(base, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(newer, ensure_ascii=False) + "\n")
+
+    index.rebuild_from_store(store)
+
+    row = index.get_edge("edge_lww_1")
+    assert row is not None
+    assert row["state"] == "active", "projection must be last-writer-wins per edge_id"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W1 (E2/E3) — 去重下沉写入口 + structural 收回语义提名权 + 配对去偏置
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _bulk_seed_edges(store, index, count: int, *, prefix: str) -> None:
+    """Seed many non-invalidated candidate edges (JSONL + DB, production shape)."""
+    edges_path = store.roots.memory_os_root / "graph" / "edges.jsonl"
+    edges_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(index.roots.index_path))
+    rows = []
+    lines = []
+    for i in range(count):
+        edge = {
+            "edge_id": f"edge_{prefix}_{i}",
+            "from_record_type": "crystallized_record",
+            "from_record_id": f"cry_{prefix}_{i}_a",
+            "to_record_type": "crystallized_record",
+            "to_record_id": f"cry_{prefix}_{i}_b",
+            "relation_type": "co_occurs",
+            "weight": 0.5,
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "source_event_id": "",
+            "state": "candidate",
+            "invalidated_at": None,
+            "proposed_by": "llm",
+        }
+        lines.append(json.dumps(edge, ensure_ascii=False) + "\n")
+        rows.append(tuple(edge[k] for k in (
+            "edge_id", "from_record_type", "from_record_id", "to_record_type",
+            "to_record_id", "relation_type", "weight", "created_at",
+            "source_event_id", "state", "invalidated_at", "proposed_by")))
+    with edges_path.open("a", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    conn.executemany(
+        "insert or replace into memory_edges (edge_id, from_record_type, from_record_id,"
+        " to_record_type, to_record_id, relation_type, weight, created_at,"
+        " source_event_id, state, invalidated_at, proposed_by)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_w1_write_boundary_rejects_duplicate_triple(tmp_path):
+    """E2 counterfactual:同 (from,to,relation) 非 invalidated 三元组重复写入必须被拒。
+
+    无 W1 修复时 write_governed_edge 无任何去重检查 → 第二次写入成功 → 必红。
+    """
+    store, index = _store(tmp_path)
+    first = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_dup_a",
+        to_record_type="crystallized_record", to_record_id="cry_dup_b",
+        relation_type="refines", weight=0.7, proposed_by="llm",
+    )
+    assert first and first.get("edge_id") and not first.get("skipped_duplicate")
+
+    second = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_dup_a",
+        to_record_type="crystallized_record", to_record_id="cry_dup_b",
+        relation_type="refines", weight=0.9, proposed_by="llm",
+    )
+    assert second.get("skipped_duplicate") is True, (
+        f"duplicate triple must be rejected at the write boundary, got {second}"
+    )
+    conn = _conn(index)
+    n = conn.execute(
+        "select count(*) from memory_edges where from_record_id='cry_dup_a'"
+    ).fetchone()[0]
+    conn.close()
+    assert n == 1
+    # canonical ledger must not have grown either
+    edges_path = store.roots.memory_os_root / "graph" / "edges.jsonl"
+    dup_lines = [
+        l for l in edges_path.read_text(encoding="utf-8").splitlines()
+        if "cry_dup_a" in l
+    ]
+    assert len(dup_lines) == 1
+
+
+def test_w1_write_boundary_pair_dedup_for_structural(tmp_path):
+    """structural 按 (from,to) 无向配对去重;非 structural 仍按三元组。"""
+    store, index = _store(tmp_path)
+    first = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_pair_a",
+        to_record_type="crystallized_record", to_record_id="cry_pair_b",
+        relation_type="co_occurs", weight=0.6, proposed_by="structural",
+    )
+    assert first and not first.get("skipped_duplicate")
+
+    # structural:同配对不同关系 → 仍拒(配对级)
+    second = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_pair_a",
+        to_record_type="crystallized_record", to_record_id="cry_pair_b",
+        relation_type="depends_on", weight=1.0, proposed_by="structural",
+    )
+    assert second.get("skipped_duplicate") is True
+
+    # structural:反方向同配对 → 仍拒(无向)
+    third = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_pair_b",
+        to_record_type="crystallized_record", to_record_id="cry_pair_a",
+        relation_type="co_occurs", weight=0.6, proposed_by="structural",
+    )
+    assert third.get("skipped_duplicate") is True
+
+    # llm:同配对不同关系 → 允许(三元组级,语义类型有意义)
+    fourth = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_pair_a",
+        to_record_type="crystallized_record", to_record_id="cry_pair_b",
+        relation_type="contradicts", weight=0.8, proposed_by="llm",
+    )
+    assert fourth and fourth.get("edge_id") and not fourth.get("skipped_duplicate")
+
+
+def test_w1_dedup_survives_beyond_1000_edges(tmp_path):
+    """E2 生产同款反事实:存量 >1000 条时,去重不得因查询上限被超穿。
+
+    旧机制(proposer 侧 query_edges limit=1000)在 >1000 存量下漏检;
+    写入口去重无 limit,必须仍拒。
+    """
+    store, index = _store(tmp_path)
+    _bulk_seed_edges(store, index, 1100, prefix="bulk")
+
+    dup = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_bulk_1050_a",
+        to_record_type="crystallized_record", to_record_id="cry_bulk_1050_b",
+        relation_type="co_occurs", weight=0.5, proposed_by="llm",
+    )
+    assert dup.get("skipped_duplicate") is True, (
+        "dedup must not be defeated by backlog size >1000"
+    )
+
+
+def test_w1_structural_no_longer_proposes_refines_or_contradicts(tmp_path):
+    """E2 语义收权反事实:structural 相似度不得再提名 refines/contradicts。
+
+    同 kind 相似 body → co_occurs(旧行为 refines);
+    异 kind 相似 body → co_occurs(旧行为 contradicts)。
+    """
+    store, index = _store(tmp_path)
+    body = "The deployment pipeline was verified with all governance gates green."
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_sem_a", "kind": "preference", "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body},
+        {"id": "cry_sem_b", "kind": "preference", "created_at": "2026-06-20T12:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body},
+        {"id": "cry_sem_c", "kind": "fact", "created_at": "2026-07-01T10:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body},
+    ])
+    index.rebuild_from_store(store)
+
+    from plugins.memory.memory_os.structural_edge_proposer import run_structural_proposer
+    result = run_structural_proposer(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok"
+
+    conn = _conn(index)
+    types = {
+        str(r[0]): r[1]
+        for r in conn.execute(
+            "select relation_type, count(*) from memory_edges"
+            " where proposed_by='structural' group by relation_type"
+        ).fetchall()
+    }
+    conn.close()
+    assert types.get("refines", 0) == 0, f"structural must not propose refines: {types}"
+    assert types.get("contradicts", 0) == 0, f"structural must not propose contradicts: {types}"
+    assert types.get("co_occurs", 0) >= 1, f"similarity should map to co_occurs: {types}"
+
+
+def test_w1_pair_debias_unedged_records_first(tmp_path):
+    """E3 counterfactual:未建边记录必须优先配对,旧的 created_at 升序会饿死新记录。
+
+    old_a/old_b(更早创建)之间已有边;new_c/new_d(更晚创建)无边。
+    max_pairs=1 时,检查的唯一配对必须是未建边的 (new_c, new_d)。
+    旧排序下唯一配对是 (old_a, old_b) → 去重跳过 → 0 新边 → 必红。
+    """
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_old_a", "kind": "preference", "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": [], "tags": [], "body": "old record aaaa"},
+        {"id": "cry_old_b", "kind": "preference", "created_at": "2026-06-01T10:30:00Z",
+         "source_event_ids": [], "tags": [], "body": "old record bbbb"},
+        {"id": "cry_new_c", "kind": "preference", "created_at": "2026-08-01T10:00:00Z",
+         "source_event_ids": [], "tags": [], "body": "new record cccc"},
+        {"id": "cry_new_d", "kind": "preference", "created_at": "2026-08-01T10:20:00Z",
+         "source_event_ids": [], "tags": [], "body": "new record dddd"},
+    ])
+    index.rebuild_from_store(store)
+    seeded = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_old_a",
+        to_record_type="crystallized_record", to_record_id="cry_old_b",
+        relation_type="co_occurs", weight=0.6, proposed_by="structural",
+    )
+    assert seeded and seeded.get("edge_id")
+
+    from plugins.memory.memory_os.structural_edge_proposer import run_structural_proposer
+    result = run_structural_proposer(
+        str(index.roots.index_path), index=index, max_pairs=1,
+    )
+    assert result["status"] == "ok"
+
+    conn = _conn(index)
+    new_pair = conn.execute(
+        "select count(*) from memory_edges where from_record_id='cry_new_c'"
+        " and to_record_id='cry_new_d'"
+    ).fetchone()[0]
+    conn.close()
+    assert new_pair >= 1, (
+        "with max_pairs=1 the single examined pair must be the unedged records "
+        f"(new_c,new_d); got result={result}"
+    )

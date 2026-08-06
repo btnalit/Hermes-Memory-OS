@@ -189,29 +189,33 @@ def run_vector_proposer(
             "pair_count": 0,
         }
 
-    # ── 2. Collect existing edges for dedup ──────────────────────────────
+    # ── 2. Collect existing edges (optimization only — W1/E2) ────────────
+    # The dedup AUTHORITY lives at the write boundary (write_governed_edge);
+    # this uncapped scan only avoids recomputing similarity for known pairs.
+    # The previous query_edges pre-check was capped at limit=2000 and would
+    # have been silently defeated by backlog growth, exactly like the
+    # structural proposer's limit=1000 was on production.
     existing_edges: set[str] = set()
-    if index and hasattr(index, "query_edges"):
-        try:
-            all_ids = [r["id"] for r in records]
-            for state_filter in ("candidate", "active"):
-                raw = index.query_edges(
-                    all_ids, depth=1, state=state_filter, limit=2000
-                )
-                if isinstance(raw, list):
-                    for e in raw:
-                        key = (
-                            f"{e.get('from_record_id','')}:"
-                            f"{e.get('to_record_id','')}:"
-                            f"{e.get('relation_type','')}"
-                        )
-                        existing_edges.add(key)
-        except Exception:
-            pass  # fail-open
+    try:
+        rows_e = conn.execute(
+            "select from_record_id, to_record_id, relation_type"
+            " from memory_edges where state != 'invalidated'"
+        ).fetchall()
+        for row_e in rows_e:
+            existing_edges.add(f"{row_e[0]}:{row_e[1]}:{row_e[2]}")
+    except sqlite3.Error:
+        pass  # fail-open
+
+    # W1/E3 pair de-bias: records this proposer has not yet linked come first.
+    from .structural_edge_proposer import _order_records_unedged_first
+    records = _order_records_unedged_first(
+        records, index_path, proposed_by="vector"
+    )
 
     # ── 3. Build pairs and compute similarity ────────────────────────────
     pairs = 0
     proposed = 0
+    dedup_skipped = 0
 
     for i in range(len(records)):
         if pairs >= max_pairs:
@@ -258,7 +262,9 @@ def run_vector_proposer(
                     proposed_by="vector",
                     state="candidate",
                 )
-                if edge:
+                if edge.get("skipped_duplicate"):
+                    dedup_skipped += 1
+                elif edge:
                     proposed += 1
 
     conn.close()
@@ -272,6 +278,7 @@ def run_vector_proposer(
         "record_count": len(records),
         "pair_count": pairs,
         "proposed_count": proposed,
+        "dedup_skipped": dedup_skipped,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
     }

@@ -8279,3 +8279,125 @@ def test_monitor_adapter_probe_counts_take_precedence(tmp_path):
     assert summary["classification_source"] == "hermes_cron_adapter_probe"
     assert summary["memory_os_owned_wrapped_count"] == 42
     assert summary["memory_os_like_unregistered_count"] == 7
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W6 — 图谱治理状态 INFO + 输出型 knob override 过期可见性
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_w6_graph_governance_state_info_entry():
+    """W6 counterfactual:proposer/晋升的每轮产出状态必须进 monitor INFO。
+
+    E4 的观测教训:llm proposer skipped 一个月无人可见 — 图谱 lane 的
+    status/reason/counters 必须不重跑、不读源码即可读到。
+    """
+    edge_steps = {
+        "structural_edge_proposer": {"status": "ok", "reason": "", "proposed_count": 2, "dedup_skipped": 5},
+        "llm_edge_proposer": {"status": "skipped", "reason": "llm_runtime_unavailable", "code": "hermes_runtime_adapter_unavailable", "proposed_count": 0},
+        "vector_edge_proposer": {"status": "ok", "reason": "", "proposed_count": 1},
+        "edge_provenance": {"status": "ok", "outcome": "produced", "proposed_count": 3},
+        "edge_promotion": {"status": "ok", "outcome": "promoted", "promoted_count": 10, "ttl_invalidated_count": 0},
+    }
+    snapshot = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": {
+            "status": "ok",
+            "missing_required_steps": [],
+            "omitted_step_count": 0,
+            "tail_step_omitted_count": 0,
+            "latest_step_count": 39,
+            "edge_step_results": edge_steps,
+        },
+    })
+    entry = next(
+        item for item in snapshot["info"]
+        if item["code"] == "v2_graph_governance_state"
+    )
+    assert entry["value"]["llm_edge_proposer"]["reason"] == "llm_runtime_unavailable"
+    assert entry["value"]["edge_promotion"]["promoted_count"] == 10
+
+    # 旧报告(无 edge_step_results)不得捏造测量
+    legacy = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": {
+            "status": "ok",
+            "missing_required_steps": [],
+            "omitted_step_count": 0,
+            "tail_step_omitted_count": 0,
+            "latest_step_count": 37,
+        },
+    })
+    assert not any(
+        item["code"] == "v2_graph_governance_state" for item in legacy["info"]
+    ), "a report predating edge_step_results must not fabricate a measurement"
+
+
+def test_w6_output_knob_override_expiry_visibility():
+    """E5 counterfactual:输出型 knob 的 enabled override 静默过期必须 WARN。
+
+    生产事故:graph_layer_injection_enabled 的 override 2026-07-01 过期,
+    无任何监控项报告 — 图谱注入静默关闭一个月无人知晓。
+    """
+    expired = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "output_knob_override_state": {
+            "collected": True,
+            "knobs": {
+                "graph_layer_injection_enabled": {
+                    "present": True,
+                    "override_value": True,
+                    "expires_at": "2026-07-01T07:58:15+00:00",
+                    "expired": True,
+                    "state": "active",
+                },
+            },
+        },
+    })
+    assert any(
+        item["code"] == "v2_output_knob_override_expired" for item in expired["warn"]
+    ), "an enabled-then-expired output knob override must WARN"
+    assert any(
+        item["code"] == "v2_output_knob_override_state" for item in expired["info"]
+    )
+
+    # 未过期(或无 override)→ 仅 INFO,不 WARN
+    healthy = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "output_knob_override_state": {
+            "collected": True,
+            "knobs": {
+                "graph_layer_injection_enabled": {
+                    "present": True,
+                    "override_value": True,
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "expired": False,
+                    "state": "active",
+                },
+            },
+        },
+    })
+    assert not any(
+        item["code"] == "v2_output_knob_override_expired" for item in healthy["warn"]
+    )
+    assert any(
+        item["code"] == "v2_output_knob_override_state" for item in healthy["info"]
+    )
+
+    # 采集失败 → 不捏造测量,但以 WARN 显式上报失败(never-silent)
+    failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "output_knob_override_state": {"collected": False, "error_code": "OSError"},
+    })
+    assert not any(
+        item["code"] == "v2_output_knob_override_state" for item in failed["info"]
+    )
+    assert any(
+        item["code"] == "v2_output_knob_override_collection_failed"
+        for item in failed["warn"]
+    )
+
+    # 词表守卫:两个新 WARN 码必须在 clean-host 分类表注册
+    # (BJ 教训:未注册的 WARN 在 clean-host 落 unclassified 即 FAIL)。
+    for code in ("v2_output_knob_override_expired", "v2_output_knob_override_collection_failed"):
+        assert code in monitor.CLEAN_HOST_WARN_CLASSIFICATIONS, code

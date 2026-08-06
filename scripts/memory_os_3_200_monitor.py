@@ -286,6 +286,16 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "deployed cron registry snapshot resolves fewer group members than the installed registry defines - regenerate the snapshot (install/onboarding step)",
         "production_behavior": "warn_if_production",
     },
+    "v2_output_knob_override_expired": {
+        "classification": "known_optional",
+        "reason": "an output-affecting knob override expired while enabled - owner decides renewal; clean hosts have no overrides so this only fires where one was configured",
+        "production_behavior": "warn_if_production",
+    },
+    "v2_output_knob_override_collection_failed": {
+        "classification": "known_optional",
+        "reason": "output knob override ledger could not be read - collection failure surfaced instead of a fabricated zero",
+        "production_behavior": "warn_if_production",
+    },
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
         "reason": "left_brain_pipeline is present but still reports warning on clean-host warmup",
@@ -1674,6 +1684,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "latest_step_count": cognitive_loop_step_evidence.get("latest_step_count"),
                     }
                 )
+            # W6: graph governance lane state — status/reason/counters of the
+            # five edge steps, readable without re-running the loop or reading
+            # source (the E4 observability lesson: llm_edge_proposer skipped
+            # for a month with the reason swallowed).  Deliberately ungraded
+            # INFO — a skip may be benign (no records) and the lane's own
+            # error surfaces belong to the step contract.  Reports predating
+            # edge_step_results publish nothing (no fabricated measurement).
+            edge_step_results = cognitive_loop_step_evidence.get("edge_step_results")
+            if isinstance(edge_step_results, dict) and edge_step_results:
+                info.append({
+                    "code": "v2_graph_governance_state",
+                    "value": edge_step_results,
+                })
         elif clean_host:
             warn.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
         else:
@@ -1683,6 +1706,42 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             warn.append({"code": "cognitive_loop_step_evidence_missing"})
         else:
             fail.append({"code": "cognitive_loop_step_evidence_missing"})
+
+    # ── W6 (E5): output-affecting knob override expiry visibility ─────────
+    # graph_layer_injection_enabled's enabled override expired 2026-07-01 and
+    # nothing reported it — graph injection went silently dark for a month.
+    # An enabled-then-expired override on an output-affecting knob is a WARN
+    # (the flip changes user-visible behavior with no file write and no owner
+    # action); the full override state rides as INFO.  A failed collection is
+    # itself a WARN, never a fabricated zero (same contract as
+    # v2_exposure_monitor_collection_failed).
+    output_knob_override_state = snapshot.get("output_knob_override_state")
+    if isinstance(output_knob_override_state, dict) and output_knob_override_state:
+        if output_knob_override_state.get("collected") is True:
+            _ok_knobs = output_knob_override_state.get("knobs")
+            _ok_knobs = _ok_knobs if isinstance(_ok_knobs, dict) else {}
+            info.append({
+                "code": "v2_output_knob_override_state",
+                "value": _ok_knobs,
+            })
+            _expired_enabled = [
+                name for name, row in _ok_knobs.items()
+                if isinstance(row, dict)
+                and row.get("present") is True
+                and bool(row.get("override_value"))
+                and row.get("expired") is True
+            ]
+            if _expired_enabled:
+                warn.append({
+                    "code": "v2_output_knob_override_expired",
+                    "knobs": _expired_enabled,
+                    "value": {name: _ok_knobs.get(name) for name in _expired_enabled},
+                })
+        else:
+            warn.append({
+                "code": "v2_output_knob_override_collection_failed",
+                "value": output_knob_override_state,
+            })
 
     _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
 
@@ -7102,6 +7161,31 @@ def cognitive_loop_step_evidence():
       for step, status in tail_step_statuses.items()
       if isinstance(status, dict) and status.get("status") == "omitted"
     ]
+    # W6: per-run production state of the graph governance steps —
+    # status/reason/counters readable from the monitor without re-running
+    # the loop (the E4 lesson: llm skipped for a month, reason swallowed).
+    _edge_step_keys = (
+      "structural_edge_proposer", "llm_edge_proposer", "vector_edge_proposer",
+      "edge_provenance", "edge_promotion",
+    )
+    _edge_fields = (
+      "status", "reason", "code", "outcome", "record_count", "pair_count",
+      "proposed_count", "auto_active_count", "dedup_skipped",
+      "write_failed_count", "candidate_count", "promoted_count",
+      "ttl_invalidated_count", "failed_count", "scanned_ref_count",
+      "duration_ms", "error",
+    )
+    edge_step_results = {}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("step") or "")
+        if name not in _edge_step_keys:
+            continue
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        edge_step_results[name] = {
+          key: result.get(key) for key in _edge_fields if key in result
+        }
     return {
       "schema_version": "memory-os.cognitive_loop_step_evidence.v0",
       "status": "ok",
@@ -7116,7 +7200,54 @@ def cognitive_loop_step_evidence():
       "omitted_step_count": omitted_step_count,
       "tail_step_omitted": tail_step_omitted,
       "tail_step_omitted_count": len(tail_step_omitted),
+      "edge_step_results": edge_step_results,
     }
+
+
+def output_knob_override_state():
+    # W6 (E5): expiry visibility for output-affecting knob overrides.
+    # graph_layer_injection_enabled's enabled override expired 2026-07-01
+    # with no monitor signal — injection went silently dark.
+    _output_knobs = ("graph_layer_injection_enabled",)
+    path = os.path.join(_hermes_home, "memory-os/system/knob_overrides.jsonl")
+    try:
+        rows = _read_jsonl(path)
+    except Exception as exc:
+        return {"collected": False, "error_code": type(exc).__name__}
+    latest_by_knob = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        knob = str(row.get("knob") or "")
+        if knob in _output_knobs:
+            latest_by_knob[knob] = row
+    now = datetime.now(timezone.utc)
+    knobs = {}
+    for knob in _output_knobs:
+        row = latest_by_knob.get(knob)
+        if not row:
+            knobs[knob] = {"present": False}
+            continue
+        expires_at = str(row.get("expires_at") or "").strip()
+        expired = False
+        if expires_at:
+            try:
+                _exp = expires_at[:-1] + "+00:00" if expires_at.endswith("Z") else expires_at
+                parsed = datetime.fromisoformat(_exp)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                expired = parsed <= now
+            except ValueError:
+                expired = False
+        knobs[knob] = {
+          "present": True,
+          "override_value": row.get("override_value"),
+          "expires_at": expires_at,
+          "expired": expired,
+          "state": str(row.get("state") or ""),
+          "ts": str(row.get("ts") or ""),
+        }
+    return {"collected": True, "knobs": knobs}
 
 def module_cadence_summary():
     reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/module_cadence/reports.jsonl"))
@@ -8823,6 +8954,7 @@ print(json.dumps({
   "shell_alias_no_env": shell_alias_no_env(),
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "cognitive_loop_step_evidence": cognitive_loop_step_evidence(),
+  "output_knob_override_state": output_knob_override_state(),
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
   "owner_review": owner_review,

@@ -1128,6 +1128,26 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
         from hermes_cli.config import load_config
         from hermes_cli.runtime_provider import resolve_runtime_provider
     except Exception:
+        # ── W5/E4: evict a phantom namespace `agent` package ───────────
+        # 43da529 renamed agent/ -> memory_os_agent/, but a checkout can
+        # keep an untracked agent/__pycache__ shell directory behind — an
+        # importable NAMESPACE package.  The provider-ABC probe import
+        # (memory_os/__init__) caches it in sys.modules, and a cached
+        # namespace package permanently blocks the real hermes-agent
+        # regular package: its dynamic __path__ only collects portions
+        # WITHOUT __init__.py, so `import agent.portal_tags` inside
+        # hermes_cli fails even after the agent root joins sys.path.
+        # Measured on production: llm_edge_proposer skipped on every run
+        # since 2026-07-07 with hermes_runtime_import_failed.  Only
+        # phantoms are evicted (__file__ is None) — a real host agent
+        # package imported inside the Hermes process is never touched.
+        for _name in [
+            n for n in list(sys.modules)
+            if n == "agent" or n.startswith("agent.")
+        ]:
+            _mod = sys.modules.get(_name)
+            if _mod is not None and getattr(_mod, "__file__", None) is None:
+                del sys.modules[_name]
         for candidate in (
             os.environ.get("HERMES_AGENT_ROOT"),
             "/usr/local/lib/hermes-agent",

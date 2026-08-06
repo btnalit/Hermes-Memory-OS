@@ -111,39 +111,54 @@ def test_entity_index_table_created(tmp_path: Path) -> None:
 
 
 def test_extract_paths_from_body() -> None:
-    """Verify path extraction from text."""
+    """W9 语义反转:path 碎片不再入实体索引。
+
+    生产实测:25 条结晶记录抽出 24 个实体,绝大多数为 /.git-credentials、
+    /main 这类路径正则碎片 — 撑不起'实体图'且污染 shared_entity 边。
+    路径/URL/UUID/IP 是标识符,不是实体;实体索引只收语义类。
+    """
     entities = extract_entities(
         "The file is at /home/user/projects/hermes/config.json",
         record_id="rec_001",
     )
-    paths = [e["entity_text"] for e in entities if "/" in e["entity_text"]]
-    assert any("/home/user/projects/hermes/config.json" in p for p in paths), (
-        f"expected path in extracted entities: {paths}"
-    )
+    assert not any(
+        e["entity_class"] in ("path", "url", "uuid", "ip") for e in entities
+    ), f"identifier classes must be filtered out: {entities}"
 
 
 def test_extract_urls_from_body() -> None:
-    """Verify URL extraction."""
+    """W9 语义反转:URL 不再入实体索引(同 path)。"""
     entities = extract_entities(
         "Visit https://example.com/path?q=test for details.",
         record_id="rec_001",
     )
-    urls = [e["entity_text"] for e in entities if e["entity_text"].startswith("http")]
-    assert "https://example.com/path?q=test" in urls, (
-        f"expected URL in extracted entities: {urls}"
-    )
+    assert not any(
+        e["entity_text"].startswith("http") for e in entities
+    ), f"URLs must be filtered out: {entities}"
 
 
 def test_extract_uuids_from_body() -> None:
-    """Verify UUID extraction."""
+    """W9 语义反转:UUID 不再入实体索引(同 path)。"""
     entities = extract_entities(
         "UUID 550e8400-e29b-41d4-a716-446655440000 was referenced.",
         record_id="rec_001",
     )
-    uuids = [e["entity_text"] for e in entities if "-" in e["entity_text"]]
-    assert "550e8400-e29b-41d4-a716-446655440000" in uuids, (
-        f"expected UUID in extracted entities: {uuids}"
+    assert not any(
+        "550e8400" in e["entity_text"] for e in entities
+    ), f"UUIDs must be filtered out: {entities}"
+
+
+def test_w9_proper_nouns_survive_identifier_filter() -> None:
+    """W9 反事实:过滤标识符类的同时,专名必须保留(不得一刀切清空)。"""
+    entities = extract_entities(
+        "Alice Bob deployed /opt/hermes/config.json to https://example.com "
+        "with UUID 550e8400-e29b-41d4-a716-446655440000 for Memory State Overlay.",
+        record_id="rec_001",
     )
+    texts = [e["entity_text"] for e in entities]
+    assert "Alice Bob" in texts, f"proper nouns must survive: {texts}"
+    assert "Memory State Overlay" in texts
+    assert all(e["entity_class"] == "proper_noun" for e in entities), entities
 
 
 def test_entity_deduplication() -> None:
@@ -180,9 +195,12 @@ def test_empty_body_returns_empty() -> None:
 
 
 def test_index_rebuild_populates_entities(tmp_path: Path) -> None:
-    """Rebuild -> entity_index has rows for crystallized records."""
+    """Rebuild -> entity_index has rows for crystallized records.
+
+    W9 语义反转:索引只收语义类实体;path/url/uuid 碎片不得入索引。
+    """
     body = (
-        "Alice reviewed the proposal at /var/log/hermes/audit.log. "
+        "Alice Chen reviewed the proposal at /var/log/hermes/audit.log. "
         "See https://docs.example.com for UUID 550e8400-e29b-41d4-a716-446655440000."
     )
     store, index = _build_index(tmp_path, [
@@ -192,11 +210,15 @@ def test_index_rebuild_populates_entities(tmp_path: Path) -> None:
     try:
         row_count = conn.execute("select count(*) from entity_index").fetchone()[0]
         assert row_count > 0, f"expected >0 entity_index rows, got {row_count}"
-        # Verify specific entity types are present
+        # W9: identifier-class shards must NOT be indexed
         paths = conn.execute(
             "select entity_text from entity_index where entity_text like '/%'"
         ).fetchall()
-        assert len(paths) > 0, f"expected path entities: {paths}"
+        assert len(paths) == 0, f"path shards must be filtered (W9): {paths}"
+        names = conn.execute(
+            "select entity_text from entity_index where entity_text = 'Alice Chen'"
+        ).fetchall()
+        assert len(names) == 1, "proper nouns must be indexed"
     finally:
         conn.close()
 
@@ -259,7 +281,7 @@ def test_index_sync_updates_entities(tmp_path: Path) -> None:
 
 
 def test_shared_entity_pairs(tmp_path: Path) -> None:
-    """Verify pairs found for records sharing entities."""
+    """Verify pairs found for records sharing entities (W9: 专名共享,非 path)。"""
     body_a = "Project Alpha uses /shared/path and UUID 550e8400-e29b-41d4-a716-446655440000."
     body_b = "Project Alpha deployment at /shared/path references same UUID 550e8400-e29b-41d4-a716-446655440000."
     store, index = _build_index(tmp_path, [
@@ -277,9 +299,9 @@ def test_shared_entity_pairs(tmp_path: Path) -> None:
         )
         assert found, f"expected pair (rec_001, rec_002) in {pairs}"
 
-        # Inverted index: lookup by entity_id
+        # Inverted index: lookup by entity_id (W9: 共享实体是专名,path 不入索引)
         entity_row = conn.execute(
-            "select entity_id from entity_index where entity_text = '/shared/path' limit 1"
+            "select entity_id from entity_index where entity_text = 'Project Alpha' limit 1"
         ).fetchone()
         assert entity_row is not None
         eid = str(entity_row[0])
@@ -547,14 +569,17 @@ class TestEntityExtractionWithClass:
             assert isinstance(ent["weight"], float)
 
     def test_path_entity_has_low_weight(self):
+        """W9 语义反转:path 类不再进入抽取结果;分类器契约本身保持。"""
+        from plugins.memory.memory_os.entity_extractor import classify_entity
+
+        # 分类器词表不变(未来类可显式 opt-in)
+        assert classify_entity("/opt/hermes/config.json") == ("path", 0.4)
+        # 抽取结果不含 path 类
         entities = extract_entities(
             "The config is at /opt/hermes/config.json",
             record_id="rec_001",
         )
-        path_entities = [e for e in entities if e["entity_class"] == "path"]
-        assert len(path_entities) >= 1
-        for e in path_entities:
-            assert e["weight"] == 0.4, f"path entity should have weight=0.4, got {e}"
+        assert not [e for e in entities if e["entity_class"] == "path"], entities
 
     def test_proper_noun_entity_has_high_weight(self):
         entities = extract_entities(
@@ -723,11 +748,12 @@ class TestEntityIndexSchemaParityWithRebuild:
             }
         finally:
             conn.close()
-        assert any(w >= 0.9 for w in weights), (
+        # W9 后索引只剩 proper_noun(0.9);flatten 缺陷的表现是列默认 0.7。
+        assert 0.9 in weights, (
             f"sync must not flatten proper_noun weight to the column default: {weights}"
         )
-        assert any(w <= 0.4 for w in weights), (
-            f"sync must not flatten path weight to the column default: {weights}"
+        assert 0.7 not in weights, (
+            f"column-default weight means sync flattened real weights: {weights}"
         )
 
     def test_sync_migrates_legacy_six_column_table(self, tmp_path):

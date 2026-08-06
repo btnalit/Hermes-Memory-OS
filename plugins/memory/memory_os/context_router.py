@@ -425,6 +425,10 @@ def _route_exclusion_reason(section: ContextSection, route: str) -> str:
     if route == "casual_continuity" and (
         name == "current foreground task"
         or name == "working memory"
+        # W7/S6 (owner 决策 2026-08-06):Overlay 的 active_projects 携带
+        # 锚点首 200 字符 — 闲聊路由既然主动屏蔽前台任务,Overlay 不得
+        # 开侧门(W7 覆盖修复使其永远新鲜,不堵则泄漏稳定化)。
+        or name == "memory state overlay"
         or "diagnostic" in name
         or "candidate" in name
         or name == "crystallized memory"
