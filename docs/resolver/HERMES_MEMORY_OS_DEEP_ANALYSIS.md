@@ -849,6 +849,7 @@ Hermes-Memory-OS/
 | **E4 llm 通道环境性死亡** | `_resolve_hermes_default_runtime` 在 systemd wrapper 环境失败：`hermes_runtime_import_failed`（宿主 `agent.portal_tags` 缺失），已在 /opt 直测复现；且 cognitive loop step 包装器**不透传 skip reason**——报告只见 skipped 不见为什么（Completion Is Not Output 形态） | **[生产实测]** 07-07 后 0 条 llm 边；**[代码]** `cognitive_loop.py:1019-1028` 无 reason 字段 |
 | **E5 消费端静默关闭** | `graph_layer_injection_enabled` override 仅存活 06-24→07-01 即过期，之后回默认 False；**无任何监控项报告输出型 knob 的 override 过期** | **[生产实测]** knob 账本 + shadow 账本 4 条全在过期后 |
 | **E6 实体层空转** | 25 条结晶记录抽出 24 个实体且多为路径碎片；EntityGraphRetriever 只在 shadow facade 里跑（注意：与已修的 M2/R2 schema 漂移不同——这是**抽取质量**问题） | **[生产实测]** entity_index 内容抽样 |
+| **E7 边状态迁移是易失的**（2026-08-06 审查新发现） | `transition_edge_state` **只更新 SQLite、不回写 `graph/edges.jsonl`**，而 `index_sync`（30 分钟一次）对 memory_edges 做 clear+全量重投影 → **任何边状态迁移最多存活 30 分钟**，owner 的 approve_edge/reject_edge 权威会被静默回滚。现存 31 条 active 幸存只因它们**出生即 active** 写进了 JSONL。E1 修好后 owner 第一次批准就会踩中它 | **[代码]** `index.py:1497-1545`（transition 无 JSONL 写）+ `index.py:158-159`（sync clear+reproject）+ `_write_edge_canonical` 仅在 write_governed_edge 调用 |
 
 ### 11.4 方案决策（2026-08-06 会话定向；修复方向 owner 已认可）
 
@@ -908,7 +909,7 @@ Hermes-Memory-OS/
 |---|---|---|
 | **S1** | `prefetch._state_overlay_lines` —— 主路径，live 锚点被丢 | **有实时影响** |
 | **S3** | `retrievers/state_overlay.py:87-104` `StateOverlayRetriever.retrieve` —— 从 scope 取 `current_task_anchor` 后**同样在缓存存在时丢弃**，docstring 同样声称 fallback | 当前被 facade shadow 模式掩盖；转 `apply_canary` 即显形。**必须与 S1 同批修**，否则修一留一 |
-| **S4** | `v3_wandering.py:174-181` quiet gate —— 读同一份缓存的 `active_projects.data`，空即不返回 `foreground_task` → 判定 `quiet=True` | 休眠（`wandering_enabled=False`），**R4 激活前必须修** |
+| **S4** | `v3_wandering.py:174-181` quiet gate —— 读同一份缓存的 `active_projects.data`，空即不返回 `foreground_task` → 判定 `quiet=True` | ~~休眠（`wandering_enabled=False`）~~ **2026-08-06 二次核查更正：生产 config `wandering_enabled: true`、六个必需 knob 齐全、quiet hours UTC [16,22]** —— 唯一拦截是 `activation_evidence_ready=False`，而那是**自动计算值**（30 连续有效日即自行翻 True），不是 owner 开关。S4/S5 从"休眠风险"升级为"仅剩一道自动闸门" |
 
 ### 12.3 附加发现（原始诊断未覆盖）
 
@@ -934,19 +935,22 @@ Hermes-Memory-OS/
 
 | # | 工作项 | 对应缺陷 | 主要文件 | 反事实测试 |
 |---|---|---|---|---|
-| **W1** | 去重下沉写入口（partial unique index + JSONL 指纹）；structural 收回 refines 提名权（只许 co_occurs）；配对去偏置（未建边优先稳定序） | E2 E3 | `index.py` `structural_edge_proposer.py` | 存量>1000 条时重复三元组写入必须被拒（现状 limit=1000 被超穿） |
-| **W2** | 存量 769 冗余行 keep-earliest、其余转 invalidated（G3 合规不删） | E2 | 一次性脚本 | 压缩后唯一三元组数不变、invalidated 计数等于冗余数 |
+| **W0** | **边状态迁移持久化**：`transition_edge_state` 追加整行更新记录到 `graph/edges.jsonl`（同 edge_id，last-writer-wins —— `_index_edges` 按行序 insert-or-replace on edge_id 主键，已核实语义成立），G3 合规（历史行保留）；守卫测试钉住投影的 last-writer-wins 语义 | E7 | `index.py` | 迁移后跑一次 index_sync → 状态必须保持（无修复必红：sync 会回滚到旧状态） |
+| **W1** | 去重下沉写入口：**JSONL append 前持锁指纹检查为去重权威**（DB partial unique index 仅作弱后盾——`insert or replace` 遇 unique 冲突是删旧行而非报错，不能当权威）；structural 收回 refines 提名权（只许 co_occurs）；配对去偏置（未建边优先稳定序） | E2 E3 | `index.py` `structural_edge_proposer.py` | 存量>1000 条时重复三元组写入必须被拒（现状 limit=1000 被超穿） |
+| **W2** | 存量 769 冗余行 keep-earliest、其余转 invalidated —— 用 W0 的追加更新行机制，不重写文件（G3 合规） | E2 | 一次性脚本 | 压缩后唯一三元组数不变、invalidated 计数等于冗余数、**再跑 index_sync 后仍保持** |
 | **W3** | candidate→owner_eligible 晋升通道；candidate 边 TTL 自动 invalidated；digest top-K + 按簇批量审批；**状态词表双向守卫测试** | E1 | `owner_actions.py` `index.py` cleanup lane | 生产者写出的任一状态若无消费出口→测试必红（双向断言，非单向） |
 | **W4** | 溯源边挖掘 lane（source_event_ids → derived_from/evidence_for，auto-active、幂等、有界） | 11.4 图源第 2 档 | 新 lane | 锚点落在 event/working 段时必须能查到跨层边 |
-| **W5** | llm 运行时环境修复（**须经 installer 落地**，wrapper 由 `_write_cognitive_loop_artifacts` 生成，只改主机现场会被下次安装覆盖）；step 包装器透传 `reason` | E4 | `install_memory_os_plugin.py` `cognitive_loop.py` | skip 时 reason 必须出现在报告中（现状被吞） |
+| **W5** | llm 运行时环境修复（**须经 installer 落地**，wrapper 由 `_write_cognitive_loop_artifacts` 生成，只改主机现场会被下次安装覆盖）；step 包装器透传 `reason`。**诊断已收窄（2026-08-06 二次核查）**：fact_judge 近 40 次裁决 37 成功/3 `llm_empty_content` —— cron 环境的 LLM 解析健康，坏的只是 systemd wrapper 环境 ⇒ 修法 = wrapper env 对齐 cron env，非主机级 hermes 安装修复 | E4 | `install_memory_os_plugin.py` `cognitive_loop.py` | skip 时 reason 必须出现在报告中（现状被吞）；wrapper env 下 `_resolve_runtime().ok` 必须为 True |
 | **W6** | proposer 产出契约落盘（封闭原因码 + 扫描/合格/新提/去重跳过计数）；输出型 knob override 过期进 monitor | E5 观测面 | 三个 proposer + `memory_os_3_200_monitor.py` | knob 过期后无告警→守卫必红；lane 空转与失败在产物侧必须可区分 |
 | **W7** | live 锚点覆盖 active_projects（抽公共 helper 单一生产者）+ 同 helper 修 retriever + `task_revision` 错配处置 + docstring 改实话 | S1 S2 S3 | `prefetch.py` `state_overlay.py` `retrievers/state_overlay.py` | ①缓存空+live 非空→含锚点；②缓存旧锚点 A+live B→渲染为 B（缺②则"仅填空"实现可蒙混） |
-| **W8** | quiet gate 改读耐久台账 `task_state.read_effective_current_task()` + 读取失败 fail-closed | S4 S5 | `v3_wandering.py` | 台账不可读→`quiet=False`（无修复必红：现状返回 True） |
+| **W8** | quiet gate 改读耐久台账 `task_state.read_effective_current_task()` + 读取失败 fail-closed + **有界年龄读取（`max_age_hours`>0，参数已存在）** —— 否则一个僵尸 active 锚点（崩溃后无 tombstone）会让 fail-closed 永久压制漫游，反向失效 | S4 S5 | `v3_wandering.py` | ①台账不可读→`quiet=False`（无修复必红：现状返回 True）；②超龄 active 锚点→不判为前台任务 |
 
 ### 13.2 顺序约束（正确性约束，非排期偏好）
 
+- **W0 必须先于 W2/W3**：状态迁移不持久化，压缩和晋升在下一次 index_sync（≤30 分钟）后全部回滚 —— 沙子地基上不施工。
 - **W1+W2 必须先于 W3**：先修去重与配对偏置、清完存量，晋升通道才不会把 1380 组唯一三元组连同重复垃圾一起送进 digest。
 - **W7/W8 与图谱各项文件面无交集**，顺序自由；但 W8 有硬日期约束（R4 复查日 2026-09-05 之前）。
+- **13.3 决策 #3（放宽 V3 激活判据）必须晚于 W8 部署**：生产 `wandering_enabled` 已为 true、六 knob 齐全，`activation_evidence_ready` 是当前唯一拦截 —— 判据一放宽即等于带着 S4/S5 的坏 quiet gate 上线。单批交付内 W8 随批落地即自然满足，但该约束必须显式记录，防止判据决策先行。
 - **注入 knob 续期不在本轮范围**：属 owner 决策（见 13.3），且必须晚于 W1–W3 —— 当前 active 边仅 31 条（全为 llm 自动边），先开注入没有内容可注。
 
 ### 13.3 Owner 决策点（不阻塞上表，但阻塞"激活"）
@@ -971,10 +975,10 @@ V3 闭环的前置共三条，**只有一条是代码缺陷**：
 
 **结论：该门在当前使用模式下实际不可达。** 30 天连续要求每一天 `memory_sources.jsonl` 都有自然生产行（即当天与 Hermes agent 有对话流量），而实测约 45% 的自然日为零流量。**且这是 CLAUDE.md「空转 ≠ 故障」原则的镜像违例**：零输入日被记为 `invalid`，把"没有合格输入"与"处理失败"合并成同一个信号，而这个信号是 V3 激活的唯一闸门。若要改判据（例如零输入日记为 `no_sample` 不计入亦不断 streak，或改为"N 日窗口内 30 个有效日 + 最大间隔容忍"），属**放宽门槛的行为变更**，需 owner 明确决策，并须遵守路线图 L43「不为获得绿色状态而隐藏真实 FAIL」——放宽窗口与缩小度量是两回事，改动须同时公布口径变化前后的对照数字。
 
-**② 代码缺陷（S4/S5，见 12.2/12.3）** —— quiet gate 读陈旧缓存 + 读取失败 fail-open。位于 `activation_evidence_ready` 判定之后（`v3_wandering.py:172` 先于 174），故当前休眠；**R4 打开 `wandering_enabled` 之前必须修**（本轮 W8）。
+**② 代码缺陷（S4/S5，见 12.2/12.3）—— 2026-08-06 二次核查升级**：quiet gate 读陈旧缓存 + 读取失败 fail-open。~~当前休眠（wandering_enabled=False）~~ **生产 config `wandering_enabled: true`、六个必需 knob 齐全（quiet hours UTC [16,22]、每窗 1 次）**——引信已全部接好，`activation_evidence_ready=False` 是唯一拦截，且它是自动计算值（30 连续有效日自行翻 True），非 owner 开关。判定顺序 `v3_wandering.py:172`（evidence）先于 174（overlay），所以今天不走火；但**放宽①的判据 = 立即带着坏 quiet gate 上线** ⇒ 判据决策必须晚于 W8 部署（已列入 13.2）。
 
 **③ ⚠ 陷阱：关闭 entity_index 会永久冻死 V3 —— 撤回第 11 节 CL 中「`entity_index_enabled` 暂置 False」的建议**
-`run_v3_seed_evidence_cycle` 的 `require_shared_entity` **默认为 True**，而 `_shared_entity_edges` 在 entity_index knob 关闭时返回 `"disabled"` ⇒ 触发 `invalid_reasons=["shared_entity_disabled"]` ⇒ **此后每一天都无效，30 天连续永不可能达成**。**[代码]** `v3_seed_evidence.py:49-51,152-153,363-365`；生产实测近期各日 `shared_entity_status=available`（entity_index 当前为开）。
+论据链（2026-08-06 二次核查修正）：生效原因**不是**函数签名默认 —— cron helper 传 `require_shared_entity=seed_config.get("require_shared_entity") is True`（配置缺省时为 False），而**生产 config 显式 `"require_shared_entity": true`**。因此在本生产环境关闭 entity_index：`_shared_entity_edges` 返回 `"disabled"` ⇒ `invalid_reasons=["shared_entity_disabled"]` ⇒ **此后每一天都无效，30 天连续永不可能达成**。**[代码]** `v3_seed_evidence.py:49-51,152-153,363-365` + `scripts/memory_os_v3_seed_evidence.py:60`；**[生产实测]** config 显式 true、近期各日 `shared_entity_status=available`（entity_index 当前为开）。
 注意该门只校验**可用性**、不校验**实体质量** —— 24 个路径碎片同样判 available。因此 E6 的正确修法是**保持开启并改进抽取质量**（过滤 path/uuid 类），而不是关停。若确需关停，必须同时把 `require_shared_entity` 改为 False 并记录该判据变更，否则等于静默关闭 V3 路线。
 
 **附带口径更正（供 checklist 引用时使用）**：`consecutive_valid_day_count` 是**最长连续**而非当前连续，字段名有误导性；stabilization checklist 待办中"历史中断 11 次"的准确表述是"11 个无效日（全部为零输入）"。
