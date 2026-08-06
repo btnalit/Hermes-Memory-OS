@@ -939,11 +939,12 @@ Hermes-Memory-OS/
 | **W1** | 去重下沉写入口：**JSONL append 前持锁指纹检查为去重权威**（DB partial unique index 仅作弱后盾——`insert or replace` 遇 unique 冲突是删旧行而非报错，不能当权威）；structural 收回 refines 提名权（只许 co_occurs）；配对去偏置（未建边优先稳定序） | E2 E3 | `index.py` `structural_edge_proposer.py` | 存量>1000 条时重复三元组写入必须被拒（现状 limit=1000 被超穿） |
 | **W2** | 存量 769 冗余行 keep-earliest、其余转 invalidated —— 用 W0 的追加更新行机制，不重写文件（G3 合规） | E2 | 一次性脚本 | 压缩后唯一三元组数不变、invalidated 计数等于冗余数、**再跑 index_sync 后仍保持** |
 | **W3** | candidate→owner_eligible 晋升通道；candidate 边 TTL 自动 invalidated；digest top-K + 按簇批量审批；**状态词表双向守卫测试** | E1 | `owner_actions.py` `index.py` cleanup lane | 生产者写出的任一状态若无消费出口→测试必红（双向断言，非单向） |
-| **W4** | 溯源边挖掘 lane（source_event_ids → derived_from/evidence_for，auto-active、幂等、有界） | 11.4 图源第 2 档 | 新 lane | 锚点落在 event/working 段时必须能查到跨层边 |
+| **W4** | 溯源边挖掘 lane（source_event_ids → evidence_for，auto-active、幂等、有界）。**方向定为 `event → crystallized`**（事件是结晶的证据）；**注入侧新规则：非 crystallized 目标不落 `[unresolved:]` 兜底行**——事件会被 retention 清出热存储（`cleanup.py::_prune_event_line`，归档后删除），事件侧悬挂是可容忍设计（锚点随事件出索引自然停火），但不得变成注入噪音 | 11.4 图源第 2 档 | 新 lane + `prefetch.py` 注入过滤 | ①锚点落在 event 段时必须能查到跨层边并解析出结晶目标；②已归档事件作为目标时不产生 [unresolved:] 行 |
 | **W5** | llm 运行时环境修复（**须经 installer 落地**，wrapper 由 `_write_cognitive_loop_artifacts` 生成，只改主机现场会被下次安装覆盖）；step 包装器透传 `reason`。**诊断已收窄（2026-08-06 二次核查）**：fact_judge 近 40 次裁决 37 成功/3 `llm_empty_content` —— cron 环境的 LLM 解析健康，坏的只是 systemd wrapper 环境 ⇒ 修法 = wrapper env 对齐 cron env，非主机级 hermes 安装修复 | E4 | `install_memory_os_plugin.py` `cognitive_loop.py` | skip 时 reason 必须出现在报告中（现状被吞）；wrapper env 下 `_resolve_runtime().ok` 必须为 True |
 | **W6** | proposer 产出契约落盘（封闭原因码 + 扫描/合格/新提/去重跳过计数）；输出型 knob override 过期进 monitor | E5 观测面 | 三个 proposer + `memory_os_3_200_monitor.py` | knob 过期后无告警→守卫必红；lane 空转与失败在产物侧必须可区分 |
 | **W7** | live 锚点覆盖 active_projects（抽公共 helper 单一生产者）+ 同 helper 修 retriever + `task_revision` 错配处置 + docstring 改实话 | S1 S2 S3 | `prefetch.py` `state_overlay.py` `retrievers/state_overlay.py` | ①缓存空+live 非空→含锚点；②缓存旧锚点 A+live B→渲染为 B（缺②则"仅填空"实现可蒙混） |
 | **W8** | quiet gate 改读耐久台账 `task_state.read_effective_current_task()` + 读取失败 fail-closed + **有界年龄读取（`max_age_hours`>0，参数已存在）** —— 否则一个僵尸 active 锚点（崩溃后无 tombstone）会让 fail-closed 永久压制漫游，反向失效 | S4 S5 | `v3_wandering.py` | ①台账不可读→`quiet=False`（无修复必红：现状返回 True）；②超龄 active 锚点→不判为前台任务 |
+| **W9** | 实体抽取质量过滤：`entity_extractor` 丢弃 path/uuid/ip/url 碎片类，只保留专名类（entity_class 列已存在，生产 24 实体中仅 3 个专名）；保持 `entity_index_enabled` 开启（V3 依赖，见 13.4 ③） | E6 | `entity_extractor.py` `entity_index.py` | 路径/uuid 碎片不再入索引；过滤后 V3 `shared_entity_status` 仍为 available（可用性与质量解耦） |
 
 ### 13.2 顺序约束（正确性约束，非排期偏好）
 
