@@ -281,6 +281,11 @@ MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     },
 }
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
+    "cron_registry_snapshot_member_drift": {
+        "classification": "next_lane",
+        "reason": "deployed cron registry snapshot resolves fewer group members than the installed registry defines - regenerate the snapshot (install/onboarding step)",
+        "production_behavior": "warn_if_production",
+    },
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
         "reason": "left_brain_pipeline is present but still reports warning on clean-host warmup",
@@ -2563,6 +2568,35 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     {
                         "code": "execution_gate_memory_os_cron_registry_snapshot_missing_or_invalid",
                         "status": str(execution_gate_cron.get("registry_snapshot_status") or ""),
+                    }
+                )
+            parity = (
+                execution_gate_cron.get("registry_snapshot_parity")
+                if isinstance(execution_gate_cron.get("registry_snapshot_parity"), dict)
+                else {}
+            )
+            parity_status = str(parity.get("status") or "")
+            if parity_status == "drift":
+                warn.append(
+                    {
+                        "code": "cron_registry_snapshot_member_drift",
+                        "value": {
+                            "silently_missing_lane_ids": parity.get("silently_missing_lane_ids") or {},
+                            "unknown_in_snapshot": parity.get("unknown_in_snapshot") or {},
+                            "fallback_group_keys": parity.get("fallback_group_keys") or [],
+                        },
+                    }
+                )
+            elif parity_status == "ok":
+                passed.append({"code": "cron_registry_snapshot_member_parity_ok"})
+            elif parity_status:
+                # snapshot_groups_unavailable / registry_import_unavailable:
+                # no basis to judge parity — surface as INFO (healthy_no_sample
+                # class), never as PASS bought by an empty gated set.
+                info.append(
+                    {
+                        "code": "cron_registry_snapshot_parity_no_sample",
+                        "value": {"status": parity_status},
                     }
                 )
             if helper_boundary_true > 0:
@@ -7600,6 +7634,7 @@ def execution_gate_cron_summary():
         "schema_version": "memory-os.execution_gate_cron_summary.v0",
         "status": "ok",
         "registry_snapshot_status": "ok" if specs else "missing_or_invalid",
+        "registry_snapshot_parity": _cron_registry_snapshot_parity(),
         "classification_source": "registry_snapshot",
         "adapter_probe_status": str(adapter_probe.get("status") or ""),
         "adapter_owner": str(adapter_probe.get("adapter_owner") or ""),
@@ -7700,6 +7735,76 @@ def _memory_os_cron_specs_from_snapshot():
     if isinstance(specs, list) and specs:
         return [dict(item) for item in specs if isinstance(item, dict)]
     return []
+
+def _cron_registry_snapshot_parity():
+    """Host-side snapshot-vs-installed-registry membership diff (M1 detector).
+
+    Mirrors cron_group_runner._load_group resolution exactly: the snapshot
+    wins for a group only when its member list resolves to >=1 spec (member
+    keys missing from the snapshot's own specs are silently dropped there);
+    a missing group, empty member list, or fully-unresolvable member list
+    falls back to the compiled registry and is therefore NOT silent. The
+    silent set per group is (compiled members - snapshot-RESOLVED members)
+    whenever the snapshot wins -- this covers both a stale member list and a
+    member listed without a matching spec. Both sides are read on the host
+    (deployed snapshot vs installed package registry), so a dev-tree lane
+    not yet deployed can never fire a false drift signal.
+    """
+    snapshot_path = Path(_hermes_home) / "memory-os" / "system" / "memory_os_cron_registry.json"
+    try:
+        loaded = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        loaded = {}
+    snapshot_groups = {}
+    for group in loaded.get("groups") or []:
+        if isinstance(group, dict) and str(group.get("key") or ""):
+            snapshot_groups[str(group["key"])] = [
+                str(member) for member in (group.get("member_keys") or [])
+            ]
+    snapshot_spec_keys = {
+        str(item.get("key") or "")
+        for item in (loaded.get("specs") or [])
+        if isinstance(item, dict)
+    }
+    if not snapshot_groups:
+        return {"status": "snapshot_groups_unavailable"}
+    try:
+        from plugins.memory.memory_os.cron_registry import MEMORY_OS_CRON_GROUPS
+
+        compiled_groups = {
+            group.key: [str(member) for member in group.member_keys]
+            for group in MEMORY_OS_CRON_GROUPS
+        }
+    except Exception:
+        return {"status": "registry_import_unavailable"}
+    silently_missing = {}
+    unknown_in_snapshot = {}
+    fallback_group_keys = []
+    for key, compiled_members in compiled_groups.items():
+        listed = snapshot_groups.get(key)
+        resolved = [m for m in (listed or []) if m in snapshot_spec_keys]
+        if not resolved:
+            # Missing group / empty list / nothing resolvable: _load_group
+            # falls back to the compiled registry, so every compiled member
+            # still runs -- visible fallback, not silent drift.
+            fallback_group_keys.append(key)
+            continue
+        missing = [m for m in compiled_members if m not in resolved]
+        if missing:
+            silently_missing[key] = missing
+        unknown = [m for m in resolved if m not in set(compiled_members)]
+        if unknown:
+            unknown_in_snapshot[key] = unknown
+    return {
+        "status": "drift" if silently_missing else "ok",
+        "silently_missing_lane_ids": silently_missing,
+        "unknown_in_snapshot": unknown_in_snapshot,
+        "fallback_group_keys": sorted(fallback_group_keys),
+        "snapshot_group_count": len(snapshot_groups),
+        "compiled_group_count": len(compiled_groups),
+    }
 
 def _legacy_per_lane_cron_jobs():
     """Pre-consolidation per-lane job name -> its legacy wrapper script.

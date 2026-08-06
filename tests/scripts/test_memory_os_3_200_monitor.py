@@ -7991,3 +7991,203 @@ def test_recent_window_carries_natural_traffic_volume_alongside_era_denominator(
     )
     assert entry["value"]["rolling_7d_natural_record_count"] == 5
     assert entry["value"]["rolling_7d_attribution_era_record_count"] == 3
+
+
+# ── M1: cron registry snapshot membership parity (probe + grading) ──────────
+
+
+def _parity_probe_namespace(tmp_path) -> dict:
+    namespace: dict[str, Any] = {}
+    original_sys_path = list(sys.path)
+    try:
+        exec(
+            monitor._remote_probe_script(str(tmp_path)).split("\n# ---begin-probe-invocations---", 1)[0],
+            namespace,
+        )
+    finally:
+        sys.path[:] = original_sys_path
+    namespace["_hermes_home"] = str(tmp_path)
+    return namespace
+
+
+def _write_registry_snapshot(tmp_path, snapshot: dict) -> None:
+    path = tmp_path / "memory-os" / "system" / "memory_os_cron_registry.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+
+def test_snapshot_parity_partially_stale_member_list_is_silent_drift(tmp_path):
+    """Counterfactual (M1): _load_group prefers the snapshot whenever a
+    group's member list resolves to >=1 spec, so a stale-but-non-empty list
+    silently never runs the dropped lane. The parity probe must name it."""
+    from plugins.memory.memory_os.cron_registry import cron_registry_snapshot
+
+    snapshot = cron_registry_snapshot()
+    victim_group = next(g for g in snapshot["groups"] if len(g["member_keys"]) >= 2)
+    dropped = victim_group["member_keys"].pop()
+    _write_registry_snapshot(tmp_path, snapshot)
+
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "drift"
+    assert parity["silently_missing_lane_ids"] == {victim_group["key"]: [dropped]}
+
+
+def test_snapshot_parity_member_without_spec_is_silent_drift(tmp_path):
+    """The _load_group line-319 case: a member listed in the group but with no
+    matching spec in the snapshot is silently dropped while the rest of the
+    group still runs from the snapshot."""
+    from plugins.memory.memory_os.cron_registry import cron_registry_snapshot
+
+    snapshot = cron_registry_snapshot()
+    victim_group = next(g for g in snapshot["groups"] if len(g["member_keys"]) >= 2)
+    victim_member = victim_group["member_keys"][-1]
+    snapshot["specs"] = [s for s in snapshot["specs"] if s["key"] != victim_member]
+    _write_registry_snapshot(tmp_path, snapshot)
+
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "drift"
+    assert victim_member in parity["silently_missing_lane_ids"][victim_group["key"]]
+
+
+def test_snapshot_parity_fallback_groups_are_not_drift(tmp_path):
+    """An emptied member list and a missing group both make _load_group fall
+    back to the compiled registry — every lane still runs, so neither may be
+    reported as drift."""
+    from plugins.memory.memory_os.cron_registry import cron_registry_snapshot
+
+    snapshot = cron_registry_snapshot()
+    emptied = snapshot["groups"][0]
+    emptied["member_keys"] = []
+    removed = snapshot["groups"].pop(1)
+    _write_registry_snapshot(tmp_path, snapshot)
+
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "ok"
+    assert emptied["key"] in parity["fallback_group_keys"]
+    assert removed["key"] in parity["fallback_group_keys"]
+
+
+def test_snapshot_parity_complete_snapshot_is_ok(tmp_path):
+    from plugins.memory.memory_os.cron_registry import cron_registry_snapshot
+
+    _write_registry_snapshot(tmp_path, cron_registry_snapshot())
+
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "ok"
+    assert parity["silently_missing_lane_ids"] == {}
+    assert parity["fallback_group_keys"] == []
+
+
+def test_snapshot_parity_missing_snapshot_reports_no_sample(tmp_path):
+    parity = _parity_probe_namespace(tmp_path)["_cron_registry_snapshot_parity"]()
+
+    assert parity["status"] == "snapshot_groups_unavailable"
+
+
+def test_classify_snapshot_member_drift_warns_with_lane_ids():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "registry_snapshot_status": "ok",
+        "registry_snapshot_parity": {
+            "status": "drift",
+            "silently_missing_lane_ids": {"tick_evidence": ["session_fact_extraction"]},
+            "unknown_in_snapshot": {},
+            "fallback_group_keys": [],
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    entry = next(
+        item for item in classification["warn"]
+        if item["code"] == "cron_registry_snapshot_member_drift"
+    )
+    assert entry["value"]["silently_missing_lane_ids"] == {
+        "tick_evidence": ["session_fact_extraction"]
+    }
+    assert not any(
+        item["code"] == "cron_registry_snapshot_member_parity_ok"
+        for item in classification["pass"]
+    )
+
+
+def test_classify_snapshot_member_parity_ok_passes():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "registry_snapshot_parity": {"status": "ok", "silently_missing_lane_ids": {}},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "cron_registry_snapshot_member_parity_ok"
+        for item in classification["pass"]
+    )
+
+
+def test_classify_snapshot_parity_no_sample_is_info_not_pass():
+    """An unjudgeable parity (registry unimportable on the host) must surface
+    as INFO — never a PASS bought by an empty gated set, never a WARN."""
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "registry_snapshot_parity": {"status": "registry_import_unavailable"},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "cron_registry_snapshot_parity_no_sample"
+        for item in classification["info"]
+    )
+    for bucket in ("pass", "warn", "fail"):
+        assert not any(
+            str(item.get("code", "")).startswith("cron_registry_snapshot_")
+            for item in classification[bucket]
+        )
+
+
+def test_classify_snapshot_without_parity_key_stays_silent():
+    """Backward compat: payloads from an older probe (no parity key) must not
+    grow any of the new parity codes."""
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    for bucket in ("pass", "warn", "fail", "info"):
+        assert not any(
+            str(item.get("code", "")).startswith("cron_registry_snapshot_")
+            for item in classification[bucket]
+        )
+
+
+def test_clean_host_member_drift_stays_classified_warn():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "registry_snapshot_parity": {
+            "status": "drift",
+            "silently_missing_lane_ids": {"tick_daily": ["exposure_rollup"]},
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "cron_registry_snapshot_member_drift"
+        for item in classification["warn"]
+    )
+    assert not any(
+        item["code"] == "clean_host_warn_unclassified"
+        for item in classification["fail"]
+    )
