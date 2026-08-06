@@ -2047,8 +2047,14 @@ def _graph_layer_injection_lines(
             # Never turn a revoked/demoted canonical target into an unresolved
             # identifier-only recall line; inactive targets are fully suppressed.
             continue
+        elif to_type not in {"crystallized_record", "crystallized"}:
+            # W4: non-crystallized targets (events, working items) age out of
+            # hot storage by design (retention prunes events); an unresolved
+            # identifier line for them is pure noise, not a diagnostic.
+            continue
         else:
-            # Missing targets remain diagnosable without exposing inactive content.
+            # Missing crystallized targets remain diagnosable without
+            # exposing inactive content.
             display_text = f"[unresolved:{to_id}]"
 
         weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")

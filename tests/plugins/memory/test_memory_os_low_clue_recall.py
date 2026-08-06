@@ -969,3 +969,75 @@ def test_status_and_doctor_report_low_clue_judge_unavailable_as_warning(tmp_path
     findings = {item["code"]: item for item in doctor["findings"]}
     assert findings["low_clue_llm_judge_unavailable"]["severity"] == "warning"
     assert findings["low_clue_llm_judge_unavailable"]["details"]["degrades_to"] == "deterministic_fallback"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W5 (E4) — 幽灵 namespace `agent` 包不得杀死 hermes 运行时解析
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_w5_resolver_evicts_phantom_namespace_agent(tmp_path, monkeypatch):
+    """E4 生产同款反事实。
+
+    生产机制(2026-08-06 实锤):43da529 把 agent/ 改名 memory_os_agent/ 后,
+    /opt 检出残留的 agent/__pycache__ 空壳目录成为 namespace 包;provider
+    ABC 探测 import 把它缓存进 sys.modules,此后 hermes_cli 的
+    `import agent.portal_tags` 永远命中幽灵包(namespace 动态 __path__
+    收不进 regular 包)→ llm 边提案通道自 07-07 起静默 skipped。
+
+    无修复:_resolve_hermes_default_runtime 返回 hermes_runtime_import_failed
+    → 必红;修复后:驱逐幽灵缓存重试,regular 包胜出 → ok=True。
+    """
+    import sys as _sys
+
+    from plugins.memory.memory_os.low_clue_recall import _resolve_hermes_default_runtime
+
+    # ── fake hermes-agent root(regular agent 包 + hermes_cli)──────────
+    root = tmp_path / "hermes-agent"
+    (root / "agent").mkdir(parents=True)
+    (root / "agent" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "agent" / "portal_tags.py").write_text("TAGS = ['ok']\n", encoding="utf-8")
+    (root / "hermes_cli").mkdir()
+    (root / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "hermes_cli" / "config.py").write_text(
+        "import agent.portal_tags\n"
+        "def load_config():\n"
+        "    return {'model': {'default': 'w5-test-model', 'provider': 'w5'}}\n",
+        encoding="utf-8",
+    )
+    (root / "hermes_cli" / "runtime_provider.py").write_text(
+        "def resolve_runtime_provider(requested=None, target_model=None):\n"
+        "    return {'api_mode': 'chat_completions', 'provider': 'w5',"
+        " 'model': target_model or 'w5-test-model', 'api_key': 'k'}\n",
+        encoding="utf-8",
+    )
+
+    # ── 幽灵壳目录(只有 __pycache__,无 __init__)在 sys.path 首位 ────
+    checkout = tmp_path / "checkout"
+    (checkout / "agent" / "__pycache__").mkdir(parents=True)
+
+    saved_modules = {
+        name: _sys.modules.pop(name)
+        for name in list(_sys.modules)
+        if name == "agent" or name.startswith("agent.")
+        or name == "hermes_cli" or name.startswith("hermes_cli.")
+    }
+    saved_path = list(_sys.path)
+    try:
+        _sys.path.insert(0, str(checkout))
+        import agent  # ABC 探测同款:缓存幽灵 namespace 包
+        assert getattr(agent, "__file__", None) is None, "precondition: namespace phantom"
+
+        monkeypatch.setenv("HERMES_AGENT_ROOT", str(root))
+        result = _resolve_hermes_default_runtime({"provider": "hermes_default"})
+        assert result.get("ok") is True, (
+            f"resolver must survive the phantom namespace agent package: {result}"
+        )
+        assert result.get("model") == "w5-test-model"
+    finally:
+        for name in [n for n in list(_sys.modules)
+                     if n == "agent" or n.startswith("agent.")
+                     or n == "hermes_cli" or n.startswith("hermes_cli.")]:
+            del _sys.modules[name]
+        _sys.modules.update(saved_modules)
+        _sys.path[:] = saved_path

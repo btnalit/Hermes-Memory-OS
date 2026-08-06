@@ -156,6 +156,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "llm_edge_proposer",
         "vector_edge_proposer",
         "contradiction_lane",
+        "edge_provenance",
         "edge_promotion",
         "entity_index",
         "left_brain_pipeline_check",
@@ -870,3 +871,33 @@ def test_cognitive_loop_reports_zero_automatic_permanent_promotions(tmp_path):
     assert provisional["auto_promote_live_applied"] is False
     assert provisional["auto_promote_promoted"] == 0
     assert provisional["canonical_state_changed"] is False
+
+
+def test_w5_edge_proposer_step_wrappers_propagate_skip_reason(tmp_path):
+    """W5 (E4 观测面) counterfactual:proposer 步骤 skipped 时 reason 必须透传。
+
+    生产事故形态:llm_edge_proposer 自 07-07 每轮 skipped,而 step 包装器
+    只映射 status/counters — reports.jsonl 里只见 skipped 不见为什么,
+    诊断被迫回读源码 + 手动复现(Completion Is Not Output)。
+    """
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    store = _init_store(tmp_path)
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    runner = CognitiveLoopRunner(store)
+
+    # 空库:llm/structural 走 "need ≥2 crystallized records" skip 分支
+    llm = runner._llm_edge_proposer({})
+    assert llm["status"] == "skipped"
+    assert llm.get("reason"), f"llm wrapper must propagate skip reason: {llm}"
+
+    structural = runner._structural_edge_proposer({})
+    assert structural["status"] == "skipped"
+    assert structural.get("reason"), (
+        f"structural wrapper must propagate skip reason: {structural}"
+    )
+
+    # vector:knob 默认关 → knob_disabled(该包装器已有 reason,回归钉住)
+    vector = runner._vector_edge_proposer({})
+    assert vector["status"] == "skipped"
+    assert vector.get("reason") == "knob_disabled"

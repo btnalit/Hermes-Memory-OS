@@ -261,6 +261,7 @@ class CognitiveLoopRunner:
             ("llm_edge_proposer", self._llm_edge_proposer),
             ("vector_edge_proposer", self._vector_edge_proposer),
             ("contradiction_lane", self._contradiction_lane),
+            ("edge_provenance", self._edge_provenance),
             ("edge_promotion", self._edge_promotion),
             ("entity_index", self._entity_index),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
@@ -969,9 +970,14 @@ class CognitiveLoopRunner:
         return {
             "schema_version": "memory-os.cognitive_loop.structural_edge_proposer.v0",
             "status": result.get("status", "ok"),
+            # W5: skip/error 原因必须透传 — 报告只见 skipped 不见为什么,
+            # 就是 E4 拖了一个月才被发现的观测缺口。
+            "reason": result.get("reason", ""),
             "record_count": result.get("record_count", 0),
             "pair_count": result.get("pair_count", 0),
             "proposed_count": result.get("proposed_count", 0),
+            "dedup_skipped": result.get("dedup_skipped", 0),
+            "write_failed_count": result.get("write_failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
@@ -1020,10 +1026,15 @@ class CognitiveLoopRunner:
         return {
             "schema_version": "memory-os.cognitive_loop.llm_edge_proposer.v0",
             "status": result.get("status", "ok"),
+            # W5: 透传 skip 原因与失败码(生产 llm_runtime_unavailable 一个月
+            # 无人可见,就是这里被吞掉的)。
+            "reason": result.get("reason", ""),
+            "code": result.get("code", ""),
             "record_count": result.get("record_count", 0),
             "pair_count": result.get("pair_count", 0),
             "proposed_count": result.get("proposed_count", 0),
             "auto_active_count": result.get("auto_active_count", 0),
+            "dedup_skipped": result.get("dedup_skipped", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
@@ -1068,9 +1079,36 @@ class CognitiveLoopRunner:
         return {
             "schema_version": "memory-os.cognitive_loop.vector_edge_proposer.v0",
             "status": result.get("status", "ok"),
+            "reason": result.get("reason", ""),
             "record_count": result.get("record_count", 0),
             "pair_count": result.get("pair_count", 0),
             "proposed_count": result.get("proposed_count", 0),
+            "dedup_skipped": result.get("dedup_skipped", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _edge_provenance(self, context: dict[str, Any]) -> dict[str, Any]:
+        """W4: source_event_ids → event→crystallized evidence_for 溯源边。"""
+        from .edge_provenance import run_edge_provenance
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index = MemoryOSIndex(store.roots)
+        result = run_edge_provenance(
+            str(store.roots.index_path),
+            index=index,
+            audit_path=str(store.roots.audit_path),
+        )
+        context["edge_provenance_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.edge_provenance.v0",
+            "status": result.get("status", "ok"),
+            "outcome": result.get("outcome", ""),
+            "record_count": result.get("record_count", 0),
+            "scanned_ref_count": result.get("scanned_ref_count", 0),
+            "proposed_count": result.get("proposed_count", 0),
+            "dedup_skipped": result.get("dedup_skipped", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
