@@ -319,14 +319,23 @@ def _import_probe(root: Path, *, python_executable: str) -> subprocess.Completed
         "origin=pathlib.Path(m.__file__).resolve(); origin.relative_to(root); print('import-ok')"
     )
     env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "HERMES_HOME"}}
-    return subprocess.run(
-        [python_executable, "-I", "-c", code],
-        cwd="/",
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            [python_executable, "-I", "-c", code],
+            cwd="/",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=[python_executable, "-I", "-c", code],
+            returncode=124,
+            stdout="",
+            stderr="import probe timed out after 60s",
+        )
 
 
 def run_deploy_pipeline(

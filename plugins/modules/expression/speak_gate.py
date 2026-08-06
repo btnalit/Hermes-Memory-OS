@@ -391,12 +391,14 @@ class SpeakGateModule:
             encoding="utf-8",
         )
 
-        # Write to speak_gate delivery audit log (JSONL after outbox succeeds)
+        # Write to speak_gate delivery audit log (JSONL after outbox succeeds).
+        # Locked append: concurrent writers on a bare open("a") can interleave
+        # partial lines on some filesystems.
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+
         deliveries_path = self.module_root / "deliveries.jsonl"
         deliveries_path.parent.mkdir(parents=True, exist_ok=True)
-        with deliveries_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(deliveries_path, record)
 
         result = self._delivery_result(
             decision="delivered",
@@ -432,10 +434,10 @@ class SpeakGateModule:
             "payload_ref": payload_ref,
             "reason": reason,
         }
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+
         self.would_send_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.would_send_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.would_send_path, record)
         return record
 
     def _delivery_result(

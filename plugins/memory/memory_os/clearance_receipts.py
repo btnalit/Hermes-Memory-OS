@@ -406,6 +406,87 @@ def latest_corpus_watermark(roots: Any) -> int:
     return max((int(e.get("event_id") or 0) for e in events), default=0)
 
 
+def collect_entities_from_record(
+    roots: Any,
+    record_id: str,
+    frontmatter: dict[str, Any],
+) -> list[str]:
+    """Collect entity IDs associated with a crystallized record.
+
+    Single shared vocabulary for both sides of entity-scoped invalidation:
+    the judge stamps receipts' ``checked_entity_set`` with it, and corpus
+    change emitters stamp events' ``entity_set`` with it — the intersection
+    check in ``invalidate_receipts_since`` is only meaningful when both come
+    from the same collector.
+
+    Sources (in priority order):
+    1. Frontmatter ``entities`` field (list of entity strings)
+    2. Entity index (SQLite entity_index table)
+    3. Frontmatter ``tags`` field as fallback
+
+    Returns a deduplicated list of normalized entity IDs. Returns an empty
+    list when no entities can be extracted (caller should treat the change
+    as unattributable / conservative_full).
+    """
+    entities: list[str] = []
+
+    # Source 1: explicit entities field in frontmatter
+    fm_entities = frontmatter.get("entities")
+    if isinstance(fm_entities, list):
+        for ent in fm_entities:
+            if isinstance(ent, str) and ent.strip():
+                entities.append(ent.strip().lower())
+
+    # Source 2: entity index (SQLite). Read-only intent: never create the
+    # index file as a connect side effect — a zero-byte db left behind flips
+    # exists()-guarded schema initializers elsewhere (e.g. the digest path).
+    if not entities:
+        try:
+            import sqlite3
+            index_path = getattr(roots, "index_path", None)
+            if index_path is not None and Path(index_path).exists():
+                conn = sqlite3.connect(str(index_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    table_check = conn.execute(
+                        "select name from sqlite_master "
+                        "where type='table' and name='entity_index'"
+                    ).fetchone()
+                    if table_check is not None:
+                        rows = conn.execute(
+                            "select distinct entity_id from entity_index "
+                            "where record_id = ?",
+                            (record_id,),
+                        ).fetchall()
+                        for row in rows:
+                            eid = str(row["entity_id"] or "").strip().lower()
+                            if eid:
+                                entities.append(eid)
+                except sqlite3.Error:
+                    pass
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
+    # Source 3: tags fallback
+    if not entities:
+        fm_tags = frontmatter.get("tags")
+        if isinstance(fm_tags, list):
+            for tag in fm_tags:
+                if isinstance(tag, str) and tag.strip():
+                    entities.append(f"tag:{tag.strip().lower()}")
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for e in entities:
+        if e not in seen:
+            seen.add(e)
+            result.append(e)
+    return result
+
+
 # ── E3.5: Bulk invalidation by judge version (escape hatch) ────────────────
 
 
@@ -468,7 +549,10 @@ def invalidate_receipts_since(
 ) -> dict[str, Any]:
     """Invalidate receipts affected by corpus changes since *watermark*.
 
-    For each active receipt:
+    *watermark* is a global floor; each receipt is additionally windowed by
+    its own ``corpus_watermark`` (stamped at judge time), so only events that
+    happened after the receipt was judged can invalidate it. For each active
+    receipt, against the events in its window:
     - If the receipt is ``conservative_full`` → always invalidated (any change).
     - If any event entity_set is empty → conservative_full for entity_scoped receipts.
     - If event entity_set ∩ receipt checked_entity_set is non-empty → invalidated.
@@ -485,19 +569,16 @@ def invalidate_receipts_since(
     if not new_events:
         return {"status": "ok", "invalidated_count": 0, "events_since_watermark": 0}
 
-    # Collect affected entity sets from new events
+    # Report-level aggregates over the global window (per-receipt decisions
+    # below use each receipt's own watermark, not these).
     all_event_entities: set[str] = set()
     has_unattributable_event = False
-    affected_record_ids: set[str] = set()
     for event in new_events:
         entity_set = list(event.get("entity_set") or [])
         if entity_set:
             all_event_entities.update(entity_set)
         else:
             has_unattributable_event = True
-        rid = str(event.get("record_id") or "")
-        if rid:
-            affected_record_ids.add(rid)
 
     invalidated_count = 0
     records = read_clearance_receipts(roots)
@@ -507,18 +588,42 @@ def invalidate_receipts_since(
         if not receipt.is_active:
             continue
 
+        # Per-receipt window: a receipt judged at corpus_watermark W was judged
+        # against the corpus as of W — only later changes can invalidate it.
+        # Without this, a caller-supplied global watermark of 0 re-invalidates
+        # every receipt written in the previous cycle, forever (endless
+        # rejudge loop; the receipts ledger is the watermark's durable home).
+        receipt_events = [
+            e for e in new_events
+            if int(e.get("event_id") or 0) > int(receipt.corpus_watermark or 0)
+        ]
+        if not receipt_events:
+            continue
+        receipt_event_entities: set[str] = set()
+        receipt_has_unattributable = False
+        affected_record_ids: set[str] = set()
+        for event in receipt_events:
+            entity_set = list(event.get("entity_set") or [])
+            if entity_set:
+                receipt_event_entities.update(entity_set)
+            else:
+                receipt_has_unattributable = True
+            rid = str(event.get("record_id") or "")
+            if rid:
+                affected_record_ids.add(rid)
+
         should_invalidate = False
         invalidation_mode = "entity_scoped"
 
         if receipt.invalidation_mode == "conservative_full":
             should_invalidate = True
             invalidation_mode = "conservative_full"
-        elif has_unattributable_event:
+        elif receipt_has_unattributable:
             should_invalidate = True
             invalidation_mode = "conservative_full"
-        elif all_event_entities:
+        elif receipt_event_entities:
             receipt_entities = set(receipt.checked_entity_set)
-            if receipt_entities & all_event_entities:
+            if receipt_entities & receipt_event_entities:
                 should_invalidate = True
                 invalidation_mode = "entity_scoped"
             elif affected_record_ids:

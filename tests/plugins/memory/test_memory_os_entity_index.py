@@ -660,3 +660,114 @@ class TestQueryRelatedRecordsWithWeight:
         for rel in related:
             assert "entity_class" in rel, f"related record missing entity_class: {rel}"
             assert "weight" in rel, f"related record missing weight: {rel}"
+
+
+# ── Analysis-doc M2: index.py rebuild/sync must not drift from the
+#    entity_index producer schema (class/weight columns) ────────────────
+
+
+class TestEntityIndexSchemaParityWithRebuild:
+    """Counterfactuals for the rebuild/sync schema drift (analysis-doc M2).
+
+    Every prior test built the table through refresh_entity_index (which
+    self-heals via ALTER); none exercised the index.py DDL + fill path that
+    production rebuild and index_sync actually run. Without the fix the
+    rebuilt table lacks entity_class/weight, query_related_records swallows
+    the OperationalError into a silent [], and every sync flattens healed
+    weights back to column defaults.
+    """
+
+    def test_rebuild_from_store_yields_weight_bearing_queryable_table(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import query_related_records
+
+        store, index = _build_index(tmp_path, [
+            {"id": "rec_001", "body": "Alice Bob at /opt/hermes/config.json."},
+            {"id": "rec_002", "body": "Alice Bob reviewed the proposal."},
+        ])
+
+        conn = sqlite3.connect(str(index.roots.index_path))
+        try:
+            columns = {row[1] for row in conn.execute("pragma table_info(entity_index)")}
+        finally:
+            conn.close()
+        assert "entity_class" in columns, f"rebuilt table missing entity_class: {columns}"
+        assert "weight" in columns, f"rebuilt table missing weight: {columns}"
+
+        related = query_related_records(index.roots.index_path, ["rec_001"], min_weight=0.8)
+        assert related, "proper_noun-weighted related records must survive min_weight=0.8"
+        for rel in related:
+            assert rel["weight"] >= 0.8, f"expected real weights from rebuild fill: {rel}"
+
+    def test_sync_from_store_preserves_refresh_weights(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import refresh_entity_index
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-sync-weights")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob at /opt/hermes/config.json."},
+            {"id": "rec_002", "body": "Alice Bob discussed the design."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        roots.index_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(roots.index_path, roots.crystallized_root, enabled=True)
+
+        index = MemoryOSIndex(roots)
+        index.sync_from_store(store)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        try:
+            weights = {
+                float(row[0])
+                for row in conn.execute("select distinct weight from entity_index")
+            }
+        finally:
+            conn.close()
+        assert any(w >= 0.9 for w in weights), (
+            f"sync must not flatten proper_noun weight to the column default: {weights}"
+        )
+        assert any(w <= 0.4 for w in weights), (
+            f"sync must not flatten path weight to the column default: {weights}"
+        )
+
+    def test_sync_migrates_legacy_six_column_table(self, tmp_path):
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-legacy-migrate")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob at /opt/hermes/config.json."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        # Simulate a pre-fix live index: six-column table, no class/weight.
+        roots.index_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(roots.index_path))
+        try:
+            conn.execute(
+                """
+                create table entity_index (
+                    entity_id text not null,
+                    entity_text text not null,
+                    record_id text not null,
+                    role text not null,
+                    proposed_by text not null default 'structural',
+                    created_at text not null,
+                    primary key (entity_id, record_id, role)
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        index = MemoryOSIndex(roots)
+        counts = index.sync_from_store(store)
+        assert counts["entity_index"] > 0
+
+        conn = sqlite3.connect(str(roots.index_path))
+        try:
+            columns = {row[1] for row in conn.execute("pragma table_info(entity_index)")}
+        finally:
+            conn.close()
+        assert {"entity_class", "weight"} <= columns, (
+            f"legacy table must be migrated in place by sync: {columns}"
+        )

@@ -345,72 +345,15 @@ def _collect_entities_from_record(
     record_id: str,
     frontmatter: dict[str, Any],
 ) -> list[str]:
-    """Collect entity IDs associated with a crystallized record.
+    """Collect entity IDs for a crystallized record.
 
-    Sources (in priority order):
-    1. Frontmatter ``entities`` field (list of entity strings)
-    2. Entity index (SQLite entity_index table)
-    3. Frontmatter ``tags`` field as fallback
-
-    Returns a deduplicated list of normalized entity IDs. Returns an empty
-    list when no entities can be extracted (caller should set
-    ``invalidation_mode=conservative_full`` in that case).
+    Thin delegate to :func:`clearance_receipts.collect_entities_from_record`
+    so the judge (receipt ``checked_entity_set``) and the corpus change
+    emitters (event ``entity_set``) share one vocabulary.
     """
-    entities: list[str] = []
+    from .clearance_receipts import collect_entities_from_record
 
-    # Source 1: explicit entities field in frontmatter
-    fm_entities = frontmatter.get("entities")
-    if isinstance(fm_entities, list):
-        for ent in fm_entities:
-            if isinstance(ent, str) and ent.strip():
-                entities.append(ent.strip().lower())
-
-    # Source 2: entity index (SQLite)
-    if not entities:
-        try:
-            import sqlite3
-            index_path = getattr(store.roots, "index_path", None)
-            if index_path is not None:
-                conn = sqlite3.connect(str(index_path))
-                conn.row_factory = sqlite3.Row
-                try:
-                    table_check = conn.execute(
-                        "select name from sqlite_master "
-                        "where type='table' and name='entity_index'"
-                    ).fetchone()
-                    if table_check is not None:
-                        rows = conn.execute(
-                            "select distinct entity_id from entity_index "
-                            "where record_id = ?",
-                            (record_id,),
-                        ).fetchall()
-                        for row in rows:
-                            eid = str(row["entity_id"] or "").strip().lower()
-                            if eid:
-                                entities.append(eid)
-                except sqlite3.Error:
-                    pass
-                finally:
-                    conn.close()
-        except Exception:
-            pass
-
-    # Source 3: tags fallback
-    if not entities:
-        fm_tags = frontmatter.get("tags")
-        if isinstance(fm_tags, list):
-            for tag in fm_tags:
-                if isinstance(tag, str) and tag.strip():
-                    entities.append(f"tag:{tag.strip().lower()}")
-
-    # Deduplicate preserving order
-    seen: set[str] = set()
-    result: list[str] = []
-    for e in entities:
-        if e not in seen:
-            seen.add(e)
-            result.append(e)
-    return result
+    return collect_entities_from_record(store.roots, record_id, frontmatter)
 
 
 def _judge_against_permanents(

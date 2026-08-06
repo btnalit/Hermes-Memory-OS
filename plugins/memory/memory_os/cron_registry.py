@@ -650,8 +650,12 @@ def write_cron_registry_snapshot(
     groups: tuple[MemoryOSCronGroupSpec, ...] | None = None,
 ) -> dict[str, Any]:
     snapshot = cron_registry_snapshot(source_commit=source_commit, specs=specs, groups=groups)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    # Atomic replace: group resolution prefers this snapshot over the
+    # compiled-in registry, so a torn write here would silently break
+    # member resolution on the deployed host.
+    from .jsonl_io import write_json_atomic
+
+    write_json_atomic(path, snapshot)
     return snapshot
 
 

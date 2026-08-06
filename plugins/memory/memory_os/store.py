@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 from typing import Any
@@ -16,6 +17,11 @@ from .schema import EventEnvelope
 
 class StoreError(ValueError):
     """Raised when a store operation would break storage boundaries."""
+
+
+# Bound for the quarantine dedup sidecar: distinct malformed lines are an
+# anomaly measured in ones, not hundreds; the cap only guards pathology.
+_QUARANTINE_INDEX_MAX_SIGNATURES = 500
 
 
 def _reject_path_name(name: str, *, field_name: str) -> None:
@@ -153,11 +159,37 @@ class MemoryOSStore:
     def _quarantine_malformed_event(self, source_path: Path, line_number: int, line: str, error: str) -> None:
         quarantine_path = self.roots.quarantine_root / "malformed_events.jsonl"
         quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+        # The bad source line is never rewritten, so every read_events() scan
+        # re-encounters it. Dedup by signature: only the first sighting appends
+        # to the quarantine + audit ledgers; repeats bump a bounded sidecar
+        # counter instead of growing two ledgers on the per-turn scan path.
+        signature = hashlib.sha256(
+            f"{source_path}|{line_number}|{line}".encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        index_path = self.roots.quarantine_root / "malformed_events_index.json"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        seen: dict[str, Any] = {}
+        try:
+            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                seen = loaded
+        except (OSError, json.JSONDecodeError):
+            seen = {}
+        entry = seen.get(signature)
+        if isinstance(entry, dict):
+            entry["count"] = int(entry.get("count") or 0) + 1
+            entry["last_seen"] = now
+            seen[signature] = entry
+            _atomic_write_json(index_path, seen)
+            return
         record = {
+            "schema_version": "memory-os.quarantine_record.v0",
+            "signature": signature,
             "source_path": str(source_path),
             "line_number": line_number,
             "line": line,
             "error": error,
+            "first_seen": now,
         }
         append_jsonl_locked(quarantine_path, record, durable=True)
         append_audit(
@@ -165,5 +197,14 @@ class MemoryOSStore:
             action="quarantine_malformed_event",
             status="warning",
             target=str(source_path),
-            details={"line_number": line_number, "error": error},
+            details={"line_number": line_number, "error": error, "signature": signature},
         )
+        seen[signature] = {"first_seen": now, "last_seen": now, "count": 1}
+        if len(seen) > _QUARANTINE_INDEX_MAX_SIGNATURES:
+            stale_first = sorted(
+                (sig for sig in seen if sig != signature),
+                key=lambda sig: str(seen[sig].get("last_seen") or "") if isinstance(seen[sig], dict) else "",
+            )
+            for sig in stale_first[: len(seen) - _QUARANTINE_INDEX_MAX_SIGNATURES]:
+                seen.pop(sig, None)
+        _atomic_write_json(index_path, seen)

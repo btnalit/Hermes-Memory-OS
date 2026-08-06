@@ -1,8 +1,10 @@
 """RAGFlow evidence adapter — one-way seam from RAGFlow into Memory-OS.
 
-This module is the ONLY place in the codebase where "ragflow" appears as a
-code literal.  Memory-OS core (plugins/memory/memory_os/) imports nothing
-from here — the dependency flows one way: seam -> memory_os, never reverse.
+NOTE: this file is a stub (retrieve raises NotImplementedError). The working
+HTTP implementation lives in plugins/seam/external_evidence/ragflow_adapter.py,
+which also carries "ragflow" literals. Memory-OS core (plugins/memory/memory_os/)
+imports nothing from either — the dependency flows one way: seam -> memory_os,
+never reverse.
 """
 
 from __future__ import annotations

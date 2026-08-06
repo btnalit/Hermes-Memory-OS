@@ -200,7 +200,10 @@ def evaluate_recall(
             prefetch_result = build_prefetch(
                 gq.query,
                 store=store,
-                budget_chars=4000,
+                # Must match the production default (provider prefetch_char_budget
+                # = 2200): a larger evaluation budget makes the golden set pass
+                # on recall the deployed pipeline would truncate away.
+                budget_chars=2200,
                 diagnostic_grounding_enabled=False,
             )
         except Exception as exc:

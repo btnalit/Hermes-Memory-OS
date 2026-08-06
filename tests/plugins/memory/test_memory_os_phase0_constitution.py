@@ -180,7 +180,8 @@ def test_owner_journal_query_trace_contains_scope_but_no_result_or_body_metadata
     path = store.roots.memory_os_root / "system" / "wandering_journal.jsonl"
     trace = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
 
-    assert set(trace) == {"queried_at", "scope"}
+    assert set(trace) == {"schema_version", "record_type", "queried_at", "scope"}
+    assert trace["record_type"] == "query_trace"
     assert trace["queried_at"]
     assert trace["scope"] == "all"
     assert "scope_class" not in trace

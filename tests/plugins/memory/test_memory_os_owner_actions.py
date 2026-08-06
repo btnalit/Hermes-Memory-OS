@@ -4935,3 +4935,42 @@ def test_candidate_aggregation_error_record_write_failure_falls_back_to_audit(tm
     assert details["component"] == "owner_actions._candidate_aggregation_status_block"
     assert details["original_error_type"] == "RuntimeError"
     assert details["error_record_write_error_type"] == "OSError"
+
+
+def test_hermes_send_passes_bounded_timeout(monkeypatch):
+    # Counterfactual (analysis-doc M9): without a timeout kwarg a hung
+    # `hermes send` blocks the digest delivery path indefinitely.
+    captured: dict = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+
+        class _Completed:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(owner_actions_module.subprocess, "run", fake_run)
+    result = owner_actions_module._send_owner_review_digest_via_hermes(
+        hermes_bin="hermes", target_ref="telegram:1", message="{}",
+    )
+    assert result["ok"] is True
+    assert captured.get("timeout") == owner_actions_module._HERMES_SEND_TIMEOUT_SECONDS
+    assert isinstance(captured["timeout"], int) and captured["timeout"] > 0
+
+
+def test_hermes_send_timeout_returns_typed_failure(monkeypatch):
+    import subprocess as _subprocess
+
+    def fake_run(command, **kwargs):
+        raise _subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(owner_actions_module.subprocess, "run", fake_run)
+    result = owner_actions_module._send_owner_review_digest_via_hermes(
+        hermes_bin="hermes", target_ref="telegram:1", message="{}",
+    )
+    assert result["ok"] is False
+    assert result["code"] == "hermes_send_timeout"
+    assert result["delivery_ref"]["returncode"] == 124

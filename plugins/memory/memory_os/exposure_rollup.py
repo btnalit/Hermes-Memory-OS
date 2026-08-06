@@ -434,9 +434,10 @@ def run_exposure_rollup_cycle(
                 "trigger_class": trigger_class,
             },
         }
+        from .jsonl_io import write_json_atomic
+
         sp = _snapshot_path(store)
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(sp, snapshot)
     except Exception:
         pass  # snapshot is best-effort
 

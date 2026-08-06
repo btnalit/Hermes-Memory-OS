@@ -570,6 +570,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             role text not null,
             proposed_by text not null default 'structural',
             created_at text not null,
+            entity_class text not null default 'unknown',
+            weight real not null default 0.7,
             primary key (entity_id, record_id, role)
         );
         """
@@ -580,6 +582,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "memory_edges", "proposed_by", "text not null default 'structural'")
     _ensure_column(conn, "crystallized_candidates", "provenance_json", "text not null default '{}'")
     _ensure_column(conn, "crystallized_records", "canonical_state", "text not null default 'permanent'")
+    _ensure_column(conn, "entity_index", "entity_class", "text not null default 'unknown'")
+    _ensure_column(conn, "entity_index", "weight", "real not null default 0.7")
     _ensure_fts(conn)
     _set_metadata(conn, "fts_text_projection_version", _FTS_TEXT_PROJECTION_VERSION)
 
@@ -1096,10 +1100,14 @@ def _index_entities(conn: sqlite3.Connection, crystallized_root: Path) -> int:
 
         entities = extract_entities(body_text, record_id=record_id)
         for ent in entities:
+            # Column set must stay aligned with entity_index.refresh_entity_index —
+            # dropping class/weight here flattens Phase-2 soft-weighting on every
+            # rebuild/sync until the refresh lane repopulates.
             conn.execute(
-                "insert or ignore into entity_index (entity_id, entity_text, record_id, role, proposed_by, created_at) "
-                "values (?, ?, ?, ?, ?, ?)",
-                (ent["entity_id"], ent["entity_text"], ent["record_id"], ent["role"], ent["proposed_by"], now),
+                "insert or ignore into entity_index (entity_id, entity_text, record_id, role, proposed_by, created_at, entity_class, weight) "
+                "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ent["entity_id"], ent["entity_text"], ent["record_id"], ent["role"], ent["proposed_by"], now,
+                 ent.get("entity_class", "unknown"), ent.get("weight", 0.7)),
             )
             count += 1
 

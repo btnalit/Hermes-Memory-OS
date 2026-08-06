@@ -10,7 +10,7 @@ from typing import Any, Callable, TypeVar
 from uuid import uuid4
 
 from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
-from .jsonl_io import locked_jsonl_file
+from .jsonl_io import _append_line_under_lock, locked_jsonl_file
 from .store import MemoryOSStore
 from .v3_body_packet import remove_body_manifests, verify_body_packet_manifest
 
@@ -161,10 +161,20 @@ def query_journal(
             result = thoughts
         result = result[:limit]
         trace = {
+            "schema_version": JOURNAL_SCHEMA_VERSION,
+            "record_type": "query_trace",
             "queried_at": queried_at,
             "scope": scope_class,
         }
-        _rewrite_records_under_lock(wandering_journal_path(store), [*records, trace])
+        # Pure append under the already-held journal lock: rewriting the whole
+        # file per query made every read cost O(journal size) in writes, and
+        # typed+dated traces let the TTL sweep reclaim them.
+        path = wandering_journal_path(store)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _append_line_under_lock(
+            path,
+            json.dumps(trace, ensure_ascii=False, sort_keys=True) + "\n",
+        )
         return [*records, trace], result
 
     return _mutate_journal(store, mutate, callback_performs_write=True)

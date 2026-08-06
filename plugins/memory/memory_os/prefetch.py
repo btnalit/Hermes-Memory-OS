@@ -581,11 +581,12 @@ def _build_prefetch_sections(
     _append_section(sections, "Memory State Overlay", _state_overlay_lines(
         store, roots=store.roots, current_task_anchor=current_task_anchor,
         session_id=session_id))
-    # NOTE: _event_lines() and _continuity_bridge_lines() each trigger a full
-    # store.read_events() JSONL scan internally. This is a pre-existing double-scan
-    # (not introduced by session scoping). A future optimization could collect all
-    # needed events in a single pass and distribute to downstream filters.
-    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id, seen=seen))
+    # Single-pass event read: three sections below (Continuity Bridge, Recent
+    # Cross-Session, Recent Event Summaries) filter the same canonical event
+    # stream. Scanning it once per prefetch keeps the per-turn cost flat in
+    # event-history size instead of paying the full JSONL scan three times.
+    events_cache = list(store.read_events())
+    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id, seen=seen, events=events_cache))
     _append_section(sections, "Last Session", _last_session_lines(store, session_id=session_id, seen=seen))
     _append_section(
         sections,
@@ -596,6 +597,7 @@ def _build_prefetch_sections(
             error_records=error_records,
             seen=seen,
             query=query,
+            events=events_cache,
         ),
     )
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
@@ -647,7 +649,7 @@ def _build_prefetch_sections(
     _append_section(
         sections,
         "Recent Event Summaries",
-        _event_lines(store, session_id=session_id, seen=seen, source_ids=event_ids),
+        _event_lines(store, session_id=session_id, seen=seen, source_ids=event_ids, events=events_cache),
     )
     if event_ids:
         section_source_ids["Recent Event Summaries"] = event_ids
@@ -1834,6 +1836,7 @@ def _event_lines(
     session_id: str = "",
     seen: set[tuple[str, str]] | None = None,
     source_ids: list[str] | None = None,
+    events: list[Any] | None = None,
 ) -> list[str]:
     # When session-scoped: use pure recency sort (_select_session_events).
     # This prioritizes temporal proximity within a single session over
@@ -1842,9 +1845,9 @@ def _event_lines(
     # session, the user cares most about what just happened, and extreme
     # source-class imbalance is rare in normal session loads.
     if session_id:
-        selected = _select_session_events(store, session_id)
+        selected = _select_session_events(store, session_id, events=events)
     else:
-        selected, _dropped = _select_continuity_events(store)
+        selected, _dropped = _select_continuity_events(store, events=events)
     selected = sorted(selected, key=lambda e: (e.ts, e.id))  # chronological order for display
     lines: list[str] = []
     for event in selected:
@@ -2169,6 +2172,7 @@ def _recent_cross_session_lines(
     error_records: list[dict[str, Any]] | None = None,
     seen: set[tuple[str, str]] | None = None,
     query: str = "",
+    events: list[Any] | None = None,
 ) -> list[str]:
     """Source-gate-passed events from recent sessions (not current).
 
@@ -2258,7 +2262,7 @@ def _recent_cross_session_lines(
     cutoff = now - timedelta(hours=age_hours)
     collected: list[tuple[datetime, str]] = []
 
-    for event in store.read_events():
+    for event in (events if events is not None else store.read_events()):
         eid = str(event.id).strip()
         if eid not in source_gate_passed_ids:
             continue
@@ -2314,9 +2318,15 @@ def _recent_cross_session_lines(
     return lines
 
 
-def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[str, str]] | None = None) -> list[str]:
+def _continuity_bridge_lines(
+    store: MemoryOSStore,
+    *,
+    session_id: str = "",
+    seen: set[tuple[str, str]] | None = None,
+    events: list[Any] | None = None,
+) -> list[str]:
     selected, _dropped = _select_continuity_events(
-        store, exclude_session_id=session_id or None
+        store, exclude_session_id=session_id or None, events=events
     )
     if not selected:
         return []
@@ -2425,8 +2435,16 @@ def continuity_selector_report(store: MemoryOSStore) -> dict[str, Any]:
     }
 
 
-def _select_continuity_events(store: MemoryOSStore, *, exclude_session_id: str | None = None) -> tuple[list[Any], list[Any]]:
-    events = sorted(store.read_events(), key=lambda event: (event.ts, event.id), reverse=True)
+def _select_continuity_events(
+    store: MemoryOSStore,
+    *,
+    exclude_session_id: str | None = None,
+    events: list[Any] | None = None,
+) -> tuple[list[Any], list[Any]]:
+    # *events* lets the per-turn caller share one canonical scan across
+    # sections; None (the default) self-scans, preserving standalone behavior.
+    source = events if events is not None else store.read_events()
+    events = sorted(source, key=lambda event: (event.ts, event.id), reverse=True)
     if exclude_session_id is not None:
         events = [e for e in events
                   if str((e.safe_ref or {}).get("session_id", "")) != exclude_session_id]
@@ -2459,7 +2477,12 @@ def _select_continuity_events(store: MemoryOSStore, *, exclude_session_id: str |
     return selected, dropped
 
 
-def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
+def _select_session_events(
+    store: MemoryOSStore,
+    session_id: str,
+    *,
+    events: list[Any] | None = None,
+) -> list[Any]:
     """Return events for *session_id*, ts-descending, capped at _MAX_CONTINUITY_RECORDS.
 
     Includes events whose safe_ref.session_id matches *session_id*, AND
@@ -2479,11 +2502,12 @@ def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
     # These events were created before session_id stamping was added (pre-stamp
     # legacy) or via store.append_event() bypassing sync_turn. Excluding them
     # would silently drop relevant context from the current session's view.
-    events = [
-        e for e in store.read_events()
+    source = events if events is not None else store.read_events()
+    filtered = [
+        e for e in source
         if str((e.safe_ref or {}).get("session_id", "")) in (session_id, "")
     ]
-    return sorted(events, key=lambda e: (e.ts, e.id), reverse=True)[:_MAX_CONTINUITY_RECORDS]
+    return sorted(filtered, key=lambda e: (e.ts, e.id), reverse=True)[:_MAX_CONTINUITY_RECORDS]
 
 
 def _seed_sort_key(event: Any) -> tuple[str, float, str]:

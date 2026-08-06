@@ -4537,3 +4537,72 @@ TypeError——工具坑记录）。owner 再次重启 Gateway 使缓存刷新�
   并重启后，首条对话即写出带 `attribution_schema` 的披露行，
   **`schema_era_health` 历史首次靠真实样本 PASS**（era 1 / 缺口 0）。纯配置
   修复 + 文档记录。
+
+### CG — 深度拆解文档审计 + 十项真实缺陷修复批次（2026-08-05）
+
+**审计**：`docs/resolver/HERMES_MEMORY_OS_DEEP_ANALYSIS.md`（基线 ae4180b）约 35 条
+声明对 HEAD `9254bf1` 逐条 re-grep 复核：推翻 1 条（§6.4 信封竞态——envelope_id
+仅同调用栈传递 + ScheduleCoordinator 排他锁，无第二消费者）、半真 4 条（M10 的
+provenance 半句已被 `_load_events` 缓存修复；C1 步骤数 37–40；D5 实为 9 写点；
+D8 实为 5/8 态 + 游离 `shadow_bundle`）、其余确认，其中 4 项比文档更严重
+（D2 爆炸半径、M2 sync 抹平、D13 二次方重写、M6×M10 相乘）。更正已内联标注回文档。
+
+**修复批次（file-disjoint，一个 PR）**：
+
+1. **D2** `permanent_promotion.create_or_get` approved 分支 `self.store.roots`
+   AttributeError——1734 行清扫 handler 只捕 `PermanentPromotionError`，typed
+   error 在 raise 前先炸穿透，形成"同一记录每次清扫重复崩溃"（CF 的聚合版同形）；
+   B6 吸收审计从未成功写过。修：`_write_absorption_audit` 直收 root Path。
+2. **M2** entity_index 三层漂移：DDL 无 class/weight 列、`_ensure_column` 不含、
+   `_index_entities` 只插 6 列——rebuild 后 `query_related_records` 静默 []，且
+   **sync_from_store 每次清空重填把已治好的权重抹平回默认**（文档漏掉的路径）。
+   修三处 + 查询失败改 logger.warning（不再纯静默）。守卫测试用**真实生产者**
+   （rebuild_from_store）建库，另 pin 存量 6 列库的就地迁移。
+3. **M6** 隔离区重复膨胀：坏行每次 `read_events` 都重复隔离 + 双审计追加，与
+   prefetch 多扫相乘。修：sha256 签名去重 sidecar（封顶 500、原子写、首见才落账）。
+4. **M9** `hermes send` 无超时：加 `_HERMES_SEND_TIMEOUT_SECONDS=120` + typed
+   `hermes_send_timeout`（rc=124）；全库 subprocess.run 清扫确认其余站点均有
+   超时，唯 `deploy_clean_host._import_probe` 补 60s + 合成 CompletedProcess。
+5. **M3** 清关失效引擎：`watermark=0` 全量重放 + 事件恒无 entity_set →
+   每周期 conservative_full 失效全部回执（无限重判）。修：**逐回执窗口化**
+   （回执自带的 `corpus_watermark` 即水位的持久居所，无需新状态文件）+
+   `_emit_corpus_change_event` 传 frontmatter，实体集经下沉到
+   clearance_receipts 的共享收集器统一词表（词表漂移教训的正向应用）。
+   clearance_cycle 激活前置条件就此关闭。
+6. **M8** 非原子快照写清扫：contested_pairs（自称 Atomic 实非）、exposure_rollup、
+   **cron_registry 快照（M1 相邻——torn write 直接打断组解析）**、cron_mirror、
+   memory_projection summary、cli 验证报告，六处收敛到 jsonl_io 原子原语。
+7. **speak_gate** 两处 `open("a")` → `append_jsonl_locked`。
+8. **M10** prefetch 每 turn 2-3 次全量事件扫描 → 单趟读 + `events=None` 参数
+   下传三个区块（默认自读，无参数陷阱）。
+9. **D13** journal 查询痕迹：每查询**全文件重写**且 trace 永不清扫 → 改持锁纯
+   追加 + trace 带 record_type/schema_version，retention 按 30 天窗口回收
+   （含存量 `{queried_at, scope}` 遗留形状——分类而非搁置）。
+10. **M7** `action_required_count` 硬编码 0 占位删除（指标出生即 triage）；
+    cognitive_loop 死赋值 `signal_collection_result` 删除——但**步骤本身是
+    monitor required step，两次采集职责不同**（裸=健康证据/带信封=治理写），
+    不可删步骤，文档原"可删"判断已更正。
+    另：recall_golden 评估预算 4000→2200 对齐生产（R10）、ragflow 桩过时自述
+    更正（T3）、CLAUDE.md 心跳顺序与"每步信封"两处描述改为与代码一致（C1/C2）。
+
+**本轮新教训（反事实回归实录）**：M3 的共享收集器把 `sqlite3.connect` 带上了
+新调用路径——**connect 会把不存在的库创建成 0 字节文件**，而
+`owner_actions.py:6313` 有 exists-guard 的 schema 初始化，二者叠加打破了
+digest 干跑"零写盘"不变量。目标测试全绿、只有全量套件抓到
+（`test_one_shot_dry_run_with_eligible_permanent_item_writes_nothing`）。
+修：读意图的 sqlite 连接必须先 `Path(index_path).exists()`。
+再证 W 条"永远跑全量套件"不可省。
+
+**反事实覆盖**：12 条新测试全部完成 HEAD 红验证（cp 备份还原法，无一 vacuous）；
+4 处 trace 形状断言 + 1 处 fail-closed monkeypatch 目标随实现同步更新；
+10 处新写面原语在 `ALLOWED_WRITE_SURFACES` 重新分类（3 处旧形状键更替）。
+四道静态门 + `git diff --check` 全绿。
+
+**测试计数**：3163 → **3175 passed**（+12 反事实）+ 13 skipped，全量套件
+10m27s 零失败。分析文档本体已按修复结果二次更新（已修项标 ✅、开放项如实
+保留）并经 owner 授权 `git add -f` 纳入仓库跟踪。
+- `（CG，本节）`：深度拆解文档 35 条声明逐条审计（推翻 1、半真 4、4 项加重）
+  并把十项真实缺陷一次修复：D2 崩溃循环、M2 三层漂移+sync 抹平、M6 隔离膨胀、
+  M9/探针超时、M3 逐回执水位+实体归因（清关激活前置关闭）、M8 六处原子写、
+  speak_gate 加锁、M10 单趟扫描、D13 追加化+trace 回收、M7 占位删除；
+  12 反事实全部红验证，全量套件曾抓到 connect 创库回归——全量不可省的再证明。

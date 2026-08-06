@@ -125,7 +125,6 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
             "status": "ok" if records else base["status"],
             "record_count": len(records),
             "owner_action_count": len(records),
-            "action_required_count": 0,
             "latest_status": str(records[-1].get("result") or "") if records else "",
         }
     if spec.source_key == "hermes_cron_jobs":

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,6 +12,10 @@ from .execution_gate import complete_execution_gate_envelope, start_execution_ga
 from .store import MemoryOSStore
 from .v3_body_packet import remove_body_manifests
 from .wandering_journal import _mutate_journal
+
+# Query traces are diagnostics, not thoughts: they carry no TTL of their own,
+# so the sweep reclaims them on a fixed window to keep the journal bounded.
+_QUERY_TRACE_RETENTION_DAYS = 30
 
 
 def v3_journal_sweep_status_path(store: MemoryOSStore) -> Path:
@@ -49,9 +53,25 @@ def sweep_pending_expired(
 
     removed_snapshots: set[str] = set()
 
+    trace_cutoff = current - timedelta(days=_QUERY_TRACE_RETENTION_DAYS)
+
     def mutate(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], None]:
         kept: list[dict[str, Any]] = []
         for item in records:
+            # Query traces (typed) and the pre-typing legacy shape
+            # ({queried_at, scope} only) age out on the trace window —
+            # without this they were never swept and the journal grew
+            # one line per query, forever.
+            record_type = str(item.get("record_type") or "")
+            is_query_trace = record_type == "query_trace" or (
+                not record_type and set(item) == {"queried_at", "scope"}
+            )
+            if is_query_trace:
+                queried_at = _parse_datetime(item.get("queried_at"))
+                if queried_at is None or queried_at <= trace_cutoff:
+                    continue
+                kept.append(item)
+                continue
             if item.get("record_type") != "thought" or item.get("fate") != "pending":
                 kept.append(item)
                 continue

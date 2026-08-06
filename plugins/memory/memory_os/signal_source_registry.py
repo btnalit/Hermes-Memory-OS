@@ -102,7 +102,11 @@ def signal_source_specs() -> tuple[SignalSourceSpec, ...]:
             "owner_channel",
             "required_if_configured",
             ("memory-os/system/owner_actions.jsonl",),
-            status_fields + ("owner_action_count", "action_required_count"),
+            # action_required_count was a hardcoded-zero placeholder here: the
+            # ledger records completed actions, so "required" has no derivable
+            # meaning from this source. Removed rather than left as a metric
+            # nothing measures (session_approval owns the real one).
+            status_fields + ("owner_action_count",),
             retention_class="governance_evidence",
             tier=0,
         ),

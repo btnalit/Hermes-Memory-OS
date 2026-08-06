@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import any_boundary_true, complete_execution_gate_envelope, resolve_execution_gate_permit
-from .jsonl_io import append_jsonl_locked, read_jsonl_result
+from .jsonl_io import append_jsonl_locked, read_jsonl_result, write_json_atomic
 from .signal_collectors import collect_signal_sources
 from .signal_source_registry import signal_source_specs
 from .store import MemoryOSStore
@@ -317,8 +317,7 @@ def _projection_records_from_collection(
 def _write_projection_summary(roots: MemoryOSRoots) -> dict[str, Any]:
     status = memory_projection_status(roots)
     path = memory_projection_summary_path(roots)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(path, status)
     return status
 
 

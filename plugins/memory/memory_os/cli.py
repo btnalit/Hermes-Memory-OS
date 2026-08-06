@@ -2739,14 +2739,12 @@ def _module_status_by_id(modules_status: dict[str, Any], module_id: str) -> dict
 
 
 def _write_host_validation_report(store: MemoryOSStore, report: dict[str, Any]) -> Path:
+    from .jsonl_io import write_json_atomic
+
     root = store.roots.memory_os_root / "system-modules" / "validation"
-    root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     path = root / f"validation_{stamp}.json"
-    path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_json_atomic(path, report)
     return path
 
 
