@@ -10,7 +10,17 @@ from uuid import uuid4
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "capture_policy": "summary_only",
-    "prefetch_char_budget": 20000,
+    # Right-sized 2026-08-06 from production measurement (last 100 disclosures
+    # on hermes-media): rendered totals p50≈4.6k, p90≈7.9k, max 9,297 chars —
+    # the pre-optimization 20000 never bound and had stopped being a guardrail.
+    # 12000 = observed max × ~1.29 headroom; dropping is score-driven, the
+    # budget is the backstop.
+    "prefetch_char_budget": 12000,
+    # Absolute paths of external state roots the StateSourceMirror scans
+    # (allowlisted patterns only, metadata-only events). Empty = mirror idle.
+    # Previously CLI-only (--state-root), which left the shipped feature
+    # unusable by the provider and the cron lane.
+    "external_state_roots": [],
     "fast_path_keywords": None,
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,

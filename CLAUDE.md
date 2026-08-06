@@ -151,10 +151,10 @@ Fast probe PASS is not a substitute for full live monitor PASS.
 
 `cron_registry.py` holds **two tables**, and the distinction is load-bearing:
 
-- **Lanes** (`MEMORY_OS_CRON_LANES`, 22) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
+- **Lanes** (`MEMORY_OS_CRON_LANES`, 23) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
 - **Groups** (`MEMORY_OS_CRON_GROUPS`, 9) — the Hermes scheduling surface: what `hermes cron create` actually creates.
 
-Default profile `active-closure` installs **8 Hermes cron jobs** covering 20 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` activation is deferred):
+Default profile `active-closure` installs **8 Hermes cron jobs** covering 22 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` was activated and `state_source_mirror` registered on 2026-08-06 — the exclusion intent record is `cron_registry.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS`):
 
 | Group job | Schedule | Members |
 |---|---|---|

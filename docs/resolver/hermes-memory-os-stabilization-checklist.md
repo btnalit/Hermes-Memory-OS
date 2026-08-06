@@ -3660,6 +3660,17 @@ monitor 文件 235 passed，全量 3162+1 → **3163 passed / 13 skipped**。
 
 ## 待办
 
+**V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
+标准：届时 `v3_seed_evidence_snapshot.activation_evidence_ready=True` 且
+Full Monitor 0 FAIL → 开启 R4（`wandering_enabled=true` 影子观察 14 天再评
+R5）；若 ready=False（当前连续 4/30 天、历史中断 11 次）→ 记录中断原因并
+设定一个**明确的新日期**顺延，同样不许开放式搁置。
+
+**V7 影子→实操毕业（逐组件 owner 决策，随时可启动）**：五个影子治理生产者
+已在生产持续产出并被聚合端消费（见 CI 节），毕业按 owner 信号阶梯逐组件
+推进——当前仅 `retractable_label_miner` 攒满 20 个 owner 批准达
+owner_approved_apply 档。
+
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
 P2×3（BF）、P3×5（BG）。
 
@@ -4693,3 +4704,46 @@ amend + force-with-lease 修复——临时产物随手删，别等收尾。
   误报的注册表单源修正）、19 钉反漂移批、死代码净删 302 行（D9 经实证改判
   文档化）、全部部署 3.200 并 Full Monitor 102/5/0 收口；探测器新 PASS
   首跑即绿，瞬时争用家族添两例（doctor preflight、agenda 采集）。
+
+### CI — 七项 owner 决策执行（2026-08-06）
+
+owner 对 P3 清单逐项拍板后一批执行。两项前提在实施中被生产数据修正。
+
+1. **clearance_cycle 激活**：先证 `sweep_unavailable_open_proposals_on_flag_flip`
+   **零生产调用方**（onboarding 注释担心的"激活连坐回收 9 个开放提案"不可能
+   发生）→ 从 `ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS` 删除，骑既有 tick_governance
+   job（无独立 job）。两处钉住延迟语义的测试同步反转；parity 反事实改用
+   monkeypatch 合成排除（随真实集缩减而存活）。
+2. **prefetch 预算右尺寸**：生产实测最近 100 条披露 p50≈4.6k / p90≈7.9k /
+   max 9,297 字符——20000 是从未起约束作用的前优化残留，且**就是
+   DEFAULT_CONFIG 代码默认**（CG 的 R10"对齐生产默认 2200"对齐错了对象：
+   2200 只是 config 加载彻底失败的内联兜底）。改 DEFAULT_CONFIG=12000
+   （max×1.29 余量），recall_golden 直接 import 常量永不再漂；主机
+   config.json 显式 20000 随部署改 12000（生效需 Gateway 重启）。
+3. **hindsight retriever 留用验证**：31 专属测试绿 + recall probe
+   `--type hindsight` 端到端跑通（空库正确空返回）+ 生产 substrate 路径
+   monitor 常绿——可选对接启用路径健康。
+4. **external_state_roots 落地**：白名单增设 `state:owner_memory_md` /
+   `state:owner_user_md`（生产唯一真实状态根 `<home>/memories` 只有这两个
+   文件，原白名单全是 Sannai 型 artifact——指根会镜像到零）；config 增
+   `external_state_roots` 键 + provider 接线（原 CLI-only）；新增
+   `state_source_mirror` 日频 lane（tick_daily 骑行，六触点齐）；反事实证
+   元数据只读（文件正文任何位置不得出现）+ 空配置诚实报
+   state_root_count=0。
+5. **D14 前提被生产推翻**：五个影子生产者经认知循环 systemd timer 一直在
+   跑（candidate_review 2264 决策、router 2264 路由全 mid 段、cascade 336
+   提案、provisional 672 runs 且 would_promote_count:0 为诚实无产出），
+   聚合端三处消费真实数据。原审计把"未 live-apply"误读为"未运行"——
+   分析文档 D14 行已更正。真正的"开"是 V7 逐组件毕业（见待办）。
+6. **V3 复查日期制**：连续 4/30 天（中断 11 次），复查日 2026-09-05 写入
+   待办，含标准与"顺延必须带新日期"条款。
+7. EXTERNAL_EVIDENCE 枚举按 owner 决定搁置（census 已钉 reserved）。
+
+**测试计数**：3190 → **3192 passed**（+镜像 owner-files 反事实、+helper 空配置
+诚实报告）+ 13 skipped；lane 计数钉测改为注册表推导（22 active / 8 jobs——
+手写排除集正是它自己警告的漂移病，已消除）。四门全绿。
+- `（CI，本节）`：七项 owner 决策一批执行——清关激活（先证 sweep 零调用方）、
+  预算 20000→12000（生产实测 max 9.3k；CG 的 R10 对齐错对象一并更正）、
+  hindsight 启用路径验证、external_state_roots 全链路落地（新 lane + 白名单
+  两类 + config 键）、D14 前提被生产推翻（影子生产者一直在跑——审计把
+  未 live-apply 误读为未运行）、V3 复查日 2026-09-05 制度化、枚举搁置。

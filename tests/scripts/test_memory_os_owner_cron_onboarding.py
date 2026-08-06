@@ -348,17 +348,15 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert full_monitor["raw_script"] == "memory_os_full_monitor_refresh.py"
     assert full_monitor["deliver"] == "discord"
     assert full_monitor["no_agent"] is True
-    # clearance_cycle is a real registered spec whose helper and gate scripts
-    # the installer already deploys, but its activation is DEFERRED (see the
-    # comment on ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS): enabling it in the same
-    # change that repaired append_terminal would make two never-exercised
-    # paths live at once on production. Assert the deferral is real and
-    # deliberate -- not the old silent drift.
+    # clearance_cycle was ACTIVATED by owner decision on 2026-08-06: it rides
+    # the existing tick_governance group job, so there is still never a
+    # standalone memory-os-clearance-cycle job to create.
     assert not [
         job for job in report["operational_cron_jobs"]
         if job["name"] == "memory-os-clearance-cycle"
     ]
-    assert "clearance_cycle" in module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+    assert "clearance_cycle" not in module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+    assert "clearance_cycle" in module.ACTIVE_CLOSURE_CRON_KEYS
     for job in report["operational_cron_jobs"]:
         assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
@@ -725,14 +723,13 @@ def test_active_closure_cron_keys_are_derived_from_the_registry_not_hand_typed()
     all_keys = {spec.key for spec in memory_os_cron_specs()}
 
     assert module.ACTIVE_CLOSURE_CRON_KEYS == all_keys - module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
-    # Both exclusions are documented and deliberate: module_cadence_report is
-    # permanent (generated on demand elsewhere); clearance_cycle is deferred
-    # pending a separate, observed enablement.
+    # The remaining exclusion is documented and deliberate: module_cadence_report
+    # is permanent (generated on demand elsewhere). clearance_cycle graduated
+    # from deferred to ACTIVE by owner decision on 2026-08-06.
     assert module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS == {
         "module_cadence_report",
-        "clearance_cycle",
     }
-    assert "clearance_cycle" not in module.ACTIVE_CLOSURE_CRON_KEYS
+    assert "clearance_cycle" in module.ACTIVE_CLOSURE_CRON_KEYS
     assert "module_cadence_report" not in module.ACTIVE_CLOSURE_CRON_KEYS
     # Every registered key must be classified one way or the other -- no
     # key silently falls through unclassified.

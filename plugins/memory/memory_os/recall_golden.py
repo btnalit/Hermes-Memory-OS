@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Any
 
+from .config import DEFAULT_CONFIG
 from .recall_types import RecallType
 from .store import MemoryOSStore
 
@@ -200,10 +201,11 @@ def evaluate_recall(
             prefetch_result = build_prefetch(
                 gq.query,
                 store=store,
-                # Must match the production default (provider prefetch_char_budget
-                # = 2200): a larger evaluation budget makes the golden set pass
-                # on recall the deployed pipeline would truncate away.
-                budget_chars=2200,
+                # Evaluate at exactly the deployed default so the golden set
+                # can never pass on recall the production pipeline would
+                # truncate away — importing the constant means a future
+                # default change re-aligns this automatically.
+                budget_chars=int(DEFAULT_CONFIG["prefetch_char_budget"]),
                 diagnostic_grounding_enabled=False,
             )
         except Exception as exc:

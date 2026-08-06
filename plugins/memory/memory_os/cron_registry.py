@@ -102,14 +102,14 @@ LEGACY_PER_LANE_CRON_SCRIPT_NAMES = frozenset(LEGACY_PER_LANE_CRON_JOBS.values()
 #     on demand by build_cadence_report() from both the monitor dashboard
 #     snapshot and the 3.200 full monitor, so a dedicated periodic cron job
 #     is redundant; it remains available under the "full" cron profile.
-#   - clearance_cycle: DEFERRED ACTIVATION, not a permanent exclusion. The
-#     helper/gate scripts are deployed and the M3 watermark fix removed the
-#     technical blocker, but switching the lane on is an owner decision that
-#     must not ride in as a side effect of an unrelated change. To enable:
-#     delete this one line (and regenerate the deployed snapshot).
+#   (clearance_cycle was held here as DEFERRED ACTIVATION until 2026-08-06,
+#   when the owner approved enabling it: the M3 per-receipt watermark fix
+#   removed the endless-rejudge blocker, the snapshot-parity detector guards
+#   the deployment step, and sweep_unavailable_open_proposals_on_flag_flip
+#   was verified to have zero production callers — activation cannot revoke
+#   open proposals. The lane rides the existing tick_governance job.)
 ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS = frozenset({
     "module_cadence_report",
-    "clearance_cycle",
 })
 
 DUE_POLICY_INTERVAL = "interval"
@@ -278,6 +278,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
             "v3_seed_evidence",
             "v3_journal_sweep",
             "working_cleanup",
+            "state_source_mirror",
             "hindsight_advisory_digest",
         ),
     ),
@@ -495,6 +496,14 @@ MEMORY_OS_CRON_LANES: tuple[MemoryOSCronLaneDef, ...] = (
         helper_kind="local_helper",
         group_key="tick_daily",
         due_interval_minutes=10080,
+    ),
+    MemoryOSCronLaneDef(
+        key="state_source_mirror",
+        raw_script="memory_os_state_source_mirror_helper.py",
+        lane_id="state_source_mirror",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=1440,
     ),
     MemoryOSCronLaneDef(
         key="hindsight_advisory_digest",

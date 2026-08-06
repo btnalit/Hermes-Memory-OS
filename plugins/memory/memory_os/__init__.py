@@ -109,7 +109,13 @@ class MemoryOSProvider(MemoryProvider):
         self.platform = str(kwargs.get("platform") or "")
         self.profile = str(kwargs.get("agent_identity") or kwargs.get("profile") or "memoryos-test")
         self._config = memory_os_config.load_config(self.hermes_home)
-        self._roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        self._roots = MemoryOSRoots.from_hermes_home(
+            self.hermes_home,
+            profile=self.profile,
+            external_state_roots=[
+                str(root) for root in (self._config.get("external_state_roots") or []) if str(root or "").strip()
+            ],
+        )
         # Initialize embedder from knobs (D1: moved from __init__ so roots is available)
         self._embedder = None
         try:

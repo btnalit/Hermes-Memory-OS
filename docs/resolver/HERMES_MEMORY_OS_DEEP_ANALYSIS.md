@@ -138,12 +138,12 @@ flowchart TD
 
 ### 2.3 Cron 双表体系（`cron_registry.py`，847 行）
 
-**Lane（22 个）vs Group（9 个）**，区分是承重设计：**[代码]**
+**Lane（23 个，2026-08-06 增 state_source_mirror）vs Group（9 个）**，区分是承重设计：**[代码]**
 
 - **Lane = 治理身份**：`lane_id`、`raw_script`、`helper_kind`（即 risk_class）、`due_interval_minutes`、`due_policy`（interval/calendar）。一次运行一个 ExecutionGate 信封，**永不坍缩**。
 - **Group = Hermes 调度面**：`hermes cron create` 实际创建的是 group job；成员共享同一 tick wrapper。
 
-**active-closure 默认 8 个 Hermes cron job 覆盖 20 lanes**（`module_cadence_report` 为 full profile 专属、`clearance_cycle` 注册但从未激活）：
+**active-closure 默认 8 个 Hermes cron job 覆盖 22 lanes**（`module_cadence_report` 为 full profile 专属；`clearance_cycle` 已于 2026-08-06 经 owner 决策激活）：
 
 | Group job | Schedule | 成员 lanes |
 |---|---|---|
@@ -711,7 +711,7 @@ CI（25 分钟）额外跑：非编辑 wheel 清单校验 → mount-isolated 全
 | D11 | **`metadata_retention_plan` 恒为 dry-run** | `canonical_paths_touched=[]` 硬编码，无执行函数——规划器与执行器分离，保留策略从未落地 | `metadata_retention.py:138,152` |
 | D12 | **quarantine 记录格式与 error_record 不一致** | `malformed_events.jsonl` 记录无 `schema_version`（对比 `jsonl_io` 的 `memory-os.error_record.v0`），两套畸形记录格式并存 | `store.py:153-160` vs `jsonl_io.py` |
 | ✅ D13（已修复 2026-08-05：查询路径改持锁纯追加；trace 带 record_type/schema_version；retention 30 天窗口回收，含存量遗留形状） | **journal 查询 trace 永久增长 + 二次方 IO**（2026-08-05 审计升级：查询路径经 `_rewrite_records_under_lock` 每次**全文件重写**，文件越长每次查询越贵，不只是追加膨胀） | `query_journal` 每次查询向 journal 追加一行 `{queried_at, scope}`，而 TTL sweep 只删 `record_type=="thought"` 的条目——trace 无清理策略 | `wandering_journal.py:163-167`、`v3_retention.py:55` |
-| D14 | **shadow 治理模块默认未启用** | candidate_review/confidence_router/provisional 等 `enabled=False` + `live_applied` 恒 False——大量代码"已接入但无数据"，行为未被真实数据验证（candidate_aggregation 对它们 fail-open） | `plugins/modules/governance/*` 模块 defaults |
+| D14 | **shadow 治理模块默认未启用**（2026-08-06 生产实证**推翻前提**：五个生产者经认知循环 systemd timer 一直在跑并产出——candidate_review 2264 决策/336 runs、confidence_router 2264 路由、cascade 336 提案、provisional 672 runs 且 `would_promote_count:0` 是诚实无产出报告；聚合端 `_lookup_confidence_route` 三处消费真实数据。原审计把"未 live-apply（影子）"误读为"未运行"。真正未开的只剩 **V7 影子→实操毕业**——逐组件 owner 信号阶梯，目前仅 retractable_label_miner 攒满 20 批准） | `enabled=False`/`live_applied=False` 是 live-apply 门而非运行门 | 生产 `system-modules/*` 产物 + `cognitive_loop.py:230-240` |
 | D15 | **向量检索全表扫描（无 ANN）** | `vector_search` 逐行 numpy 余弦计算，无索引/无 ANN；数据量增长后热路径延迟线性上升 | `index.py::vector_search` |
 
 ### 9.3 双实现漂移（改一处必须同步多处）
