@@ -2224,8 +2224,12 @@ def _looks_like_operation_context(text: str) -> bool:
         "安装", "下载", "合入", "部署", "同步", "重启",
     )
     if any(a in lowered for a in _ACTION):
-        from .entity_extractor import extract_entities
-        entities = extract_entities(text)
+        # W9 note: this gate needs reference DETECTION ("does the text name a
+        # concrete target"), not index WORTHINESS — pass the detection class
+        # set explicitly so the index-side default filter cannot silently
+        # change this predicate (shared-predicate trap).
+        from .entity_extractor import REFERENCE_DETECTION_CLASSES, extract_entities
+        entities = extract_entities(text, classes=REFERENCE_DETECTION_CLASSES)
         if entities:
             return True
 
