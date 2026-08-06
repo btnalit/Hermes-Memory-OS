@@ -38,6 +38,12 @@ STATE_SOURCE_CLASSES: tuple[StateSourceClass, ...] = (
     ),
     StateSourceClass("state:diary", "diary.md", "state_source_changed", "evidence_only"),
     StateSourceClass("state:self_memory", "self_memory.md", "state_source_changed", "evidence_only"),
+    # Hermes host-maintained owner memory files (2026-08-06, owner decision:
+    # the mirror is meant to be USED — production's only real state root is
+    # <hermes_home>/memories with exactly these two files). Metadata-only
+    # events like every other class: hash/size/mtime, never content.
+    StateSourceClass("state:owner_memory_md", "MEMORY.md", "state_source_changed", "evidence_only"),
+    StateSourceClass("state:owner_user_md", "USER.md", "state_source_changed", "evidence_only"),
     StateSourceClass("state:relationship_memory", "relationship_memory.md", "state_source_changed", "evidence_only"),
     StateSourceClass("state:lingering_thoughts", "lingering_thoughts.json", "state_source_changed", "evidence_only"),
 )

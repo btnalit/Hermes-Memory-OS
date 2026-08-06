@@ -111,3 +111,44 @@ def test_state_source_mirror_cli_scan_apply_outputs_json_report(tmp_path, monkey
     event = _store(tmp_path, state_roots=[state_root]).read_events()[0]
     assert event.safe_ref["source_class"] == "state:digest_daily"
     assert "PRIVATE_DIGEST_BODY_SHOULD_NOT_APPEAR" not in json.dumps(event.to_dict(), ensure_ascii=False)
+
+
+def test_owner_memory_files_are_mirrored_metadata_only(tmp_path):
+    """Counterfactual (#4, 2026-08-06): production's only real state root is
+    <hermes_home>/memories with MEMORY.md + USER.md — before the allowlist
+    gained these classes, pointing external_state_roots at it mirrored
+    NOTHING and the shipped feature was unusable. Events must be metadata
+    only: the file content may never appear anywhere in the envelope."""
+    state_root = tmp_path / "memories"
+    state_root.mkdir(parents=True)
+    (state_root / "MEMORY.md").write_text(
+        "OWNER_MEMORY_BODY_MUST_NOT_LEAK alpha", encoding="utf-8"
+    )
+    (state_root / "USER.md").write_text(
+        "OWNER_USER_BODY_MUST_NOT_LEAK beta", encoding="utf-8"
+    )
+    store = _store(tmp_path, state_roots=[state_root])
+
+    report = StateSourceMirror(store).scan(dry_run=False)
+
+    assert report["new_event_count"] == 2
+    events = store.read_events()
+    classes = {event.safe_ref["source_class"] for event in events}
+    assert classes == {"state:owner_memory_md", "state:owner_user_md"}
+    blob = json.dumps([event.to_dict() for event in events], ensure_ascii=False)
+    assert "OWNER_MEMORY_BODY_MUST_NOT_LEAK" not in blob
+    assert "OWNER_USER_BODY_MUST_NOT_LEAK" not in blob
+    for event in events:
+        assert event.body_policy == "summary_only"
+        assert event.safe_ref["candidate_allowed"] is False
+
+
+def test_helper_reports_idle_with_reason_when_no_roots_configured(tmp_path):
+    """The lane's no-output case must say why on its face: zero configured
+    roots -> report carries state_root_count=0, not a bare empty scan."""
+    store = _store(tmp_path, state_roots=[])
+
+    report = StateSourceMirror(store).scan(dry_run=False)
+
+    assert report["new_event_count"] == 0
+    assert report["state_root_count"] == 0

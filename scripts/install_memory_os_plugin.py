@@ -48,6 +48,7 @@ SOURCE_FACT_JUDGE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_fact_judge_gate
 SOURCE_SESSION_FACT_EXTRACTION_LANE = REPO_ROOT / "scripts" / "memory_os_session_fact_extraction_lane.py"
 SOURCE_SESSION_FACT_EXTRACTION_GATE = REPO_ROOT / "scripts" / "memory_os_cron_session_fact_extraction_gate.py"
 SOURCE_CLEANUP_EXPIRED_WORKING = REPO_ROOT / "scripts" / "cleanup_expired_working.py"
+SOURCE_STATE_SOURCE_MIRROR_HELPER = REPO_ROOT / "scripts" / "memory_os_state_source_mirror_helper.py"
 SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
@@ -1162,6 +1163,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "index_sync": SOURCE_INDEX_SYNC,
         "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
         "cleanup_expired_working": SOURCE_CLEANUP_EXPIRED_WORKING,
+        "state_source_mirror_helper": SOURCE_STATE_SOURCE_MIRROR_HELPER,
         "l3_probe_helper": SOURCE_L3_PROBE_HELPER,
         "event_stats_refresh": SOURCE_EVENT_STATS_REFRESH,
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
