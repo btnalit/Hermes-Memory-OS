@@ -23,7 +23,7 @@
 10. [目录结构速查](#10-目录结构速查)
 11. [记忆动态图谱专项审计与修复方案（2026-08-06 增补）](#11-记忆动态图谱专项审计与修复方案2026-08-06-增补)
 12. [State Overlay 陈旧缓存缺陷族（2026-08-06 增补）](#12-state-overlay-陈旧缓存缺陷族2026-08-06-增补)
-13. [合并修复任务排期（2026-08-06 增补）](#13-合并修复任务排期2026-08-06-增补)
+13. [合并修复任务排期与 V3 前置核实（2026-08-06 增补）](#13-合并修复任务排期2026-08-06-增补)
 
 ---
 
@@ -928,38 +928,56 @@ Hermes-Memory-OS/
 
 ## 13. 合并修复任务排期（2026-08-06 增补）
 
-> 覆盖第 11 节（图谱 E1–E6）与第 12 节（Overlay S1–S6）全部缺陷。批次字母续 CG 之后。**全部未动工**；动工时按惯例逐批登记 stabilization checklist。CH 与 CI 文件面互斥，可并行；CI→CJ 有强顺序约束。
+> 覆盖第 11 节（图谱 E1–E6）与第 12 节（Overlay S1–S6）全部缺陷。**交付方式：owner 2026-08-06 决定不分批 —— 全部修完后一次提交、合并、部署、验证。** 下表因此是**实施顺序清单**而非并行批次划分；顺序约束仍然有效（它们是正确性约束，不是排期偏好）。全部未动工；完成后按惯例登记 stabilization checklist（单节记录整轮）。
 
-### 13.1 任务表
+### 13.1 工作项（按实施顺序）
 
-| 批次 | 任务 | 对应缺陷 | 主要文件 | 反事实测试 |
+| # | 工作项 | 对应缺陷 | 主要文件 | 反事实测试 |
 |---|---|---|---|---|
-| **CH** | live 锚点覆盖 active_projects（抽公共 helper）+ 同 helper 修 retriever + `task_revision` 错配处置 + docstring 改实话 | S1 S2 S3 | `prefetch.py` `state_overlay.py` `retrievers/state_overlay.py` | ①缓存空+live 非空→含锚点；②缓存旧锚点 A+live B→渲染为 B（缺此条则"仅填空"实现可蒙混） |
-| **CH.2** | quiet gate 改读耐久台账 + 读取失败 fail-closed | S4 S5 | `v3_wandering.py` | 缓存/台账不可读→`quiet=False`（无修复必红：现状返回 True） |
-| **CI** | 去重下沉写入口（partial unique index + JSONL 指纹）；structural 收回 refines 提名权（只许 co_occurs）；配对去偏置（未建边优先稳定序）；存量 769 冗余行 keep-earliest 其余 invalidated | E2 E3 | `index.py` `structural_edge_proposer.py` +一次性脚本 | 存量>1000 条时重复三元组写入必须被拒（现状 limit=1000 被超穿） |
-| **CJ** | candidate→owner_eligible 晋升通道；candidate 边 TTL 自动 invalidated；digest top-K + 按簇批量审批；**状态词表双向守卫测试** | E1 | `owner_actions.py` `index.py` cleanup lane | 生产者写出的任一状态若无消费出口→测试必红（双向断言，非单向） |
-| **CK** | 溯源边挖掘 lane（source_event_ids → derived_from/evidence_for，auto-active）；llm 运行时环境修复（**须经 installer 落地**，wrapper 由 `_write_cognitive_loop_artifacts` 生成）；step 包装器透传 `reason`；proposer 产出契约落盘（封闭原因码 + 计数）；输出型 knob override 过期进 monitor | E4 E5 分支 | 新 lane + `cognitive_loop.py` `install_memory_os_plugin.py` `memory_os_3_200_monitor.py` | knob 过期后无告警→守卫必红；lane 空转与失败在产物侧必须可区分 |
-| **CL** | （owner 决策后）注入 knob 续期（带 expires_at 与复查日）；权重反馈闭环（shadow 命中加权/未命中衰减，仅段内排序）；`entity_index_enabled` 暂置 False | E5 E6 | `knob_overrides` + 新离线 lane | 权重变更不得影响全局 ranking（守 exposure firewall） |
+| **W1** | 去重下沉写入口（partial unique index + JSONL 指纹）；structural 收回 refines 提名权（只许 co_occurs）；配对去偏置（未建边优先稳定序） | E2 E3 | `index.py` `structural_edge_proposer.py` | 存量>1000 条时重复三元组写入必须被拒（现状 limit=1000 被超穿） |
+| **W2** | 存量 769 冗余行 keep-earliest、其余转 invalidated（G3 合规不删） | E2 | 一次性脚本 | 压缩后唯一三元组数不变、invalidated 计数等于冗余数 |
+| **W3** | candidate→owner_eligible 晋升通道；candidate 边 TTL 自动 invalidated；digest top-K + 按簇批量审批；**状态词表双向守卫测试** | E1 | `owner_actions.py` `index.py` cleanup lane | 生产者写出的任一状态若无消费出口→测试必红（双向断言，非单向） |
+| **W4** | 溯源边挖掘 lane（source_event_ids → derived_from/evidence_for，auto-active、幂等、有界） | 11.4 图源第 2 档 | 新 lane | 锚点落在 event/working 段时必须能查到跨层边 |
+| **W5** | llm 运行时环境修复（**须经 installer 落地**，wrapper 由 `_write_cognitive_loop_artifacts` 生成，只改主机现场会被下次安装覆盖）；step 包装器透传 `reason` | E4 | `install_memory_os_plugin.py` `cognitive_loop.py` | skip 时 reason 必须出现在报告中（现状被吞） |
+| **W6** | proposer 产出契约落盘（封闭原因码 + 扫描/合格/新提/去重跳过计数）；输出型 knob override 过期进 monitor | E5 观测面 | 三个 proposer + `memory_os_3_200_monitor.py` | knob 过期后无告警→守卫必红；lane 空转与失败在产物侧必须可区分 |
+| **W7** | live 锚点覆盖 active_projects（抽公共 helper 单一生产者）+ 同 helper 修 retriever + `task_revision` 错配处置 + docstring 改实话 | S1 S2 S3 | `prefetch.py` `state_overlay.py` `retrievers/state_overlay.py` | ①缓存空+live 非空→含锚点；②缓存旧锚点 A+live B→渲染为 B（缺②则"仅填空"实现可蒙混） |
+| **W8** | quiet gate 改读耐久台账 `task_state.read_effective_current_task()` + 读取失败 fail-closed | S4 S5 | `v3_wandering.py` | 台账不可读→`quiet=False`（无修复必红：现状返回 True） |
 
-### 13.2 顺序与依赖
+### 13.2 顺序约束（正确性约束，非排期偏好）
 
-```
-CH ──┐ (Overlay，文件面与图谱互斥，可与 CI 并行)
-CH.2 ┘  ← R4（2026-09-05 复查日）前置，不得晚于该日期
+- **W1+W2 必须先于 W3**：先修去重与配对偏置、清完存量，晋升通道才不会把 1380 组唯一三元组连同重复垃圾一起送进 digest。
+- **W7/W8 与图谱各项文件面无交集**，顺序自由；但 W8 有硬日期约束（R4 复查日 2026-09-05 之前）。
+- **注入 knob 续期不在本轮范围**：属 owner 决策（见 13.3），且必须晚于 W1–W3 —— 当前 active 边仅 31 条（全为 llm 自动边），先开注入没有内容可注。
 
-CI ──→ CJ ──→ CK ──→ CL
- 止血    治理    供给    激活(owner)
-```
+### 13.3 Owner 决策点（不阻塞上表，但阻塞"激活"）
 
-- **CI 必须先于 CJ**：先修去重与配对偏置、清完存量，晋升通道才不会把 1380 组唯一三元组连同重复垃圾一起送进 digest。
-- **CL 必须晚于 E1–E3 修复**：当前 active 边仅 31 条（全为 llm 自动边），先开注入没有内容可注。
-- **CH/CH.2 与图谱各批文件面无交集**，可并行；但 CH.2 有硬日期约束（R4 复查）。
+1. **S6**：`casual_continuity` 路由下 Overlay 的 active_projects 是否应一并抑制（当前泄漏锚点首 200 字符，含工具结果片段）—— 影响 W7 的最终形态。
+2. **注入续期**：`graph_layer_injection_enabled` 是否重开、续期时限与复查日期。
+3. **V3 激活门判据**：见 13.4 —— 现判据在当前使用模式下实际不可达，改或不改都需 owner 明确决定。
 
-### 13.3 Owner 决策点（三项，阻塞对应批次）
+### 13.4 V3 激活前置核实（2026-08-06 实测）
 
-1. **S6**：`casual_continuity` 路由下 Overlay 的 active_projects 是否应一并抑制（当前泄漏锚点首 200 字符，含工具结果片段）—— 影响 CH 的最终形态。
-2. **注入续期**（CL）：`graph_layer_injection_enabled` 是否重开、续期时限与复查日期。
-3. **实体层**（CL）：`entity_index_enabled` 是否暂置 False，待结晶量与抽取质量达标后再开。
+V3 闭环的前置共三条，**只有一条是代码缺陷**：
+
+**① 激活门本身（真正的卡点，非代码缺陷）**
+`activation_evidence_ready = 最长连续有效自然日 ≥ 30`（`v3_seed_evidence.py:329-346`，仅计 `natural_cron` 行，日历断档即断streak）。生产实测：
+
+| 指标 | 值 |
+|---|---|
+| `consecutive_valid_day_count` | **4**（且为**历史最长**，非当前连续——2026-07-19→07-22；截至 08-05 的当前连续为 **1**） |
+| 有效/记录天数 | 13 / 24 |
+| `invalid_day_count` | 11，**全部为同一原因 `no_natural_production_input`** |
+| 近 18 天有流量的天数 | 10 / 18（`memory_sources.jsonl` 逐日计数） |
+
+**结论：该门在当前使用模式下实际不可达。** 30 天连续要求每一天 `memory_sources.jsonl` 都有自然生产行（即当天与 Hermes agent 有对话流量），而实测约 45% 的自然日为零流量。**且这是 CLAUDE.md「空转 ≠ 故障」原则的镜像违例**：零输入日被记为 `invalid`，把"没有合格输入"与"处理失败"合并成同一个信号，而这个信号是 V3 激活的唯一闸门。若要改判据（例如零输入日记为 `no_sample` 不计入亦不断 streak，或改为"N 日窗口内 30 个有效日 + 最大间隔容忍"），属**放宽门槛的行为变更**，需 owner 明确决策，并须遵守路线图 L43「不为获得绿色状态而隐藏真实 FAIL」——放宽窗口与缩小度量是两回事，改动须同时公布口径变化前后的对照数字。
+
+**② 代码缺陷（S4/S5，见 12.2/12.3）** —— quiet gate 读陈旧缓存 + 读取失败 fail-open。位于 `activation_evidence_ready` 判定之后（`v3_wandering.py:172` 先于 174），故当前休眠；**R4 打开 `wandering_enabled` 之前必须修**（本轮 W8）。
+
+**③ ⚠ 陷阱：关闭 entity_index 会永久冻死 V3 —— 撤回第 11 节 CL 中「`entity_index_enabled` 暂置 False」的建议**
+`run_v3_seed_evidence_cycle` 的 `require_shared_entity` **默认为 True**，而 `_shared_entity_edges` 在 entity_index knob 关闭时返回 `"disabled"` ⇒ 触发 `invalid_reasons=["shared_entity_disabled"]` ⇒ **此后每一天都无效，30 天连续永不可能达成**。**[代码]** `v3_seed_evidence.py:49-51,152-153,363-365`；生产实测近期各日 `shared_entity_status=available`（entity_index 当前为开）。
+注意该门只校验**可用性**、不校验**实体质量** —— 24 个路径碎片同样判 available。因此 E6 的正确修法是**保持开启并改进抽取质量**（过滤 path/uuid 类），而不是关停。若确需关停，必须同时把 `require_shared_entity` 改为 False 并记录该判据变更，否则等于静默关闭 V3 路线。
+
+**附带口径更正（供 checklist 引用时使用）**：`consecutive_valid_day_count` 是**最长连续**而非当前连续，字段名有误导性；stabilization checklist 待办中"历史中断 11 次"的准确表述是"11 个无效日（全部为零输入）"。
 
 ---
 
