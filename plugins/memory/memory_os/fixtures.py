@@ -13,7 +13,6 @@ from .roots import MemoryOSRoots
 from .schema import (
     CRYSTALLIZED_SCHEMA_VERSION,
     EVENT_SCHEMA_VERSION,
-    CrystallizedFrontmatter,
     WorkingItem,
 )
 
@@ -88,22 +87,26 @@ def build_crystallized_frontmatter(
     seed: int,
     source_event_ids: list[str] | None = None,
     kind: str = "moment",
-) -> CrystallizedFrontmatter:
-    """Build deterministic crystallized-memory frontmatter."""
+) -> dict[str, object]:
+    """Build deterministic crystallized-memory frontmatter.
+
+    Returns a plain dict — the same shape production crystallized paths use
+    (the CrystallizedFrontmatter dataclass was fixture-only and is gone).
+    """
 
     created_at = _iso(seed)
-    return CrystallizedFrontmatter(
-        schema_version=CRYSTALLIZED_SCHEMA_VERSION,
-        id=new_crystallized_id(_timestamp(seed), unique=_suffix(seed)),
-        kind=kind,
-        created_at=created_at,
-        approved_by="owner",
-        approved_at=created_at,
-        source_event_ids=list(source_event_ids or []),
-        tags=["synthetic", kind],
-        sensitivity="private",
-        hindsight_indexed=False,
-    )
+    return {
+        "schema_version": CRYSTALLIZED_SCHEMA_VERSION,
+        "id": new_crystallized_id(_timestamp(seed), unique=_suffix(seed)),
+        "kind": kind,
+        "created_at": created_at,
+        "approved_by": "owner",
+        "approved_at": created_at,
+        "source_event_ids": list(source_event_ids or []),
+        "tags": ["synthetic", kind],
+        "sensitivity": "private",
+        "hindsight_indexed": False,
+    }
 
 
 def build_sannai_multi_root_fixture(base_path: str | Path) -> SannaiFixtureLayout:

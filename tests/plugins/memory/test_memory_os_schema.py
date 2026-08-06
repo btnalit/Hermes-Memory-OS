@@ -12,7 +12,6 @@ from plugins.memory.memory_os.ids import (
 from plugins.memory.memory_os.schema import (
     EVENT_SCHEMA_VERSION,
     EventEnvelope,
-    SchemaRegistry,
     ValidationError,
 )
 
@@ -58,14 +57,6 @@ def test_event_envelope_rejects_unknown_schema_version():
 
     with pytest.raises(ValidationError, match="Unsupported schema_version"):
         EventEnvelope.from_dict(raw)
-
-
-def test_schema_registry_reads_only_declared_versions():
-    registry = SchemaRegistry()
-
-    assert registry.current_write_version("event") == EVENT_SCHEMA_VERSION
-    assert registry.can_read("event", EVENT_SCHEMA_VERSION) is True
-    assert registry.can_read("event", "memory-os.event.v99") is False
 
 
 def test_ids_are_prefixed_and_sortable_for_supplied_times():

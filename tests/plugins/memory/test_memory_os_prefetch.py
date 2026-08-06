@@ -165,7 +165,7 @@ def test_prefetch_orders_layers_deterministically(tmp_path):
         "Owner relationship memory.",
         encoding="utf-8",
     )
-    store.append_crystallized_record("moments.md", crystallized.__dict__, "Approved crystallized memory.")
+    store.append_crystallized_record("moments.md", crystallized, "Approved crystallized memory.")
 
     context = build_prefetch("memory", budget_chars=2200, store=store, index=None)
 
@@ -3253,7 +3253,7 @@ def _seed_context(store):
         "Owner relationship memory.", encoding="utf-8",
     )
     store.append_crystallized_record(
-        "moments.md", crystallized.__dict__, "Approved crystallized memory.",
+        "moments.md", crystallized, "Approved crystallized memory.",
     )
 
 

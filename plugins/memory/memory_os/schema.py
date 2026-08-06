@@ -129,20 +129,6 @@ class WorkingDocument:
 
 
 @dataclass(frozen=True)
-class CrystallizedFrontmatter:
-    schema_version: str
-    id: str
-    kind: str
-    created_at: str
-    approved_by: str
-    approved_at: str
-    source_event_ids: list[str]
-    tags: list[str] = field(default_factory=list)
-    sensitivity: str = "private"
-    hindsight_indexed: bool = False
-
-
-@dataclass(frozen=True)
 class IdentitySource:
     kind: str
     path: str
@@ -161,41 +147,10 @@ class IdentityManifest:
     last_checked_at: str
 
 
-@dataclass(frozen=True)
-class CrossProfileView:
-    schema_version: str
-    view_id: str
-    producer_profile: str
-    consumer_profile: str
-    scope: str
-    created_at: str
-    expires_at: str
-    source_refs: list[str]
-    body_policy: str
-    path: str
-
-
-class SchemaRegistry:
-    """Read/write compatibility registry for Memory-OS schema versions."""
-
-    _current = {
-        "event": EVENT_SCHEMA_VERSION,
-        "working": WORKING_SCHEMA_VERSION,
-        "crystallized": CRYSTALLIZED_SCHEMA_VERSION,
-        "identity_manifest": IDENTITY_MANIFEST_SCHEMA_VERSION,
-        "cross_profile_view": CROSS_PROFILE_VIEW_SCHEMA_VERSION,
-    }
-
-    _read_compatible = {
-        kind: {version}
-        for kind, version in _current.items()
-    }
-    _read_compatible["working"] = {WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0}
-
-    def current_write_version(self, kind: str) -> str:
-        if kind not in self._current:
-            raise ValidationError(f"Unknown schema kind: {kind}")
-        return self._current[kind]
-
-    def can_read(self, kind: str, version: str) -> bool:
-        return version in self._read_compatible.get(kind, set())
+# NOTE (PR-C cleanup): three schema-layer classes were deleted here as
+# verified dead code — CrystallizedFrontmatter (production crystallized paths
+# use bare dicts; fixtures now build dicts directly), CrossProfileView (schema
+# declared, no implementation anywhere; CROSS_PROFILE_VIEW_SCHEMA_VERSION and
+# new_view_id stay for the reserved id-space), and SchemaRegistry (zero
+# production callers; read-compat for working v0 lives in working.py's
+# read-time migration instead).

@@ -135,7 +135,11 @@ def metadata_retention_plan(
     return {
         "schema_version": "memory-os.metadata_retention_plan.v0",
         "created_at": current.isoformat(),
+        # Planner-only by design (D11): no executor exists anywhere — the CLI
+        # renders this plan and nothing applies it. executor_wired says so on
+        # the report itself so a reader never has to infer it from absence.
         "dry_run": True,
+        "executor_wired": False,
         "policy": {
             "memory_sources_retention_days": active_policy.memory_sources_retention_days,
             "feedback_retention_days": active_policy.feedback_retention_days,
