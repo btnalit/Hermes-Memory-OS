@@ -8191,3 +8191,59 @@ def test_clean_host_member_drift_stays_classified_warn():
         item["code"] == "clean_host_warn_unclassified"
         for item in classification["fail"]
     )
+
+
+# ── T2: the monitor's embedded classifier copy — pinned, not equalized ──────
+#
+# classify_hermes_cron_jobs has three copies: the seam (production), the
+# in-package adapter (tooling), and the monitor's embedded probe copy. The
+# first two are pinned equal in test_memory_os_hermes_cron_adapter.py; the
+# monitor copy is DELIBERATELY divergent (it buckets retired jobs as
+# known_optional via injected specs) and its adapter-probe overwrite gives
+# the adapter copies precedence whenever the probe payload is available.
+# These pins make either contract change loud.
+
+
+def test_monitor_probe_buckets_retired_job_known_optional(tmp_path):
+    from plugins.memory.memory_os.cron_registry import RETIRED_MEMORY_OS_CRON_SCRIPTS
+
+    retired_name, retired_script = sorted(RETIRED_MEMORY_OS_CRON_SCRIPTS.items())[0]
+    cron_dir = tmp_path / "cron"
+    cron_dir.mkdir(parents=True)
+    cron_dir.joinpath("jobs.json").write_text(
+        json.dumps({"jobs": [{"name": retired_name, "script": retired_script, "enabled": False}]}),
+        encoding="utf-8",
+    )
+
+    namespace = _parity_probe_namespace(tmp_path)
+    summary = namespace["execution_gate_cron_summary"]()
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    known_optional_scripts = {job["script"] for job in summary["known_optional_jobs"]}
+    assert retired_script in known_optional_scripts
+
+
+def test_monitor_adapter_probe_counts_take_precedence(tmp_path):
+    """When the adapter probe payload is valid, its classification counts
+    overwrite the monitor's own and classification_source flips — grading of
+    a job therefore follows the adapter copies whenever the probe runs. This
+    is intended behavior; changing it must break this test."""
+    cron_dir = tmp_path / "cron"
+    cron_dir.mkdir(parents=True)
+    cron_dir.joinpath("jobs.json").write_text(json.dumps({"jobs": []}), encoding="utf-8")
+
+    namespace = _parity_probe_namespace(tmp_path)
+    namespace["_execution_gate_cron_adapter_probe_summary"] = lambda: {
+        "schema_version": "memory-os.hermes_cron_adapter_probe.v0",
+        "status": "pass",
+        "adapter_owner": "hermes_memory_os_seam",
+        "classification": {
+            "memory_os_owned_wrapped_count": 42,
+            "memory_os_like_unregistered_count": 7,
+        },
+    }
+    summary = namespace["execution_gate_cron_summary"]()
+
+    assert summary["classification_source"] == "hermes_cron_adapter_probe"
+    assert summary["memory_os_owned_wrapped_count"] == 42
+    assert summary["memory_os_like_unregistered_count"] == 7

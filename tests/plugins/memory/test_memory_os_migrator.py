@@ -196,3 +196,35 @@ def test_migrate_cli_scan_emits_stage_report(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["state"] == "scan_only"
     assert report["source_count"] >= 9
+
+
+def test_migrator_state_literals_census():
+    """D8 census: every state literal the migrator assigns must be declared in
+    MIGRATOR_STATES (shadow_bundle was assigned for months without being in
+    the table), and the three reserved apply/rollback states must stay
+    unassigned until actually implemented — implementing one is a conscious
+    change that updates this census."""
+    import re
+    from pathlib import Path
+
+    from plugins.memory.memory_os.migrator import MIGRATOR_STATES
+
+    source = (
+        Path(__file__).resolve().parents[3] / "plugins" / "memory" / "memory_os" / "migrator.py"
+    ).read_text(encoding="utf-8")
+    assigned: set[str] = set()
+    for primary, alternate in re.findall(
+        r"\"state\":\s*\"(\w+)\"(?:\s+if\s+\w+\s+else\s+\"(\w+)\")?", source
+    ):
+        assigned.add(primary)
+        if alternate:
+            assigned.add(alternate)
+
+    assert assigned <= set(MIGRATOR_STATES), (
+        f"migrator assigns states missing from MIGRATOR_STATES: {assigned - set(MIGRATOR_STATES)}"
+    )
+    reserved = {"owner_review", "approved_apply", "rollback_ready"}
+    assert assigned == set(MIGRATOR_STATES) - reserved, (
+        "assigned-state census changed — either a reserved state got "
+        f"implemented or a real state was dropped: assigned={sorted(assigned)}"
+    )

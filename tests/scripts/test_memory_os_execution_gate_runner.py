@@ -485,3 +485,138 @@ def test_sidecar_index_prune_is_a_noop_below_the_cap():
     index = {"xgate_a": {"envelope_id": "xgate_a"}, "xgate_b": {"envelope_id": "xgate_b"}}
 
     assert module.prune_sidecar_index(index, max_entries=10) == index
+
+
+# ── T1: dual-writer schema parity (runner vs core execution_gate) ───────────
+#
+# Both writers append to the SAME execution_gate_envelopes.jsonl and sidecar
+# index, from two independent implementations. These guards build one record
+# through each real producer (no hand fixtures) and pin the shared-file
+# contract: silent divergence here corrupts every full-scan validation.
+
+
+_FALSE_BOUNDARY = {
+    "owner_delivery_attempted": False,
+    "external_action_executed": False,
+    "actual_identity_write": False,
+    "actual_unapproved_crystallized_approval": False,
+}
+
+
+def _runner_permit_and_completion(module, hermes_home):
+    permit = module._append_permit(
+        hermes_home=hermes_home,
+        registry_key="index_sync",
+        lane_id="index_sync",
+        risk_class="local_helper",
+        raw_script="memory_os_index_sync.py",
+        helper_present=True,
+        smoke_mode="off",
+        boundary=dict(_FALSE_BOUNDARY),
+    )
+    module._append_completion(
+        hermes_home=hermes_home,
+        envelope_id=permit["execution_gate_envelope_id"],
+        lane_id="index_sync",
+        execution_status="completed",
+        returncode=0,
+        smoke_mode="off",
+        boundary=dict(_FALSE_BOUNDARY),
+        helper_report={},
+        requires_boundary_report=False,
+    )
+    records = [
+        json.loads(line)
+        for line in module._records_path(hermes_home).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    completion = next(r for r in records if r["stage"] == "completion")
+    return permit, completion
+
+
+def _core_permit_and_completion(tmp_path):
+    from plugins.memory.memory_os.execution_gate import (
+        complete_execution_gate_envelope,
+        execution_gate_records_path,
+        start_execution_gate_envelope,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="index_sync",
+        trigger_surface="memory_os_local_helper",
+        risk_class="local_helper",
+        human_approval_required=False,
+        why_no_human_approval="dual-writer schema parity guard",
+        scope={"write_surface": "guard_test"},
+        boundary=dict(_FALSE_BOUNDARY),
+    )
+    complete_execution_gate_envelope(
+        store,
+        envelope_id=permit["execution_gate_envelope_id"],
+        lane_id="index_sync",
+        execution_status="completed",
+        postcheck={"boundary_true": False},
+        result_summary={"guard": "test"},
+    )
+    records = [
+        json.loads(line)
+        for line in execution_gate_records_path(store.roots).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    completion = next(r for r in records if r["stage"] == "completion")
+    return store, permit, completion
+
+
+def test_dual_writer_schema_version_comes_from_one_constant(tmp_path):
+    from plugins.memory.memory_os.execution_gate import EXECUTION_GATE_SCHEMA_VERSION
+
+    module = _load_runner_module()
+    assert module.SCHEMA_VERSION == EXECUTION_GATE_SCHEMA_VERSION
+
+
+def test_dual_writer_completion_key_sets_are_identical(tmp_path):
+    module = _load_runner_module()
+    _, runner_completion = _runner_permit_and_completion(module, tmp_path / "runner-home")
+    _, _, core_completion = _core_permit_and_completion(tmp_path / "core-home")
+
+    assert set(runner_completion) == set(core_completion), (
+        "completion-stage records from the two writers diverged — the shared "
+        "envelopes file no longer has one completion schema"
+    )
+
+
+def test_dual_writer_permit_gap_is_exactly_the_pinned_constant(tmp_path):
+    module = _load_runner_module()
+    runner_permit, _ = _runner_permit_and_completion(module, tmp_path / "runner-home")
+    _, core_permit, _ = _core_permit_and_completion(tmp_path / "core-home")
+
+    assert set(runner_permit) <= set(core_permit), (
+        "runner permit grew keys the core writer lacks — update the core or "
+        "RUNNER_OMITTED_PERMIT_KEYS consciously"
+    )
+    assert set(core_permit) - set(runner_permit) == set(module.RUNNER_OMITTED_PERMIT_KEYS)
+
+
+def test_dual_writer_sidecar_entries_have_identical_shape(tmp_path):
+    module = _load_runner_module()
+    runner_home = tmp_path / "runner-home"
+    runner_permit, _ = _runner_permit_and_completion(module, runner_home)
+    core_store, core_permit, _ = _core_permit_and_completion(tmp_path / "core-home")
+
+    runner_index = json.loads(
+        (runner_home / "memory-os" / "system" / "execution_gate_index.json").read_text(encoding="utf-8")
+    )
+    core_index = json.loads(
+        (core_store.roots.memory_os_root / "system" / "execution_gate_index.json").read_text(encoding="utf-8")
+    )
+    runner_entry = runner_index[runner_permit["execution_gate_envelope_id"]]
+    core_entry = core_index[core_permit["execution_gate_envelope_id"]]
+
+    assert set(runner_entry) == set(core_entry), (
+        "sidecar index entries from the two writers diverged in shape"
+    )

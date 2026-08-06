@@ -78,3 +78,25 @@ def test_ids_are_prefixed_and_sortable_for_supplied_times():
     assert new_audit_id(early, unique="a").startswith("audit_")
     assert new_view_id(early, unique="a").startswith("view_")
     assert new_event_id(early, unique="a") < new_event_id(later, unique="a")
+
+
+def test_promotion_state_is_reserved_every_producer_writes_raw():
+    """D5 census: promotion_state is a RESERVED field — the state machine it
+    implies was never built, so every literal assignment in the codebase must
+    be "raw". A producer writing any other value is half-implementing the
+    machine without the migration/consumer side; that must be a conscious,
+    census-updating change, not silent drift."""
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    pattern = re.compile(r"promotion_state[\"']?\s*[:=]\s*[\"'](\w+)[\"']")
+    offenders: list[str] = []
+    for path in (repo_root / "plugins").rglob("*.py"):
+        for value in pattern.findall(path.read_text(encoding="utf-8")):
+            if value != "raw":
+                offenders.append(f"{path}: {value}")
+    assert not offenders, (
+        "promotion_state literals other than 'raw' found — the promotion "
+        f"state machine is unimplemented; offenders: {offenders}"
+    )

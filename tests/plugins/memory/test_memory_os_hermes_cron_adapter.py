@@ -324,3 +324,40 @@ def test_seam_and_memory_adapters_agree_on_legacy_per_lane_classification():
         == memory["known_optional_jobs"][0]["known_optional_reason"]
         == "superseded_by_group_tick"
     )
+
+
+def test_seam_and_legacy_adapter_classify_identically_across_all_buckets():
+    """T2 pin: production reads the seam copy, tooling reads the in-package
+    copy — two near-identical implementations of the same classifier. This
+    full-dict equality over one fixture spanning every bucket turns any
+    future one-sided edit into a loud failure instead of silent vocabulary
+    drift. (The monitor's embedded third copy is DELIBERATELY divergent and
+    is pinned separately in tests/scripts/test_memory_os_3_200_monitor.py —
+    never assert equality against it.)"""
+    from plugins.memory.memory_os.cron_registry import (
+        LEGACY_PER_LANE_CRON_JOBS,
+        RETIRED_MEMORY_OS_CRON_SCRIPTS,
+    )
+
+    cadence = memory_os_cron_spec_by_key("module_cadence_report")
+    governance = memory_os_cron_spec_by_key("proposal_followups_opsgate")
+    legacy_name, legacy_script = sorted(LEGACY_PER_LANE_CRON_JOBS.items())[0]
+    retired_name, retired_script = sorted(RETIRED_MEMORY_OS_CRON_SCRIPTS.items())[0]
+    jobs = [
+        {"name": cadence.name, "script": cadence.wrapper_script, "enabled": True},
+        {"name": governance.name, "script": governance.raw_script, "enabled": True},
+        {"name": legacy_name, "script": legacy_script, "enabled": False},
+        {"name": retired_name, "script": retired_script, "enabled": False},
+        {"name": "hermes-heartbeat", "script": "hermes_heartbeat.py", "enabled": True},
+        {"name": "backup-nightly", "script": "backup.sh", "enabled": True},
+        {"name": "memory-os-mystery", "script": "mystery_helper.py", "enabled": True},
+    ]
+
+    seam = classify_hermes_cron_jobs(jobs, memory_os_cron_specs())
+    legacy = legacy_cron_adapter.classify_hermes_cron_jobs(jobs, memory_os_cron_specs())
+
+    assert seam == legacy, (
+        "seam and in-package classify_hermes_cron_jobs diverged — every "
+        "change must be applied to both copies (and reviewed against the "
+        "monitor's embedded third copy)"
+    )

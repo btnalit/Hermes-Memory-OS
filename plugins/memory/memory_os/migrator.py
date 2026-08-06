@@ -39,9 +39,15 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(secret\s*[:=]\s*)\S+"),
 )
 
+# Assigned states (census-pinned by test_migrator_state_literals_census):
+# scan_only, redacted_bundle, shadow_bundle, shadow_import, shadow_replay,
+# diff_report. The last three below are RESERVED — declared for the
+# owner-approved apply/rollback phases that were never built; no code path
+# assigns them. Implementing one means consciously updating the census test.
 MIGRATOR_STATES = (
     "scan_only",
     "redacted_bundle",
+    "shadow_bundle",
     "shadow_import",
     "shadow_replay",
     "diff_report",

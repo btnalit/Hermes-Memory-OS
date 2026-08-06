@@ -1474,9 +1474,11 @@ def _rrf_union(
     score = 1 / (k + rank + 1)
     Higher k reduces the impact of high rankings; k=60 is standard.
 
-    Returns a set of record_ids ordered by RRF score descending, capped
-    at top_n. If one input list is empty, the other is returned as a set
-    (truncated to top_n).
+    Returns an UNORDERED set of the top_n record_ids by RRF score. RRF here
+    only decides WHICH records enter the crystallized section — the caller
+    uses the result purely as a membership filter (final ordering comes from
+    the section builder), so set semantics are deliberate: a list would make
+    the per-turn membership checks linear for zero consumer benefit.
     """
     scores: dict[str, float] = {}
     for rank, rid in enumerate(fts_ids):
@@ -2554,6 +2556,13 @@ def _event_source_class(event: Any) -> str:
 
 
 def _indexed_lines(
+    # Intentional divergence from retrievers/indexed_fts.py (pinned by
+    # test_memory_os_fts_path_pins.py): this path feeds the raw query to
+    # index.search(), whose LIKE fallback guarantees deterministic floor
+    # recall on malformed or FTS-missed queries. The retriever sanitizes and
+    # cross-validates against canonical bodies instead — an O(corpus) read
+    # that must stay off this per-turn path. Do not "unify" one into the
+    # other without deciding which recall guarantee survives.
     query: str,
     index: object | None,
     *,
