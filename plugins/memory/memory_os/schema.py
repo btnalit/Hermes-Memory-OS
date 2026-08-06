@@ -61,6 +61,10 @@ class EventEnvelope:
     sensitivity: str = "private"
     body_policy: str = "summary_only"
     hashes: dict[str, Any] = field(default_factory=dict)
+    # RESERVED: every producer writes "raw" and nothing migrates it — the
+    # promotion state machine this field implies was never built. A census
+    # test pins that ("raw"-only across all producers); implementing real
+    # promotion states means consciously updating producer + census together.
     promotion_state: str = "raw"
 
     @classmethod

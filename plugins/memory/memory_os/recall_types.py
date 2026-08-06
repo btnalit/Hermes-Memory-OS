@@ -43,6 +43,30 @@ _L2_RECALL_TYPES: frozenset[RecallType] = frozenset({
     RecallType.EXTERNAL_EVIDENCE,
 })
 
+# Every enum member's actual implementation home, pinned at module scope so a
+# census test can assert both directions (no member without a disposition, no
+# disposition without a member). The enum alone over-promises: only the
+# "registered" members are reachable through RetrieverFacade.
+#   registered       — retriever class registered with the production facade
+#   inlined_prefetch — served by a prefetch-internal section builder, not the
+#                      facade (WORKING: _working_lines; VECTOR: RRF lane in
+#                      _crystallized_lines, vector_retrieval_enabled-gated)
+#   probe_only       — retriever class exists for the recall probe CLI and its
+#                      tests; production recall goes through the substrate
+#                      path instead (HINDSIGHT)
+#   unimplemented_reserved — declared, no channel implementation anywhere
+RECALL_TYPE_DISPOSITION: dict[RecallType, str] = {
+    RecallType.STATE_OVERLAY: "registered",
+    RecallType.CRYSTALLIZED: "registered",
+    RecallType.WORKING: "inlined_prefetch",
+    RecallType.INDEXED_FTS: "registered",
+    RecallType.VECTOR: "inlined_prefetch",
+    RecallType.ENTITY_GRAPH: "registered",
+    RecallType.TEMPORAL: "registered",
+    RecallType.HINDSIGHT: "probe_only",
+    RecallType.EXTERNAL_EVIDENCE: "unimplemented_reserved",
+}
+
 
 def is_core_recall(recall_type: RecallType) -> bool:
     """Return True for L1 (always-available) recall types."""

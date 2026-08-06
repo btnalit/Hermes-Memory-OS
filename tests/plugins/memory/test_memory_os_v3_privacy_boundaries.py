@@ -35,6 +35,28 @@ def test_v3_external_speech_has_exactly_one_speak_gate_adapter():
     assert speak_gate_users == ["v3_outlet.py"]
 
 
+def test_resolve_owner_channel_callers_are_symbol_enumerated():
+    """The v3_*.py glob above cannot see non-v3 callers of speak_gate's
+    private ``_resolve_owner_channel`` — cognitive_loop.py was an invisible
+    second cross-module caller for months. Enumerate consumers BY SYMBOL over
+    the whole plugin tree so a new caller (or a removed one) must touch this
+    census consciously, instead of widening a directory glob that drifts from
+    reality."""
+    expected = {
+        "plugins/modules/expression/speak_gate.py",  # the defining module
+        "plugins/memory/memory_os/cognitive_loop.py",
+        "plugins/memory/memory_os/v3_outlet.py",
+    }
+    actual = set()
+    for path in (REPO_ROOT / "plugins").rglob("*.py"):
+        if "_resolve_owner_channel" in path.read_text(encoding="utf-8"):
+            actual.add(path.relative_to(REPO_ROOT).as_posix())
+    assert actual == expected, (
+        f"_resolve_owner_channel caller set changed: added={sorted(actual - expected)} "
+        f"removed={sorted(expected - actual)} — update this census consciously"
+    )
+
+
 def test_private_store_names_do_not_appear_in_ragflow_or_backup_payload_builders():
     private_names = ("wandering_journal.jsonl", "v3_body_packet_manifests.jsonl")
     candidates = [

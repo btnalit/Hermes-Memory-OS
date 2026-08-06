@@ -29,6 +29,13 @@ from typing import Any
 
 
 SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
+# Keys the core writer (execution_gate.start_execution_gate_envelope) emits on
+# permit records that this runner deliberately omits: the runner's scope IS the
+# registry row (nothing worth hashing) and it carries no evidence refs. The
+# dual-writer guard test pins this gap exactly — growing either writer's permit
+# schema must touch this constant consciously, or the shared-file contract
+# drifts silently.
+RUNNER_OMITTED_PERMIT_KEYS = frozenset({"scope_hash", "evidence_refs"})
 HELPER_REPORT_SCHEMA_VERSION = "memory-os.helper_execution_report.v0"
 SIDECAR_LOCK_TIMEOUT_SECONDS = 15.0
 # Backstop for lanes whose registry entry carries no explicit timeout.

@@ -3491,3 +3491,17 @@ def test_build_prefetch_sections_scans_events_once(tmp_path):
     assert calls["n"] == 1, (
         f"prefetch sections must share one event scan, got {calls['n']}"
     )
+
+
+def test_rrf_union_returns_membership_set_capped_at_top_n():
+    """Pin the deliberate set semantics: RRF selects WHICH records enter the
+    crystallized section (membership filter); ordering is the section
+    builder's job. Changing the return type to an ordered list is a hot-path
+    pessimization with no consumer — do it only with a consumer in hand."""
+    from plugins.memory.memory_os.prefetch import _rrf_union
+
+    result = _rrf_union(["a", "b", "c"], ["b", "d"], top_n=3)
+
+    assert isinstance(result, set)
+    assert len(result) == 3
+    assert "b" in result  # appears in both lists → highest fused score
