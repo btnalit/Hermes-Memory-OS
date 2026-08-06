@@ -53,6 +53,67 @@ _COMPACTION_RESIDUE_RE = re.compile(
 )
 
 
+def extract_task_anchor_line(current_task_anchor: str) -> str:
+    """Project a task anchor into its single overlay display line.
+
+    THE single producer of active_projects text (W7): the cron builder and
+    the live-override path in prefetch/retriever both call this — a second
+    hand-written projection is how vocabulary drift starts.  Cleans Hermes
+    boilerplate, takes the first non-header line, caps at 200 chars.
+    Returns "" when nothing useful remains.
+    """
+    task_text = _clean_overlay_text(current_task_anchor)
+    if not task_text:
+        return ""
+    lines = task_text.split("\n")
+    first_line = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            first_line = stripped
+            break
+    if not first_line:
+        first_line = lines[0].strip().lstrip("#").strip()
+    return first_line[:200]
+
+
+def override_active_projects_with_live_anchor(
+    overlay: dict[str, Any],
+    current_task_anchor: str,
+) -> bool:
+    """Override a CACHED overlay dict's active_projects with the live anchor.
+
+    W7 (S1/S3): the cron cache reflects the durable anchor as of the last
+    refresh (≤30 min stale); the live per-turn anchor is authoritative for
+    the Active section.  Other sections keep their cached values (the O(1)
+    fast path stays).  The cache-level ``task_revision`` /
+    ``task_source_at`` / ``task_record_id`` are readings taken at cron time
+    and no longer describe active_projects after the override, so they are
+    neutralized — a stale revision pinned on live content is a lie
+    (retrievers attach it to every recall object).
+
+    Returns True when an override was applied.
+    """
+    first_line = extract_task_anchor_line(current_task_anchor)
+    if not first_line or not isinstance(overlay, dict):
+        return False
+    overlay["active_projects"] = {
+        "data": [
+            {
+                "text": first_line,
+                "source": "task_anchor:live",
+                "source_kind": "task_anchor",
+            }
+        ],
+        "source": "task_anchor:live",
+        "status": "ok",
+    }
+    for stale_key in ("task_revision", "task_source_at", "task_record_id"):
+        if stale_key in overlay:
+            overlay[stale_key] = ""
+    return True
+
+
 def build_state_overlay(
     store: MemoryOSStore,
     roots: "MemoryOSRoots",
@@ -76,27 +137,16 @@ def build_state_overlay(
     overlay = StateOverlay.create(profile=roots.profile)
 
     # ── active_projects: from current task anchor ──────────────────
-    task_text = _clean_overlay_text(current_task_anchor)
-    if task_text:
-        # Extract the first meaningful line (skip markdown headers)
-        lines = task_text.split("\n")
-        first_line = ""
-        for line in lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                first_line = stripped
-                break
-        if not first_line:
-            first_line = lines[0].strip().lstrip("#").strip()
-        if first_line:
-            overlay.active_projects.data.append(
-                OverlayEntry(
-                    text=first_line[:200],
-                    source="task_anchor:current",
-                    source_kind="task_anchor",
-                )
+    first_line = extract_task_anchor_line(current_task_anchor)
+    if first_line:
+        overlay.active_projects.data.append(
+            OverlayEntry(
+                text=first_line,
+                source="task_anchor:current",
+                source_kind="task_anchor",
             )
-            overlay.active_projects.status = "ok"
+        )
+        overlay.active_projects.status = "ok"
 
     # ── open_threads + recent_events: from last session anchors ────
     lsa_path = roots.memory_os_root / "system" / "last_session_anchor.jsonl"

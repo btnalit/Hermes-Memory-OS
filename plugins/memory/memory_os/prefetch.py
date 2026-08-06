@@ -1131,13 +1131,24 @@ def _state_overlay_lines(
 ) -> list[str]:
     """Memory State Overlay section — derived projection for conversation context.
 
-    Reads the cron-cached ``current.json`` (refreshed every ~30 min) when
-    available, falling back to a fresh build only when the cache is missing
-    or stale.  Fail-open: any exception returns [] so a broken overlay
-    never blocks normal prefetch.
+    Reads the cron-cached ``current.json`` when available (the cache is
+    refreshed by the state_overlay_refresh lane every 30 minutes and is NOT
+    freshness-checked here — the O(1) fast path is deliberate), falling back
+    to a fresh build only when the cache is missing or unparseable.
+
+    W7 (S1): the cached ``active_projects`` reflects the durable anchor as
+    of the last cron refresh — up to 30 minutes stale, which on production
+    rendered "(insufficient data)" through entire conversations.  When the
+    caller passes a live ``current_task_anchor`` it OVERRIDES the cached
+    active_projects section (other sections keep their cached values); the
+    cache-level task_revision keys are neutralized by the override helper.
+
+    Fail-open: any exception returns [] so a broken overlay never blocks
+    normal prefetch.
     """
     try:
         from .state_overlay import build_state_overlay as _build
+        from .state_overlay import override_active_projects_with_live_anchor as _override
         from .state_overlay_renderer import render_state_overlay_md as _render
         from .state_overlay_schema import OVERLAY_SECTION_FIELDS
     except ImportError:
@@ -1152,6 +1163,11 @@ def _state_overlay_lines(
             overlay = _json.loads(cached_path.read_text(encoding="utf-8"))
         except Exception:
             overlay = None  # fall through to rebuild
+    if overlay is not None and str(current_task_anchor or "").strip():
+        try:
+            _override(overlay, str(current_task_anchor))
+        except Exception:
+            pass  # fail-open: a broken override must not break the cache path
 
     # ── Slow path: rebuild overlay from canonical sources ────────────
     if overlay is None:

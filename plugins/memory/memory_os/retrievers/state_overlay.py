@@ -64,9 +64,12 @@ _assert_sections_classified()
 class StateOverlayRetriever:
     """Retrieve the current memory state overlay.
 
-    Reads ``system/state_overlay/current.json`` if it exists, falling
-    back to building a fresh overlay from available sources via
-    :func:`~plugins.memory.memory_os.state_overlay.build_state_overlay`.
+    Reads ``system/state_overlay/current.json`` if it exists (no freshness
+    check — the cache is the cron lane's 30-minute projection), falling
+    back to building a fresh overlay only when the cache is missing or
+    unparseable.  W7 (S3): a live ``current_task_anchor`` in *scope*
+    overrides the cached active_projects section — same helper and same
+    semantics as prefetch's fast path, so the two cannot drift.
     """
 
     @property
@@ -95,6 +98,15 @@ class StateOverlayRetriever:
                 overlay = json.loads(cached_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
+        if overlay is not None and current_task_anchor.strip():
+            from plugins.memory.memory_os.state_overlay import (
+                override_active_projects_with_live_anchor,
+            )
+
+            try:
+                override_active_projects_with_live_anchor(overlay, current_task_anchor)
+            except Exception:
+                pass  # fail-open — cache path must keep working
 
         if overlay is None:
             overlay = build_state_overlay(

@@ -1318,13 +1318,16 @@ def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     #  Recent Event Summaries adds selected event ids to seen).
     conn = sqlite3.connect(str(index.roots.index_path))
     conn.row_factory = sqlite3.Row
+    # W4 语义更新:非 crystallized 目标解析失败时不再落 [unresolved:] 兜底
+    # (事件会被 retention 清理,悬挂目标属噪音)。本测试改用 crystallized
+    # 类型的不存在目标 — 兜底行为保留,跨段去重规避意图不变。
     write_governed_edge(
         conn,
         index.roots,
         from_record_type="event",
         from_record_id=anchor_id,
-        to_record_type="event",
-        to_record_id="evt_nonexistent_target_999",
+        to_record_type="crystallized_record",
+        to_record_id="cry_nonexistent_target_999",
         relation_type="co_occurs",
         state="active",
     )

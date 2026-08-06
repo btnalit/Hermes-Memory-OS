@@ -779,3 +779,101 @@ class TestOverlaySectionRegistrySingleSourceOfTruth:
         )
         # And the old hand-typed tuple must be gone.
         assert '"identity_snapshot", "relationship_snapshot", "active_projects",' not in source
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W7 (S1/S3) — live 锚点覆盖缓存 active_projects
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LIVE_ANCHOR_B = (
+    "### Memory-OS Current Task Anchor\n"
+    "- current task: 任务B 正在修复图谱治理断链\n"
+    "- session: 20260806_test"
+)
+
+
+class TestW7LiveAnchorOverride:
+    def _cache_with_anchor_a(self, roots, *, task_revision: str = "42"):
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.data.append(
+            OverlayEntry(text="任务A 陈旧缓存里的旧任务", source="task_anchor:current",
+                         source_kind="task_anchor"))
+        overlay.active_projects.status = "ok"
+        payload = overlay.to_dict()
+        payload["task_revision"] = task_revision
+        payload["task_source_at"] = "2026-08-06T11:02:00Z"
+        payload["task_record_id"] = "atr_stale"
+        write_state_overlay(roots, payload)
+
+    def test_w7_live_anchor_overrides_stale_cached_anchor(self, tmp_path):
+        """S1 反事实②(关键的那条):缓存含旧锚点 A + live 锚点 B → 必须渲染 B。
+
+        只测"缓存空+live 非空"会被"仅填空"实现蒙混——本测试钉死覆盖语义。
+        无修复:快路径无条件用缓存 → 渲染 A → 必红。
+        """
+        from plugins.memory.memory_os.prefetch import _state_overlay_lines
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        self._cache_with_anchor_a(roots)
+
+        lines = _state_overlay_lines(
+            store, roots=roots, current_task_anchor=_LIVE_ANCHOR_B,
+        )
+        joined = "\n".join(lines)
+        assert "任务B" in joined, f"live anchor must override cached active: {joined}"
+        assert "任务A" not in joined, f"stale cached anchor must not survive: {joined}"
+
+    def test_w7_live_anchor_fills_empty_cached_active(self, tmp_path):
+        """S1 反事实①:缓存 active 为空(cron 跑在会话开始前)+ live 非空 → 渲染含锚点。"""
+        from plugins.memory.memory_os.prefetch import _state_overlay_lines
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        overlay = StateOverlay.create(profile="test")
+        overlay.open_threads.data.append(
+            OverlayEntry(text="一个开放线程", source="last_session", source_kind="last_session"))
+        overlay.open_threads.status = "ok"
+        write_state_overlay(roots, overlay.to_dict())
+
+        lines = _state_overlay_lines(
+            store, roots=roots, current_task_anchor=_LIVE_ANCHOR_B,
+        )
+        joined = "\n".join(lines)
+        assert "任务B" in joined, f"(insufficient data) 生产症状必须消失: {joined}"
+
+    def test_w7_no_live_anchor_keeps_cache(self, tmp_path):
+        """回归:无 live 锚点时缓存行为不变(快路径 O(1) 保持)。"""
+        from plugins.memory.memory_os.prefetch import _state_overlay_lines
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        self._cache_with_anchor_a(roots)
+
+        lines = _state_overlay_lines(store, roots=roots)
+        joined = "\n".join(lines)
+        assert "任务A" in joined
+
+    def test_w7_retriever_override_and_revision_neutralized(self, tmp_path):
+        """S3 反事实:retriever 同款覆盖,且 task_revision 错配必须中和。
+
+        覆盖后缓存的 task_revision/task_source_at/task_record_id 是 cron 时刻
+        读数,不再对应 active_projects — 不中和就是把旧修订号钉在新内容上。
+        """
+        from plugins.memory.memory_os.retrievers.state_overlay import StateOverlayRetriever
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        self._cache_with_anchor_a(roots, task_revision="42")
+
+        objects = StateOverlayRetriever().retrieve(
+            store, "任务", scope={"current_task_anchor": _LIVE_ANCHOR_B},
+        )
+        active = [o for o in objects if o.metadata.get("section") == "active_projects"]
+        assert active, f"active_projects object must exist: {objects}"
+        assert "任务B" in active[0].content
+        assert all("任务A" not in o.content for o in active)
+        assert active[0].source_ref == "task_anchor:live"
+        assert active[0].task_revision == "", (
+            "stale cache task_revision must be neutralized on live override"
+        )
