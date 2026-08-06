@@ -83,7 +83,8 @@ OPTIONAL_MEMORY_OS_CRON_KEYS = frozenset({
     "l3_probe_verification",
     "expression_feedback_request",
     # Kept OPTIONAL for as long as active-closure onboarding defers it (see
-    # ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS in memory_os_owner_cron_onboarding.py).
+    # ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS in cron_registry.py — the registry
+    # owns the profile-exclusion intent record).
     # Classifying a job we deliberately do not install as CORE would raise a
     # permanent missing_core WARN for its expected absence. Promote it to CORE
     # in the same change that enables the cron.

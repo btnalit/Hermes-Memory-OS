@@ -7771,15 +7771,20 @@ def _cron_registry_snapshot_parity():
     if not snapshot_groups:
         return {"status": "snapshot_groups_unavailable"}
     try:
-        from plugins.memory.memory_os.cron_registry import MEMORY_OS_CRON_GROUPS
+        from plugins.memory.memory_os.cron_registry import (
+            ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS,
+            MEMORY_OS_CRON_GROUPS,
+        )
 
         compiled_groups = {
             group.key: [str(member) for member in group.member_keys]
             for group in MEMORY_OS_CRON_GROUPS
         }
+        documented_exclusions = {str(key) for key in ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS}
     except Exception:
         return {"status": "registry_import_unavailable"}
     silently_missing = {}
+    documented_exclusions_absent = {}
     unknown_in_snapshot = {}
     fallback_group_keys = []
     for key, compiled_members in compiled_groups.items():
@@ -7792,14 +7797,24 @@ def _cron_registry_snapshot_parity():
             fallback_group_keys.append(key)
             continue
         missing = [m for m in compiled_members if m not in resolved]
-        if missing:
-            silently_missing[key] = missing
+        # A member absent from the snapshot is drift ONLY when the registry
+        # does not document the absence as a deliberate profile exclusion
+        # (clearance_cycle deferred activation fired a false alarm on the
+        # detector's first production run without this split). Documented
+        # absences stay visible in the payload, deliberately ungraded.
+        undocumented = [m for m in missing if m not in documented_exclusions]
+        documented = [m for m in missing if m in documented_exclusions]
+        if undocumented:
+            silently_missing[key] = undocumented
+        if documented:
+            documented_exclusions_absent[key] = documented
         unknown = [m for m in resolved if m not in set(compiled_members)]
         if unknown:
             unknown_in_snapshot[key] = unknown
     return {
         "status": "drift" if silently_missing else "ok",
         "silently_missing_lane_ids": silently_missing,
+        "documented_exclusions_absent": documented_exclusions_absent,
         "unknown_in_snapshot": unknown_in_snapshot,
         "fallback_group_keys": sorted(fallback_group_keys),
         "snapshot_group_count": len(snapshot_groups),

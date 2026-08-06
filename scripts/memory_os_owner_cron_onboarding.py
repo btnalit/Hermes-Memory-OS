@@ -30,6 +30,7 @@ if str(IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(IMPORT_ROOT))
 
 from plugins.memory.memory_os.cron_registry import (
+    ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS,
     LEGACY_PER_LANE_CRON_JOBS,
     RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
     groups_for_specs,
@@ -42,43 +43,14 @@ from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
 
 # Registry keys deliberately withheld from the active-closure cron profile.
-# A key belongs here ONLY for a documented, deliberate reason -- never
-# merely because the spec happens to be new. Every OTHER key returned by
-# memory_os_cron_specs() is onboarded on active-closure hosts by default, so
-# a future registry addition defaults to being installed and visible rather
-# than silently skipped (a hand-typed inclusion allowlist is exactly the
-# "unknown spec silently dropped" trap this derivation avoids).
-#
-#   - module_cadence_report: the cadence report artifact itself is already
-#     produced on-demand by build_cadence_report() from both the monitor
-#     dashboard snapshot and the 3.200 full monitor on every run, so a
-#     dedicated periodic cron job is redundant. It remains available under
-#     the "full" cron profile for hosts that want a standalone report cron.
-ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS = frozenset({
-    # Permanent exclusion: its report is already generated on demand elsewhere.
-    "module_cadence_report",
-    # DEFERRED ACTIVATION, not a permanent exclusion.
-    #
-    # clearance_cycle is a real registered spec whose helper/gate scripts the
-    # installer already deploys, but it was never added to the (previously
-    # hand-typed) active-closure key set -- an oversight, since every sibling
-    # spec was classified in the same commit that registered it. So the job has
-    # never actually been created on a production host, and the lane has never
-    # run there.
-    #
-    # It is held back here on purpose rather than switched on as a side effect
-    # of the registry-drift fix: the same change set also repaired
-    # `append_terminal(detail=...)`, which means
-    # `sweep_unavailable_open_proposals_on_flag_flip` -- which REVOKES open
-    # proposals and lives in clearance_cycle.py -- went from raising TypeError
-    # on every call to actually working. Enabling the cron in the same step
-    # would make two never-exercised paths live at once on 3.200, so a failure
-    # could not be attributed to either.
-    #
-    # To enable: delete this one line. The drift guard below still guarantees a
-    # newly registered spec can never be silently omitted again.
-    "clearance_cycle",
-})
+# The intent record moved to cron_registry.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+# so the monitor's host-side snapshot-parity probe (which can only import the
+# runtime plugins tree, never this script) reads the same single source.
+# Every OTHER key returned by memory_os_cron_specs() is onboarded on
+# active-closure hosts by default, so a future registry addition defaults to
+# being installed and visible rather than silently skipped (a hand-typed
+# inclusion allowlist is exactly the "unknown spec silently dropped" trap
+# this derivation avoids). Rationale per excluded key lives at the constant.
 ACTIVE_CLOSURE_CRON_KEYS = frozenset(
     spec.key for spec in memory_os_cron_specs()
 ) - ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS

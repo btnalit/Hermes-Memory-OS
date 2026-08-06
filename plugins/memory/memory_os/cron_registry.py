@@ -90,6 +90,28 @@ LEGACY_PER_LANE_CRON_JOBS = {
 LEGACY_PER_LANE_CRON_JOB_NAMES = frozenset(LEGACY_PER_LANE_CRON_JOBS)
 LEGACY_PER_LANE_CRON_SCRIPT_NAMES = frozenset(LEGACY_PER_LANE_CRON_JOBS.values())
 
+# Registry keys deliberately withheld from the active-closure cron profile.
+# Owned here (not in the onboarding script) so every consumer that can import
+# the registry — onboarding, the monitor's host-side snapshot-parity probe,
+# dashboards — reads ONE intent record: a compiled member absent from the
+# deployed snapshot is silent drift ONLY when it is not documented here.
+# A key belongs here ONLY for a documented, deliberate reason — never merely
+# because the spec happens to be new.
+#
+#   - module_cadence_report: the cadence report artifact is already produced
+#     on demand by build_cadence_report() from both the monitor dashboard
+#     snapshot and the 3.200 full monitor, so a dedicated periodic cron job
+#     is redundant; it remains available under the "full" cron profile.
+#   - clearance_cycle: DEFERRED ACTIVATION, not a permanent exclusion. The
+#     helper/gate scripts are deployed and the M3 watermark fix removed the
+#     technical blocker, but switching the lane on is an owner decision that
+#     must not ride in as a side effect of an unrelated change. To enable:
+#     delete this one line (and regenerate the deployed snapshot).
+ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS = frozenset({
+    "module_cadence_report",
+    "clearance_cycle",
+})
+
 DUE_POLICY_INTERVAL = "interval"
 DUE_POLICY_CALENDAR = "calendar"
 
