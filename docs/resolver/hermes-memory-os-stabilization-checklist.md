@@ -4634,3 +4634,62 @@ digest 干跑"零写盘"不变量。目标测试全绿、只有全量套件抓�
   M9/探针超时、M3 逐回执水位+实体归因（清关激活前置关闭）、M8 六处原子写、
   speak_gate 加锁、M10 单趟扫描、D13 追加化+trace 回收、M7 占位删除；
   12 反事实全部红验证，全量套件曾抓到 connect 创库回归——全量不可省的再证明。
+
+### CH — 开放项路线图执行：M1 探测器 + 反漂移钉批 + 死代码清理 + 部署（2026-08-06）
+
+审计遗留开放项经两设计代理 + Opus 顾问对抗复核成 PR-A/B/C 路线图后一次执行。
+顾问推翻三个初稿预设（T2 补 monitor 分支会**压掉现行 WARN**=买绿、RRF 改
+list 是热路径伪修复、M1 runner 侧产物有 8-runner 并写与 dev-vs-host 代际
+误报——改探针主机侧零写入）。
+
+**PR #27（M1）**：快照成员漂移探测器——探针主机侧对比部署快照 vs 已安装
+注册表（同代际，本地未部署 lane 永不误报），精确镜像 `_load_group` 解析
+（快照胜出仅当 ≥1 成员可解析；319 行"成员在表 spec 缺失被静默丢弃"同判
+漂移；组缺失/空表/全不可解析=回退非漂移）。WARN
+`cron_registry_snapshot_member_drift` 点名 lane_ids；不可判→INFO no-sample
+（空门集不买 PASS）。10 测（9 HEAD 红）。
+
+**PR #28（钉批，零行为变更）**：T1 双写入器键集守卫（经真实生产者建记录；
+completion 键集严格相等实证；permit 缺口钉成
+`RUNNER_OMITTED_PERMIT_KEYS={scope_hash,evidence_refs}`）；T2 seam↔adapter
+全字典相等 + monitor 第三副本**钉为有意分歧**（retired→known_optional 注入
++ 适配器计数覆盖优先级）；T4 `_like_hits` 兜底（空结果与 sqlite Error 双触发）
+首次覆盖 + prefetch 意图注释；R1 `RECALL_TYPE_DISPOSITION` census（hindsight
+retriever 实为 probe_only——recall_probe 在用，审计"零引用"有误）；D8
+MIGRATOR_STATES 补游离 `shadow_bundle` + 赋值 census（HEAD 红实证）；D5
+promotion_state 只写 raw census；RRF docstring 撒谎修正（set 语义钉）；
+speak_gate 调用方**按符号枚举**（v3 glob 曾让 cognitive_loop 隐身数月——
+拒绝扩 glob 与 API 提升，防 attributable_classes 同病）。19 测。
+
+**PR #29（清理，owner 签字）**：删 SchemaRegistry / CrystallizedFrontmatter
+（fixtures 改产裸 dict，7 消费点更新）/ CrossProfileView / restraint.py+测试
+（v24 verify 清单同步），净 −353/+51。**实施期改判**：D9
+InnerDrive.run_once 从删除降级为注释诚实化——它是 system_modularization
+套件的模块总线契约测试宿主（322 行专属 + 集成 trace 在用），撒谎的是
+"[DEPRECATED]" 注释本身；D10 llm_enabled 恒 False 注明；D11 计划报告加
+`executor_wired: false` 自述。
+
+**PR #30（M1 跟进）**：探测器生产首跑命中 `clearance_cycle`——机制判断正确
+但意图误判（**文档化延迟激活与遗忘重生成在成员表层面结构同形**）。修：
+`ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS` 从 onboarding 脚本移居 cron_registry
+（**运行时树只带 plugins 不带 scripts/——实测探针 sys.path 永远导不到
+onboarding**，注册表是探针可达的唯一单源），探针把缺失拆成
+silently_missing（WARN）与 documented_exclusions_absent（可见不评级）。
+反事实精确复刻生产快照形状。
+
+**部署（039596e）**：备份 50M（首跑撞活跃 tick 写入,
+`--warning=no-file-changed` 重试并 8310 条目验证）；preflight 首跑
+`shell_doctor_command_failed` 瞬时争用（直接复跑 doctor status:ok，
+preflight 复跑 30/0/0——CF"瞬时 doctor"同族第三例）；apply/postcheck/
+六探针全绿×2 轮。**最终 Full Monitor：102 PASS / 5 已知 WARN / 0 FAIL**，
+`cron_registry_snapshot_member_parity_ok` 新 PASS 首跑即绿；
+`owner_review_agenda_digest_unavailable` 上轮 WARN 复跑不复现（采集碰撞，
+计第四例瞬时争用）。
+
+**测试计数**：3175 → 3190（PR-A +10、PR-B +19、PR-C −15、PR-D +1）+ 13
+skipped。工具坑一则：worktree 根的部署临时 json 被 `git add -A` 卷入提交，
+amend + force-with-lease 修复——临时产物随手删，别等收尾。
+- `（CH，本节）`：开放项路线图四 PR 落地——M1 快照漂移探测器（含生产首跑
+  误报的注册表单源修正）、19 钉反漂移批、死代码净删 302 行（D9 经实证改判
+  文档化）、全部部署 3.200 并 Full Monitor 102/5/0 收口；探测器新 PASS
+  首跑即绿，瞬时争用家族添两例（doctor preflight、agenda 采集）。
