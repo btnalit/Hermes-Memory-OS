@@ -313,7 +313,7 @@ class TestEvaluateRecallCounterfactual:
 
         frontmatter = build_crystallized_frontmatter(seed=91, kind="moment")
         body = "The rendezvous marker fact GOLDEN_COUNTERFACTUAL_9182 is confirmed true."
-        record_path = store.append_crystallized_record("counterfactual.md", frontmatter.__dict__, body)
+        record_path = store.append_crystallized_record("counterfactual.md", frontmatter, body)
 
         golden_set = GoldenSet(
             profile="counterfactual",
@@ -390,8 +390,8 @@ class TestAuthorityDimensionEndToEnd:
         store = _init_store(tmp_path)
         frontmatter = build_crystallized_frontmatter(seed=77, kind="moment")
         body = "The authority marker fact GOLDEN_AUTHORITY_7741 is confirmed true."
-        store.append_crystallized_record("authority.md", frontmatter.__dict__, body)
-        return store, frontmatter.id
+        store.append_crystallized_record("authority.md", frontmatter, body)
+        return store, frontmatter["id"]
 
     @staticmethod
     def _golden(expected: GoldenResult) -> GoldenSet:

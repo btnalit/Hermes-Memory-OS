@@ -870,6 +870,11 @@ class DeepReflectionModule:
             "max_chars_per_card": 320,
             "ttl_hours": 24,
             "analysis_mode": "deterministic",
+            # llm_enabled is an honest always-False marker (D10): analysis is
+            # deterministic by design and no LLM call exists in this module.
+            # The field stays so consumers can trust the disclosure rather
+            # than infer it; flipping it true requires building the lane
+            # under INV-5 (offline cron only) first.
             "llm_enabled": False,
             "working_updates_enabled": False,
             "max_working_updates": 3,

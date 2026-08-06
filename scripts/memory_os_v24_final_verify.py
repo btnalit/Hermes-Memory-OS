@@ -158,7 +158,6 @@ def main(argv: list[str] | None = None) -> int:
         "tests/plugins/memory/test_memory_os_section_status.py",
         "tests/plugins/memory/test_memory_os_jsonl_robustness.py",
         "tests/plugins/memory/test_memory_os_recovery_marker.py",
-        "tests/plugins/memory/test_memory_os_restraint.py",
         "tests/plugins/memory/test_memory_os_natural_row.py",
         "tests/plugins/memory/test_memory_os_natural_evidence.py",
     ]

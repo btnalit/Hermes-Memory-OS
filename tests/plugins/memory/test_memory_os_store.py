@@ -168,7 +168,7 @@ def test_index_rebuilds_from_filesystem_after_db_delete(tmp_path):
     )
     store.append_crystallized_record(
         "moments.md",
-        crystallized.__dict__,
+        crystallized,
         "Synthetic crystallized memory.",
     )
     index = MemoryOSIndex(store.roots)
@@ -327,14 +327,14 @@ def test_index_records_fts_projection_version_for_rebuildability(tmp_path):
 def test_index_search_matches_approved_crystallized_markdown_body(tmp_path):
     store = _store(tmp_path)
     frontmatter = build_crystallized_frontmatter(seed=43, source_event_ids=["evt_43"])
-    store.append_crystallized_record("moments.md", frontmatter.__dict__, "这是一段沉淀记忆 ZETA_CRYSTAL。")
+    store.append_crystallized_record("moments.md", frontmatter, "这是一段沉淀记忆 ZETA_CRYSTAL。")
     index = MemoryOSIndex(store.roots)
     index.sync_from_store(store)
 
     result = index.search("沉淀记忆")
 
     assert any(
-        hit["record_type"] == "crystallized_record" and hit["record_id"] == frontmatter.id
+        hit["record_type"] == "crystallized_record" and hit["record_id"] == frontmatter["id"]
         for hit in result["hits"]
     )
 
