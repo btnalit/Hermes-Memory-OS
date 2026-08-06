@@ -224,8 +224,9 @@ class CronMirror:
         return records
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        from .jsonl_io import write_json_atomic
+
+        write_json_atomic(self.state_path, state)
 
     def _event_for_output(self, item: dict[str, Any]) -> EventEnvelope:
         now = datetime.now(timezone.utc)

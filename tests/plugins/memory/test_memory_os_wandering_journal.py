@@ -115,11 +115,12 @@ def test_query_trace_is_written_before_results_and_contains_no_query_body(tmp_pa
     assert len(results) == 1
     rows = read_journal(store)
     trace = rows[-1]
-    assert set(trace) == {"queried_at", "scope"}
+    assert set(trace) == {"schema_version", "record_type", "queried_at", "scope"}
+    assert trace["record_type"] == "query_trace"
 
     from plugins.memory.memory_os import wandering_journal
 
-    monkeypatch.setattr(wandering_journal, "_rewrite_records_under_lock", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    monkeypatch.setattr(wandering_journal, "_append_line_under_lock", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
     with pytest.raises(OSError, match="disk"):
         query_journal(store, scope_class="all")
 

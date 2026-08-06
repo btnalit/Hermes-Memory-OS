@@ -123,6 +123,32 @@ def test_read_events_quarantines_malformed_jsonl_without_crashing(tmp_path):
     assert any(entry["action"] == "quarantine_malformed_event" for entry in audit_entries)
 
 
+def test_repeated_reads_quarantine_same_malformed_line_once(tmp_path):
+    # Counterfactual (analysis-doc M6): the bad line stays in the source file,
+    # so every scan re-quarantined it and both the quarantine and audit ledgers
+    # grew without bound on the per-turn read path. Repeats must dedup into the
+    # bounded sidecar counter instead.
+    store = _store(tmp_path)
+    event_path = tmp_path / "memory-os" / "events" / "2026-05" / "2026-05-20.jsonl"
+    event_path.parent.mkdir(parents=True)
+    event_path.write_text("{not json}\n" + json.dumps(_make_event().to_dict()) + "\n", encoding="utf-8")
+
+    for _ in range(3):
+        store.read_events()
+
+    quarantine_path = tmp_path / "memory-os" / "quarantine" / "malformed_events.jsonl"
+    assert len(quarantine_path.read_text(encoding="utf-8").splitlines()) == 1
+    audit_entries = read_audit_entries(tmp_path / "memory-os" / "audit" / "write_audit.jsonl")
+    quarantine_audits = [e for e in audit_entries if e["action"] == "quarantine_malformed_event"]
+    assert len(quarantine_audits) == 1
+    sidecar = json.loads(
+        (tmp_path / "memory-os" / "quarantine" / "malformed_events_index.json").read_text(encoding="utf-8")
+    )
+    assert len(sidecar) == 1
+    (entry,) = sidecar.values()
+    assert entry["count"] == 3
+
+
 def test_index_rebuilds_from_filesystem_after_db_delete(tmp_path):
     store = _store(tmp_path)
     first = EventEnvelope.from_dict(build_event(seed=1, profile="memoryos-test"))

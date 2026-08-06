@@ -60,14 +60,11 @@ def rebuild_contested_pairs_index(store: Any) -> dict[str, Any]:
                         "rebuilt_at": now,
                     })
 
-    # Atomic write: build in memory, write once
-    lines = "\n".join(
-        json.dumps(pair, ensure_ascii=False, sort_keys=True)
-        for pair in pairs
-    )
-    if lines:
-        lines += "\n"
-    path.write_text(lines, encoding="utf-8")
+    # Atomic replace via tmp+rename — a bare write_text truncates first, so a
+    # crash mid-write could leave a torn ledger until the next rebuild.
+    from .jsonl_io import write_jsonl_atomic_locked
+
+    write_jsonl_atomic_locked(path, pairs)
 
     return {
         "status": "ok",

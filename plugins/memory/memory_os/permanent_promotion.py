@@ -281,7 +281,7 @@ def _evidence_increment_detected(
 
 
 def _write_absorption_audit(
-    roots: Any,
+    memory_os_root: Path,
     *,
     absorbed_content_hash: str,
     target_permanent_id: str,
@@ -293,8 +293,7 @@ def _write_absorption_audit(
 
     from .jsonl_io import append_jsonl_locked
 
-    path = roots.memory_os_root / "system" / "absorption_audit.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = Path(memory_os_root) / "system" / "absorption_audit.jsonl"
     record = {
         "schema_version": "memory-os.absorption_audit.v0",
         "absorbed_content_hash": str(absorbed_content_hash),
@@ -303,6 +302,7 @@ def _write_absorption_audit(
         "absorbed_at": datetime.now(_tz.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_locked(path, record)
     except Exception:
         pass  # fail-open: audit loss must not block proposal flow
@@ -455,7 +455,7 @@ class ProposalLedger:
                     if status == "approved":
                         # ── B6: absorption audit — don't silently drop ──
                         _write_absorption_audit(
-                            self.store.roots,
+                            self.memory_os_root,
                             absorbed_content_hash=body_hash,
                             target_permanent_id=str(existing.get("target_id") or ""),
                             similarity_basis="exact_content_hash_match",

@@ -38,7 +38,9 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/v3_wandering.py::record_v3_wandering_run::append_jsonl_locked_call::v3_wandering_runs_path(store)": "v3_wandering_aggregate_run_ledger",
     "plugins/memory/memory_os/v3_body_packet.py::write_body_packet_manifest::governed_append_under_lock_call::target": "v3_body_packet_manifest",
     "plugins/memory/memory_os/v3_body_packet.py::remove_body_manifests::governed_atomic_rewrite_call::target": "v3_body_packet_manifest_retention",
-    "plugins/memory/memory_os/wandering_journal.py::query_journal.mutate::governed_atomic_rewrite_call::wandering_journal_path(store)": "v3_private_query_trace",
+    # Query traces switched from whole-file rewrite to a locked append (D13
+    # fix): the trace surface identity is unchanged, only the primitive moved.
+    "plugins/memory/memory_os/wandering_journal.py::query_journal.mutate::governed_append_under_lock_call::path": "v3_private_query_trace",
     "plugins/memory/memory_os/wandering_journal.py::_mutate_journal::governed_atomic_rewrite_call::target": "v3_private_active_journal",
     "plugins/memory/memory_os/v3_retention.py::sweep_pending_expired::governed_atomic_status_call::v3_journal_sweep_status_path(store)": "v3_private_ttl_aggregate_status",
     "plugins/memory/memory_os/legacy_right_brain_retirement.py::retire_legacy_right_brain::atomic_json_replace_call::manifest_path": "legacy_right_brain_retirement_manifest",
@@ -123,8 +125,10 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/modules/expression/expression_draft.py::ExpressionDraftModule.create_draft::append_jsonl_call::self.drafts_path": "right_brain_draft_report_only",
     "plugins/modules/expression/expression_draft.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/expression/grounded_expression_judge.py::GroundedExpressionJudge._write_verdict::path.open_a::self.verdicts_path": "module_report_only_existing_surface",
-    "plugins/modules/expression/speak_gate.py::SpeakGateModule._record_would_send::path.open_a::self.would_send_path": "right_brain_would_send_report_only",
-    "plugins/modules/expression/speak_gate.py::SpeakGateModule._deliver_to_owner::path.open_a::deliveries_path": "owner_send_delivery_ledger",
+    # speak_gate ledgers moved from bare open("a") to locked appends — same
+    # surfaces, safer primitive.
+    "plugins/modules/expression/speak_gate.py::SpeakGateModule._record_would_send::append_jsonl_locked_call::self.would_send_path": "right_brain_would_send_report_only",
+    "plugins/modules/expression/speak_gate.py::SpeakGateModule._deliver_to_owner::append_jsonl_locked_call::deliveries_path": "owner_send_delivery_ledger",
     "plugins/modules/governance/candidate_review.py::CandidateReviewModule.review::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/candidate_review.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/governance/cascade_routing_policy.py::CascadeRoutingPolicyModule.propose_policy::append_jsonl_call::self.proposals_path": "route_score_proposal_report_only",
@@ -211,6 +215,16 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/store.py::MemoryOSStore.append_event::append_jsonl_locked_call::path": "canonical_event_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore.write_working_document::atomic_json_replace_call::path": "working_document_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore._quarantine_malformed_event::append_jsonl_locked_call::quarantine_path": "quarantine_only",
+    # M6 fix: signature-dedup sidecar so a bad source line quarantines once,
+    # not once per scan (bounded, atomic replace).
+    "plugins/memory/memory_os/store.py::MemoryOSStore._quarantine_malformed_event::atomic_json_replace_call::index_path": "quarantine_dedup_sidecar_state",
+    # M8 fix: previously-bare write_text snapshot/state writers converged on
+    # the shared atomic-replace primitive; surfaces unchanged.
+    "plugins/memory/memory_os/cli.py::_write_host_validation_report::atomic_json_replace_call::path": "host_validation_report_surface",
+    "plugins/memory/memory_os/cron_mirror.py::CronMirror._write_state::atomic_json_replace_call::self.state_path": "cron_mirror_state_write",
+    "plugins/memory/memory_os/cron_registry.py::write_cron_registry_snapshot::atomic_json_replace_call::path": "cron_registry_snapshot_write",
+    "plugins/memory/memory_os/exposure_rollup.py::run_exposure_rollup_cycle::atomic_json_replace_call::sp": "exposure_rollup_last_run_snapshot_state",
+    "plugins/memory/memory_os/memory_projection.py::_write_projection_summary::atomic_json_replace_call::path": "memory_projection_summary_state",
     "plugins/memory/memory_os/structural_write_gate.py::append_governed_jsonl::append_jsonl_locked_call::destination": "structural_write_gate",
     "plugins/memory/memory_os/substrates/ledger.py::SubstrateOperationLedger.append::append_jsonl_locked_call::self.path": "substrate_governance_ledger",
     "plugins/memory/memory_os/substrates/projection.py::ProjectionLedger.append::append_jsonl_locked_call::self.path": "projection_coherence_ledger",

@@ -1197,13 +1197,16 @@ class CognitiveLoopRunner:
                 "actual_send": False,
                 "actual_execute": False,
             }
-        result = collect_signal_sources(
+        # This bare collection is monitor-required step evidence ("can the
+        # collectors run?"). _memory_projection re-collects on its own with
+        # execution-gate envelope stamping — the governed-write copy — so the
+        # two runs are deliberately distinct; do not stash this result in
+        # context as if projection consumed it (nothing ever read it).
+        return collect_signal_sources(
             self.store.roots,
             host_capabilities=capabilities,
             trigger_type="cognitive_loop",
         )
-        context["signal_collection_result"] = result
-        return result
 
     def _memory_projection(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.memory.memory_os.memory_projection import collect_and_project_signals

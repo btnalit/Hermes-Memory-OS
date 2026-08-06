@@ -63,16 +63,32 @@ def _canonical_transition_locked(method):
     return wrapped
 
 
-def _emit_corpus_change_event(store: Any, change_type: str, record_id: str) -> None:
+def _emit_corpus_change_event(
+    store: Any,
+    change_type: str,
+    record_id: str,
+    frontmatter: dict[str, Any] | None = None,
+) -> None:
     """Emit a corpus change event after a permanent state transition.
 
     Called from crystallized write paths after the canonical write succeeds.
     Fail-open: errors are audited but never block the canonical write.
+
+    When *frontmatter* is provided the event carries the record's entity set
+    (same collector the clearance judge uses), so entity-scoped receipts stay
+    valid across unrelated changes instead of being conservatively
+    invalidated by an unattributable event.
     """
     try:
-        from .clearance_receipts import append_corpus_change_event
+        from .clearance_receipts import (
+            append_corpus_change_event,
+            collect_entities_from_record,
+        )
 
-        append_corpus_change_event(store.roots, change_type, record_id)
+        entity_set: list[str] = []
+        if isinstance(frontmatter, dict):
+            entity_set = collect_entities_from_record(store.roots, record_id, frontmatter)
+        append_corpus_change_event(store.roots, change_type, record_id, entity_set=entity_set)
     except Exception:
         from .audit import append_audit
 
@@ -228,6 +244,7 @@ class CrystallizedMemoryService:
             self.store,
             "supersede" if decision.provisional else "add",
             frontmatter["id"],
+            frontmatter=frontmatter,
         )
         if return_receipt:
             return CrystallizedWriteReceipt(path=path, record_id=str(frontmatter["id"]))
@@ -376,7 +393,7 @@ class CrystallizedMemoryService:
                             details={"invalidated_count": changed_edges},
                         )
             if changed:
-                _emit_corpus_change_event(self.store, "revoke", normalized)
+                _emit_corpus_change_event(self.store, "revoke", normalized, frontmatter=matched)
             matched["canonical_state_changed"] = changed
             return matched
         raise KeyError(normalized)
@@ -448,7 +465,7 @@ class CrystallizedMemoryService:
                     },
                 )
             if changed:
-                _emit_corpus_change_event(self.store, "retire", normalized)
+                _emit_corpus_change_event(self.store, "retire", normalized, frontmatter=matched)
             matched["canonical_state_changed"] = changed
             return matched
         raise KeyError(normalized)
@@ -548,7 +565,7 @@ class CrystallizedMemoryService:
                     },
                 )
             if changed:
-                _emit_corpus_change_event(self.store, "retire", normalized)
+                _emit_corpus_change_event(self.store, "retire", normalized, frontmatter=matched)
             matched["canonical_state_changed"] = changed
             return matched
         raise KeyError(normalized)
@@ -653,7 +670,7 @@ class CrystallizedMemoryService:
                     },
                 )
             if changed:
-                _emit_corpus_change_event(self.store, "supersede", normalized)
+                _emit_corpus_change_event(self.store, "supersede", normalized, frontmatter=matched)
             matched["canonical_state_changed"] = changed
             return matched
         raise KeyError(normalized)

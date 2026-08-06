@@ -3467,3 +3467,27 @@ def test_continuity_disclosure_failure_never_breaks_prefetch(tmp_path, monkeypat
 
     assert context.startswith("## Memory-OS Context")
     assert _read_continuity_ledger(store) == []
+
+
+def test_build_prefetch_sections_scans_events_once(tmp_path):
+    # Counterfactual (analysis-doc M10): Continuity Bridge, Recent
+    # Cross-Session, and Recent Event Summaries each triggered their own full
+    # store.read_events() JSONL scan — three linear passes over the whole
+    # event history on every turn. The build must share a single scan.
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=1)))
+
+    calls = {"n": 0}
+    original_read_events = store.read_events
+
+    def counting_read_events():
+        calls["n"] += 1
+        return original_read_events()
+
+    store.read_events = counting_read_events
+
+    _build_prefetch_sections("memory", store=store, index=None, session_id="session_A")
+
+    assert calls["n"] == 1, (
+        f"prefetch sections must share one event scan, got {calls['n']}"
+    )

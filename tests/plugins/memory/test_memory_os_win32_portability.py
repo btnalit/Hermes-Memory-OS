@@ -92,7 +92,8 @@ def test_wandering_journal_query_trace_writes_without_directory_descriptor(tmp_p
     assert query_journal(store, scope_class="all") == []
 
     trace = json.loads(wandering_journal_path(store).read_text(encoding="utf-8").splitlines()[-1])
-    assert set(trace) == {"queried_at", "scope"}
+    assert set(trace) == {"schema_version", "record_type", "queried_at", "scope"}
+    assert trace["record_type"] == "query_trace"
     assert trace["scope"] == "all"
 
 

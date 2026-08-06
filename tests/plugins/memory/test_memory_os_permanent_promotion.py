@@ -1600,3 +1600,40 @@ def test_ledger_counts_stale_open_loop_uses_index_for_multiple_proposals(tmp_pat
     assert counts["stale_open_proposal_count"] == 1
     assert counts["stale_open_evaluation_status"] == "ok"
     assert counts["stale_open_evaluation_error_code"] == ""
+
+
+def test_reproposal_of_approved_content_raises_typed_error_and_writes_absorption_audit(tmp_path):
+    # Counterfactual (analysis-doc D2): the approved branch must surface the
+    # typed ``content_already_permanent`` error the sweep handler absorbs and
+    # land the B6 absorption-audit row. Without the fix the branch evaluates
+    # ``self.store.roots`` — an attribute ProposalLedger never had — and the
+    # sweep's ``except PermanentPromotionError`` can never catch what it throws.
+    import json
+
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionError, ProposalLedger
+
+    root = tmp_path / "memory-os"
+    ledger = ProposalLedger(root)
+    proposal, created = ledger.create_or_get(
+        target_id="cry_1", candidate_id="cand_1", body="stable body", channel="cli",
+    )
+    assert created
+    with ledger.proposals_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "proposal_id": proposal["proposal_id"],
+            "status": "approved",
+            "updated_at": "2026-08-05T00:00:00Z",
+        }) + "\n")
+
+    with pytest.raises(PermanentPromotionError, match="content_already_permanent"):
+        ledger.create_or_get(
+            target_id="cry_1", candidate_id="cand_1", body="stable body", channel="cli",
+        )
+
+    audit_path = root / "system" / "absorption_audit.jsonl"
+    assert audit_path.exists()
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["schema_version"] == "memory-os.absorption_audit.v0"
+    assert rows[0]["target_permanent_id"] == "cry_1"
+    assert rows[0]["similarity_basis"] == "exact_content_hash_match"

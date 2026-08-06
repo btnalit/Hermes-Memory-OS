@@ -669,3 +669,80 @@ class TestInvalidationEngine:
         )
         assert r_hit.is_active is False
         assert r_miss.is_active is True
+
+    def test_receipt_judged_after_event_is_immune_to_that_event(self, tmp_path: Path) -> None:
+        """Counterfactual (analysis-doc M3): per-receipt watermark windowing.
+
+        The only production call site passes watermark=0, so without
+        per-receipt windowing every receipt written in cycle N is
+        re-invalidated in cycle N+1 by events that predate its judging —
+        an endless rejudge loop that burns the whole LLM budget forever.
+        """
+        from plugins.memory.memory_os.clearance_receipts import (
+            invalidate_receipts_since,
+        )
+
+        roots = FakeRoots(tmp_path)
+        # An unattributable event exists BEFORE the judge runs (event_id=1).
+        append_corpus_change_event(roots, "retire", "perm_OLD", entity_set=[])
+        # The judge then writes a receipt stamped with that watermark.
+        write_clearance_receipt(roots, ClearanceReceipt(
+            receipt_id="clr_wm", record_id="prov_W", content_hash="hW",
+            verdict="clear", corpus_watermark=1,
+            checked_entity_set=["ent_W"], judge_version="v1",
+            judged_at="2026-08-05T00:00:00Z",
+        ))
+
+        # Next cycle, production call shape: must NOT re-invalidate.
+        result = invalidate_receipts_since(roots, watermark=0)
+        assert result["invalidated_count"] == 0
+        receipt = ClearanceReceipt.from_dict(read_clearance_receipts(roots)[0])
+        assert receipt.is_active is True
+
+        # A NEW unattributable event after the receipt's watermark still
+        # conservatively invalidates it — immunity is windowed, not blanket.
+        append_corpus_change_event(roots, "retire", "perm_NEW", entity_set=[])
+        result2 = invalidate_receipts_since(roots, watermark=0)
+        assert result2["invalidated_count"] == 1
+
+    def test_crystallized_transitions_attribute_entity_set(self, tmp_path: Path) -> None:
+        """Counterfactual (analysis-doc M3, emitter half): real transitions
+        must stamp events with the record's entity set, using the same
+        collector vocabulary the judge stamps receipts with — otherwise every
+        transition is unattributable and forces conservative_full for all."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.clearance_receipts import (
+            collect_entities_from_record,
+        )
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+        candidate = CrystallizedCandidate(
+            "cand_ent", "fact", "lowercase body without extractable entities.",
+            ["evt_ent"], tags=["alpha"],
+        )
+        decision = ApprovalDecision(
+            "cand_ent", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-08-05T00:00:00Z",
+        )
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        events = read_corpus_change_events(store.roots)
+        assert events, "transition must emit a corpus change event"
+        emitted = events[-1]
+        assert emitted["entity_set"], "transition event must carry the entity set"
+
+        record = service.read_records("owner_approved.md")[0]
+        judge_side = collect_entities_from_record(
+            store.roots, record.frontmatter["id"], record.frontmatter,
+        )
+        assert set(emitted["entity_set"]) == set(judge_side), (
+            "event entity vocabulary must match the judge-side collector"
+        )

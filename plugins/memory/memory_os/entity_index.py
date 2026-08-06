@@ -10,9 +10,12 @@ and export B (contradiction lane, owner-reviewed).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def refresh_entity_index(
@@ -154,7 +157,14 @@ def query_related_records(
             """,
             (*record_ids, min_weight, max_results),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        # Fail-open by contract (recall must never crash the caller), but a
+        # schema-level failure must not be indistinguishable from "no related
+        # records" — that silence hid the missing weight column for months.
+        logger.warning(
+            "entity_index related-records query failed (%s: %s); returning empty set",
+            type(exc).__name__, exc,
+        )
         conn.close()
         return []
     conn.close()

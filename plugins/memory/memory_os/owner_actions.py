@@ -4614,6 +4614,9 @@ def _bounded_delivery_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_HERMES_SEND_TIMEOUT_SECONDS = 120
+
+
 def _send_owner_review_digest_via_hermes(
     *,
     hermes_bin: str,
@@ -4622,7 +4625,13 @@ def _send_owner_review_digest_via_hermes(
 ) -> dict[str, Any]:
     command = [str(hermes_bin or "hermes"), "send", "--to", str(target_ref), "--json", str(message)]
     try:
-        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=_HERMES_SEND_TIMEOUT_SECONDS,
+        )
     except FileNotFoundError:
         return {
             "ok": False,
@@ -4631,6 +4640,19 @@ def _send_owner_review_digest_via_hermes(
                 "adapter": "hermes_send",
                 "target_class": _delivery_target_class(target_ref),
                 "returncode": 127,
+            },
+        }
+    except subprocess.TimeoutExpired:
+        # A hung hermes gateway must not wedge the digest lane for the whole
+        # cron timeout — surface a typed failure the delivery ledger can keep.
+        return {
+            "ok": False,
+            "code": "hermes_send_timeout",
+            "delivery_ref": {
+                "adapter": "hermes_send",
+                "target_class": _delivery_target_class(target_ref),
+                "returncode": 124,
+                "timeout_seconds": _HERMES_SEND_TIMEOUT_SECONDS,
             },
         }
 

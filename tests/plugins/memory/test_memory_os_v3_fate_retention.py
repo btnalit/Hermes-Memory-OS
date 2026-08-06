@@ -118,8 +118,68 @@ def test_ttl_physically_deletes_only_pending_and_orphan_manifest(tmp_path):
     report = sweep_pending_expired(store, now=datetime.now(timezone.utc))
     assert report == {"cycle_status": "ok"}
     assert entry["entry_id"] not in journal_path.read_text(encoding="utf-8")
-    assert any(set(item) == {"queried_at", "scope"} for item in read_journal(store))
+    assert any(item.get("record_type") == "query_trace" for item in read_journal(store))
     with pytest.raises(ValueError, match="manifest_not_found"):
         resolve_body_manifest(store, packet["snapshot_id"])
     status_path = store.roots.memory_os_root / "system" / "v3_journal_sweep_status.json"
     assert status_path.read_text(encoding="utf-8").strip() == '{"cycle_status":"ok"}'
+
+
+def test_sweep_reclaims_stale_query_traces_including_legacy_shape(tmp_path):
+    # Counterfactual (analysis-doc D13): the sweep only deleted
+    # record_type=="thought" entries, so query traces — one line per query,
+    # in both the typed and the pre-typing {queried_at, scope} legacy shape —
+    # accumulated forever with no cleanup path.
+    from plugins.memory.memory_os.jsonl_io import write_jsonl_atomic_locked
+
+    store, _packet, entry = _setup(tmp_path, ttl_days=30)
+    query_journal(store, scope_class="all")
+    journal_path = store.roots.memory_os_root / "system" / "wandering_journal.jsonl"
+
+    now = datetime.now(timezone.utc)
+    stale_ts = (now - timedelta(days=45)).isoformat()
+    rows = read_journal(store)
+    rows.append({"queried_at": stale_ts, "scope": "all"})  # legacy shape, stale
+    rows.append({
+        "schema_version": "memory-os.v3_wandering_journal.v0",
+        "record_type": "query_trace",
+        "queried_at": stale_ts,
+        "scope": "recent",
+    })  # typed shape, stale
+    write_jsonl_atomic_locked(journal_path, rows)
+
+    report = sweep_pending_expired(store, now=now)
+    assert report == {"cycle_status": "ok"}
+
+    remaining = read_journal(store)
+    assert not any(
+        item.get("queried_at") == stale_ts for item in remaining
+    ), f"stale traces must be reclaimed: {remaining}"
+    # The fresh trace from the query above and the unexpired thought survive.
+    assert any(item.get("record_type") == "query_trace" for item in remaining)
+    assert any(item.get("entry_id") == entry["entry_id"] for item in remaining)
+
+
+def test_query_journal_appends_trace_without_rewriting_file(tmp_path, monkeypatch):
+    # Counterfactual (analysis-doc D13, IO half): the query path rewrote the
+    # ENTIRE journal per query — O(journal size) writes for a read operation,
+    # quadratic over the journal's life. It must append exactly one line.
+    from plugins.memory.memory_os import wandering_journal
+
+    store, _packet, _entry = _setup(tmp_path)
+    rewrites = {"n": 0}
+    original = wandering_journal._rewrite_records_under_lock
+
+    def counting_rewrite(*args, **kwargs):
+        rewrites["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(wandering_journal, "_rewrite_records_under_lock", counting_rewrite)
+
+    journal_path = store.roots.memory_os_root / "system" / "wandering_journal.jsonl"
+    before_lines = len(journal_path.read_text(encoding="utf-8").splitlines())
+    query_journal(store, scope_class="all")
+    after_lines = len(journal_path.read_text(encoding="utf-8").splitlines())
+
+    assert rewrites["n"] == 0, "query path must not rewrite the whole journal"
+    assert after_lines == before_lines + 1, "query must append exactly one trace line"
