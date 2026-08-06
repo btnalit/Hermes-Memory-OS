@@ -1893,6 +1893,12 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
     return ids
 
 
+# W3 词表守卫锚点:图谱注入只消费此状态的边;owner approve(active 化)
+# 是它的生产者。与 EDGE_STATE_TRANSITIONS / EDGE_REVIEW_DIGEST_STATE /
+# PROMOTION_TARGET_STATE 一起被双向守卫测试钉死。
+GRAPH_INJECTION_EDGE_STATE = "active"
+
+
 def _graph_layer_shadow_lines(
     store: MemoryOSStore,
     anchor_ids: list[str],
@@ -1926,7 +1932,7 @@ def _graph_layer_shadow_lines(
     if index is None or not hasattr(index, "query_edges"):
         return []
     try:
-        edges = index.query_edges(anchor_ids, depth=1, state="active", limit=8)
+        edges = index.query_edges(anchor_ids, depth=1, state=GRAPH_INJECTION_EDGE_STATE, limit=8)
     except Exception:
         return []
     if not edges:

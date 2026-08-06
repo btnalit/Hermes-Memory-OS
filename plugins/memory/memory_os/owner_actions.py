@@ -3915,20 +3915,36 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return _apply_confirm_provisional_knob_override(store, record)
     if action_type == "reject_provisional_knob_override":
         return _apply_reject_provisional_knob_override(store, record)
-    if action_type == "approve_edge":
+    if action_type in {"approve_edge", "reject_edge"}:
+        # W3 批量审批:target 接受逗号分隔的多个 edge_id(按簇批量),
+        # 单 id 时返回形状保持旧契约(edge_id/new_state)。
         from .index import MemoryOSIndex
         index = MemoryOSIndex(store.roots)
-        result = index.transition_edge_state(target_id, "active")
-        if result and result.get("state") == "active":
-            record["owner_effect"]["owner_approved_edge"] = True
-        return {"edge_id": target_id, "new_state": result.get("state", "active") if result else "failed"}
-    if action_type == "reject_edge":
-        from .index import MemoryOSIndex
-        index = MemoryOSIndex(store.roots)
-        result = index.transition_edge_state(target_id, "invalidated")
-        if result and result.get("state") == "invalidated":
-            record["owner_effect"]["owner_rejected_edge"] = True
-        return {"edge_id": target_id, "new_state": result.get("state", "invalidated") if result else "failed"}
+        new_state = "active" if action_type == "approve_edge" else "invalidated"
+        edge_ids = [part.strip() for part in target_id.split(",") if part.strip()]
+        results: dict[str, bool] = {}
+        for eid in edge_ids:
+            r = index.transition_edge_state(eid, new_state)
+            results[eid] = bool(r and r.get("state") == new_state)
+        success = sum(1 for ok in results.values() if ok)
+        if success:
+            effect_key = (
+                "owner_approved_edge" if action_type == "approve_edge" else "owner_rejected_edge"
+            )
+            record["owner_effect"][effect_key] = True
+        if len(edge_ids) == 1:
+            only = edge_ids[0]
+            return {"edge_id": only, "new_state": new_state if results.get(only) else "failed"}
+        payload: dict[str, Any] = {
+            "edge_ids": edge_ids,
+            "new_state": new_state,
+            "failed_count": len(edge_ids) - success,
+        }
+        if action_type == "approve_edge":
+            payload["approved_count"] = success
+        else:
+            payload["rejected_count"] = success
+        return payload
     return {}
 
 
@@ -4117,9 +4133,11 @@ def _validate_action_target(
             return "invalid_edge_id"
         from .index import MemoryOSIndex
         index = MemoryOSIndex(store.roots)
-        edge = index.get_edge(target_id)
-        if edge is None:
-            return "edge_not_found"
+        # W3 批量:逗号分隔的每个 edge_id 都必须存在——部分命中即拒,
+        # 避免"批准了一半"的模糊结局。
+        for eid in [part.strip() for part in target_id.split(",") if part.strip()]:
+            if index.get_edge(eid) is None:
+                return "edge_not_found"
     return ""
 
 
@@ -6244,6 +6262,14 @@ def _digest_text_preview(
     return _rendered_digest_text(rendered_sections, store=store)[:2000]
 
 
+# W3 (E1) — edge review digest vocabulary.  EDGE_REVIEW_DIGEST_STATE is the
+# state this digest CONSUMES; the promotion lane (edge_promotion.py) is the
+# producer.  The bidirectional guard test pins the two together so the E1
+# drift (digest querying a state nothing produces) cannot silently recur.
+EDGE_REVIEW_DIGEST_STATE = "owner_eligible"
+EDGE_REVIEW_DIGEST_TOP_K = 10
+
+
 def _rendered_digest_text(
     sections: dict[str, list[dict[str, Any]]],
     *,
@@ -6315,8 +6341,14 @@ def _rendered_digest_text(
                 conn.row_factory = sqlite3.Row
                 try:
                     _initialize_schema(conn)
+                    total_eligible = int(conn.execute(
+                        "select count(*) from memory_edges where state = ?",
+                        (EDGE_REVIEW_DIGEST_STATE,),
+                    ).fetchone()[0])
                     rows = conn.execute(
-                        "select * from memory_edges where state = 'owner_eligible' order by weight desc limit 20"
+                        "select * from memory_edges where state = ?"
+                        " order by weight desc, created_at asc limit ?",
+                        (EDGE_REVIEW_DIGEST_STATE, EDGE_REVIEW_DIGEST_TOP_K),
                     ).fetchall()
                     if rows:
                         edge_lines = ["## Pending Edge Review", ""]
@@ -6330,6 +6362,14 @@ def _rendered_digest_text(
                                 f"- [{rel} w={weight:.2f}] {from_id} -> {to_id}\n"
                                 f"  approve_edge:{edge_id} | reject_edge:{edge_id}"
                             )
+                        remaining = total_eligible - len(rows)
+                        if remaining > 0:
+                            edge_lines.append(
+                                f"- 还有 {remaining} 条边待审(按权重轮播,下期继续)。"
+                            )
+                        edge_lines.append(
+                            "- 批量:approve_edge:id1,id2 | reject_edge:id1,id2(逗号分隔)。"
+                        )
                         candidate = lines + edge_lines + [""]
                         if len("\n".join(candidate).rstrip()) <= max_chars:
                             lines.extend(edge_lines)

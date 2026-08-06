@@ -261,6 +261,7 @@ class CognitiveLoopRunner:
             ("llm_edge_proposer", self._llm_edge_proposer),
             ("vector_edge_proposer", self._vector_edge_proposer),
             ("contradiction_lane", self._contradiction_lane),
+            ("edge_promotion", self._edge_promotion),
             ("entity_index", self._entity_index),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
@@ -1070,6 +1071,31 @@ class CognitiveLoopRunner:
             "record_count": result.get("record_count", 0),
             "pair_count": result.get("pair_count", 0),
             "proposed_count": result.get("proposed_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _edge_promotion(self, context: dict[str, Any]) -> dict[str, Any]:
+        """W3 (E1): candidate→owner_eligible 晋升 + candidate TTL。"""
+        from .edge_promotion import run_edge_promotion
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index = MemoryOSIndex(store.roots)
+        result = run_edge_promotion(
+            str(store.roots.index_path),
+            index=index,
+            audit_path=str(store.roots.audit_path),
+        )
+        context["edge_promotion_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.edge_promotion.v0",
+            "status": result.get("status", "ok"),
+            "outcome": result.get("outcome", ""),
+            "candidate_count": result.get("candidate_count", 0),
+            "promoted_count": result.get("promoted_count", 0),
+            "ttl_invalidated_count": result.get("ttl_invalidated_count", 0),
+            "failed_count": result.get("failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
