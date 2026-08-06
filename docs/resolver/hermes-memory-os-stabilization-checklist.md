@@ -4747,3 +4747,18 @@ owner 对 P3 清单逐项拍板后一批执行。两项前提在实施中被生�
   hindsight 启用路径验证、external_state_roots 全链路落地（新 lane + 白名单
   两类 + config 键）、D14 前提被生产推翻（影子生产者一直在跑——审计把
   未 live-apply 误读为未运行）、V3 复查日 2026-09-05 制度化、枚举搁置。
+
+**CI 部署与生产验证（2026-08-06，`2214f9d`）**：备份 47M + config 双备份后
+apply 全绿（compat 30/0/0，六探针 pass，未重启 Gateway）；快照重生成实证
+tick_governance 收进 clearance_cycle、tick_daily 收进 state_source_mirror，
+parity 探测器 PASS 双确认。**镜像首跑写 2 事件**（MEMORY.md/USER.md），抽查
+纯元数据零正文泄漏；空配置→诚实 state_root_count=0。**清关首周期 09:37
+自然 cron 触发**，1.2s 完成信封干净：`invalidated: 0` 是 **M3 逐回执水位
+修复的生产实证**（旧代码此处全量重失效），E9 收 8 条未判 provisional 全判
+`unknown/candidate_unindexed`——C3 基建退避类 typed 原因（待 index_sync
+收录后经失效自然重入），非 LLM 故障。主机 config：budget 12000 +
+external_state_roots 已写入（**budget 对 prefetch 生效需 Gateway 重启**，
+时机归 owner；镜像 lane 每跑 fresh 进程读 config 已即时生效）。
+**终验 Full Monitor：102 PASS / 5 已知 WARN / 0 FAIL**；apply 窗口的
+rendered+agenda digest 双 unavailable 复跑双双回 PASS——瞬时争用家族第
+五、六例（apply 安装窗口采集碰撞）。
