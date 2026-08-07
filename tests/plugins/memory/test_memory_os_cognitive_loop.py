@@ -902,3 +902,40 @@ def test_w5_edge_proposer_step_wrappers_propagate_skip_reason(tmp_path):
     vector = runner._vector_edge_proposer({})
     assert vector["status"] == "skipped"
     assert vector.get("reason") == "knob_disabled"
+
+
+def test_edge_weight_feedback_wrapper_passes_through_r4_counters(tmp_path, monkeypatch):
+    """反事实(S3 生产验证实锤):step 包装器白名单漏键 = 计数对一切读者
+    不存在 — 报告工件与监控 edge_step_results 读的都是包装器返回值。
+    already_saturated / skipped_not_injected / invalidated_never_hit /
+    forget_eligible_backlog 四个 R4 新计数必须透传。"""
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_weight_feedback as ewf
+
+    def _fake_run(index_path, *, index=None, audit_path=None, now=None):
+        return {
+            "status": "ok",
+            "outcome": "reinforced",
+            "new_hit_record_count": 3,
+            "reinforced_count": 1,
+            "already_saturated_count": 2,
+            "skipped_not_injected_count": 4,
+            "forgotten_count": 5,
+            "invalidated_never_hit_count": 5,
+            "forget_eligible_backlog": 7,
+            "unresolved_hit_count": 0,
+            "failed_count": 0,
+            "tracked_edge_count": 9,
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ewf, "run_edge_weight_feedback", _fake_run)
+    summary = runner._edge_weight_feedback({})
+    assert summary["already_saturated_count"] == 2
+    assert summary["skipped_not_injected_count"] == 4
+    assert summary["invalidated_never_hit_count"] == 5
+    assert summary["forget_eligible_backlog"] == 7
+    assert summary["reinforced_count"] == 1
+    assert summary["outcome"] == "reinforced"

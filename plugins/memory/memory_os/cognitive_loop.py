@@ -1153,12 +1153,19 @@ class CognitiveLoopRunner:
         )
         context["edge_weight_feedback_result"] = result
         return {
-            "schema_version": "memory-os.cognitive_loop.edge_weight_feedback.v0",
+            "schema_version": "memory-os.cognitive_loop.edge_weight_feedback.v1",
             "status": result.get("status", "ok"),
             "outcome": result.get("outcome", ""),
             "new_hit_record_count": result.get("new_hit_record_count", 0),
             "reinforced_count": result.get("reinforced_count", 0),
+            # v1(S2/S3 生产验证发现):白名单透传缺了新计数 — 报告工件与
+            # 监控的 edge_step_results 读的都是这里,漏键即对读者不存在
+            # (「计算了却无人读」的镜像:算了却传不出去)。
+            "already_saturated_count": result.get("already_saturated_count", 0),
+            "skipped_not_injected_count": result.get("skipped_not_injected_count", 0),
             "forgotten_count": result.get("forgotten_count", 0),
+            "invalidated_never_hit_count": result.get("invalidated_never_hit_count", 0),
+            "forget_eligible_backlog": result.get("forget_eligible_backlog", 0),
             "unresolved_hit_count": result.get("unresolved_hit_count", 0),
             "failed_count": result.get("failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),

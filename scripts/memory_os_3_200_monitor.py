@@ -7196,6 +7196,10 @@ def cognitive_loop_step_evidence():
       "write_failed_count", "candidate_count", "promoted_count",
       "ttl_invalidated_count", "failed_count", "scanned_ref_count",
       "new_hit_record_count", "reinforced_count", "forgotten_count",
+      # R4 v1 counters(S2/S3):饱和分账、非注入过滤、饿死信号、遗忘积压 —
+      # 两层白名单(loop 包装器 + 这里)漏任何一层,计数对读者即不存在。
+      "already_saturated_count", "skipped_not_injected_count",
+      "invalidated_never_hit_count", "forget_eligible_backlog",
       "unresolved_hit_count", "duration_ms", "error",
     )
     edge_step_results = {}
