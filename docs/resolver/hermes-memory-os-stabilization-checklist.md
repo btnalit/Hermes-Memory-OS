@@ -3932,6 +3932,13 @@ owner 若日后决定静音：把 "Memory State Overlay" 加进
 
 ## 待办
 
+**图谱遗忘潮预期落点：2026-10-06 前后（CJ 登记,2026-08-07）。**
+first_injection_at=2026-08-07 起算 60 天,过密图谱（refines 为主,重归一后
+0.45 档 1009 条）将开始被 R4 分批作废（每轮 ≤50,`forget_eligible_backlog`
+显示积压）——**预期且可取的瘦身,不是故障**。真告警只有一个:
+`invalidated_never_hit_count` 持续走高 = 探索位轮转覆盖不足（饿死信号）。
+届时另核 09:55Z 失控 disable 行来源（CJ 节,owner 确认是否本人所写）。
+
 **V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
 标准：届时 `v3_seed_evidence_snapshot.activation_evidence_ready=True` 且
 Full Monitor 0 FAIL → 开启 R4（`wandering_enabled=true` 影子观察 14 天再评
@@ -5041,3 +5048,112 @@ rendered+agenda digest 双 unavailable 复跑双双回 PASS——瞬时争用家
   幽灵 namespace agent 包驱逐（llm 死亡一个月的真根因）、knob 过期 WARN、
   Overlay live 锚点覆盖+S6 路由抑制、quiet gate fail-closed、实体碎片过滤;
   新增测试 41 条全部先红后绿，全量 3233 passed / 13 skipped。
+
+### CJ — 图谱注入质量三题 + 顾问评审三缺陷（2026-08-07，PR #46/#47 → `9d295b0`）
+
+owner 三问（开关默认 False / 边目标可读性 / 内容话题相关性）核查后判定
+1、3 为真问题、2 半真（↺ stub 打裸 ID）。按 owner 要求上 Opus 顾问评审，
+顾问确认三修法并挖出三个更深的前置缺陷，按 S1→S2→S3 依赖序单批落地。
+
+**顾问挖出的三缺陷（全部代码核实）**：
+- **F1 方向未归一（正确性）**：`query_edges` 匹配 `from OR to`，渲染无条件
+  取 `to_record_id` —「X→锚点」边把锚点自己当"关联记忆"展示（几乎必然已
+  被结晶段展示 → 永远 stub），depends_on 方向读反。四处同改：seen 判定、
+  预览目标、seen.add、**source_ids 披露归属**（只改渲染不改归属=归属造假）。
+- **F2 shadow 一份文件两种语义**：v0 在 knob 门之前落账，「查到边」=「注入
+  命中」— knob 关闭期的边照样被 R4 强化、last_hit 照样刷新。
+- **F3 update_edge_weight 饱和说谎**：权重已在目标值时返回真值 dict，R4 计
+  reinforced — 生产首轮报的「反馈加权 32 条」全部是 no-op（全 1.0 出生下
+  强化从未发生过）。
+
+**S1 — 方向归一+中文行文法**：`- 「锚点预览12字」方向短语:邻居正文预览
+(已列出·关联度 w)`；方向敏感短语表 module 级（producer 词表双向守卫）；
+去重命中降级 60 字符正文短预览（=结晶段同一正文精确前缀，零歧义对齐键，
+取代 ↺+裸 ID — 其它区段不显示 record_id，裸 ID 阅读方对不上号）；
+`[unresolved:id]` 删除（诊断归 shadow outcome，裸 ID 只诱导编造引用）；
+同 (锚点,邻居) 多边聚合一行；批量结晶解析一次扫描（替换热路径最坏 16 次
+全量 glob）；事件端点经调用方 events 缓存解析（溯源边邻居可读）。行总长
+最坏 220+2（`_clip` 省略号,与其他段同规）。
+
+**S2 — shadow v1 + R4 真实口径**：写入移到渲染后，每边 injected + 封闭
+outcome 八值（emitted_full/emitted_stub/below_weight_floor/target_inactive/
+non_crystallized_target/unresolved/not_selected/knob_disabled），anchor_ids
+入行（方向类缺陷从此可在生产数据回溯测量）；R4 只认 injected=True（缺字段
+历史行按旧语义）；遗忘守卫 `shadow_exists`→`first_injection_at`（v0 守卫在
+「从未展示过任何东西」的时期照样放行遗忘 — 正是它要防的屠杀；v0 state 按
+schema 判别保守迁移，v1 空值是真实信号不回落）；`update_edge_weight` no-op
+返回 `weight_update_noop` + 0.005 最小增量（防乘性强化在 cap 附近刷
+canonical 行 — index_sync 每 30 分钟全量重投影该文件）；新计数
+already_saturated（饱和命中仍刷新 last_hit,高频饱和边不得被遗忘处决）/
+skipped_not_injected / invalidated_never_hit（饿死信号）/
+forget_eligible_backlog（遗忘潮可见性）。
+
+**S3 — 分层出生权重+探索位+默认翻转+监控+重归一**：
+- 出生权重按**证据强度**分层（edge_weights.py,双向守卫钉死）:显式引用
+  0.70/共享事件源 0.55/词面相似 0.45/仅时间邻近 0.35/溯源 0.70;llm
+  `0.45+0.30×confidence`（confidence 本已采集、写入时被硬编码 1.0 丢弃 —
+  复用而非重建）;vector=真实相似度。全部 <1.0 且 ≥ 注入下限 0.3
+  （weight==1.0 从此可判定为未迁移遗留行）。R4 强化改乘性
+  `w+=0.12×(1−w)`,cap 不可达渐近线。
+- **探索位与分层同批（顾问:单发分层比现状更糟）**：全 1.0 时新边靠
+  created_at 轮换还能进来;分层后排序固化,弱边永无展示→永无命中→60 天
+  被判「无命中」处决（自我实现遗忘,生产密度约 110 边/结晶记录抢 8 名额）。
+  候选取数 32,注入位=top-6 按权重+2 探索位按天确定性轮转（crc32,内建
+  hash() 对字符串带盐不可用;无随机数热路径可复现）;落选 not_selected 落账。
+- P1 默认翻 True：**resolve_knob 用调用点传入的 default,注册表仅元数据 —
+  两处必须同翻**（只改注册表运行时零变化）。监控判据 expired→
+  `effective≠expected`（旧判据两个方向都错:resolver 只让 state=='active'
+  过期,confirmed 过期后仍生效→假警;翻转后真正危险态是一条 active 的
+  override_value=False,expired 判据结构上看不见）;effective 从部署
+  resolver 本体取值+一致性守卫测试（镜像重实现即词表漂移成因）。新增
+  `v2_graph_injection_shadow_state` INFO（7 天 v1 行/outcome 分布,零样本
+  healthy_no_sample 不买绿）。
+- 重归一脚本（dry-run 默认/--apply/幂等/W0 持久/纪元报告含迁移全表）。
+
+**部署与生产验证（2026-08-07,hermes-media,deploy_pass+live_monitor_pass）**：
+apply 全绿×2;两份 provider 拷贝 grep 双确认;重归一 dry-run 计划=基线
+完全吻合（1090 条:legacy 语义 811=refines 807+contradicts 4、词面 198+
+共享事件 9=co_occurs 207、llm 33、溯源 39、零 unknown）→ apply 1090/1090
+零失败 → 幂等复跑 0;非 invalidated 饱和边归零。直连探针实证新行文法
+（「Remembered...」其证据为:...关联度 0.70,无 ID/↺/unresolved,shadow v1
+injected/outcome 正确）。**R4 生产实证:被注入边 0.70→0.736（乘性）,
+injected=False 边保持 0.70（F2 过滤）,knob_disabled 12 边零强化**。
+
+**验证挖出三件事（definition of "仔细"）**：
+1. **失控 disable 行**:账本存在 09:55Z 手工风格追加的
+   `override_value:false` 行（id 后缀 `_disable`,ts 格式非 producer 产,
+   来源不明）,把 owner 裁定的永久注入静默关了 4.5 小时 —
+   **新 mismatch WARN 首个生产 run 就抓到它**（旧 expired 判据结构上看不
+   见此形态）。按 owner 既定裁定经正规 register_override 恢复 True。
+2. **S3.1 双层白名单剥计数**:run-once 实测 R4 四个新计数被 loop step
+   包装器固定键集剥掉,监控采集端 `_edge_fields` 是第二层同病白名单 —
+   两层漏任何一层,计数对读者即不存在（「计算了却无人读」的镜像:算了却
+   传不出去）。修+端到端双白名单守卫（真实包装器输出喂真实采集器）。
+3. **S3.2 归属纪元 v1→v2**:Full Monitor 冒出 `v2_exposure_schema_era_
+   unhealthy` FAIL,定位到一条 09:51Z 的 v1 纪元内自然行（Related Memory
+   已展示 596 字符而 source_ids 空 — F1 之前的 graph 归属缺口）。纪元门按
+   全纪元计 gap → 永久 FAIL 且无法追溯补齐。v1「归属完备」宣称被生产证伪,
+   按既有纪元边界模式升级 v2:v1 行整体降为已分类债务（all_history 保留,
+   分类而非抹除）,零 v2 样本走既有 healthy_no_sample+冻结护栏;反事实
+   （字面 v1 行）经 cp 回退实证无 bump 必红。测试全部符号引用常量,零漂移。
+
+终验 Full Monitor:**102 PASS / 4 已知 WARN / 0 FAIL**（mismatch WARN 随
+恢复清除,era FAIL 随 v2 清除,shell_alias 瞬时家族复跑自愈）。**Gateway
+重启后新行文法才进真实对话**（时机归 owner）。预告:以
+first_injection_at=2026-08-07 起算,首波大规模遗忘潮预期落点 **2026-10-06
+前后** — 过密图谱(refines 为主)的预期瘦身,监控看 forget_eligible_backlog,
+不是故障;invalidated_never_hit 持续走高才是探索轮转覆盖不足的真告警。
+
+**测试计数**:3233 → **3267 passed** + 13 skipped（+34:F1 方向/聚合/预览
+批量/E8c 升级/shadow v1 各分支/R4 五反事实/出生权重双向守卫/探索位轮转/
+重归一三连/knob 双向/监控 mismatch+resolver 一致性+shadow 采集/双白名单
+端到端/纪元 v1 债务化）。四静态门全绿,CI 三 run 全 success（push/PR 事件
+触发本轮自行恢复）。
+
+- **CJ**（2026-08-07）：图谱注入质量三题+顾问三缺陷单批落地——F1 方向归一
+  +中文行文法（锚点预览+方向短语+邻居正文,已列出短预览取代 ↺ 裸 ID）、
+  shadow v1 injected/outcome+R4 真实命中口径+遗忘守卫换轨、出生权重按证据
+  分层+乘性强化+探索位反饿死+存量 1090 条重归一、knob 默认翻 True+监控
+  effective≠expected 判据（首个生产 run 抓到失控 disable 行）、双层白名单
+  剥计数修复、归属纪元 v1→v2（完备性宣称被生产证伪）;全量 3267/13,
+  终验 102/4/0。
