@@ -511,13 +511,20 @@ def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
     lines = shadow_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= 1, "Expected at least 1 shadow log entry"
 
-    # Verify shadow log structure
+    # Verify shadow log structure (v1: injected/outcome per edge + anchor_ids)
     record = json.loads(lines[-1])
-    assert record.get("schema_version") == "memory-os.graph_layer_shadow.v0"
-    assert record.get("phase") == "1"
+    assert record.get("schema_version") == "memory-os.graph_layer_shadow.v1"
     assert record.get("anchor_count") >= 1
+    assert record.get("anchor_ids"), "v1 must persist anchor ids"
     assert record.get("edge_count") >= 1
+    # knob 关闭:边落账但全部 injected=False/knob_disabled — 权重反馈闭环
+    # 不得把这些当命中(F2)
+    assert record.get("injected_count") == 0
     edges = record.get("edges", [])
+    assert edges and all(
+        e.get("injected") is False and e.get("outcome") == "knob_disabled"
+        for e in edges
+    ), f"knob-off edges must be marked not-injected: {edges}"
     assert any(
         e.get("relation_type") == "co_occurs"
         and e.get("from_record_id") == event.id

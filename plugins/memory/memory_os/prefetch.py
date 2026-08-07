@@ -2009,6 +2009,20 @@ GRAPH_DEDUP_PREVIEW_CHARS = 60
 
 _GRAPH_CRYSTALLIZED_TYPES = frozenset({"crystallized_record", "crystallized"})
 
+# Shadow v1 每边 outcome 的封闭集(Completion Is Not Output:无输出的边
+# 必须能从账本读出原因,不需要重跑或读源码)。emitted_* 两值 injected=True,
+# 其余 injected=False。守卫测试对照渲染器实际产出双向钉死。
+GRAPH_SHADOW_OUTCOMES = frozenset({
+    "emitted_full",
+    "emitted_stub",
+    "below_weight_floor",
+    "target_inactive",
+    "non_crystallized_target",
+    "unresolved",
+    "not_selected",
+    "knob_disabled",
+})
+
 
 def _graph_layer_shadow_lines(
     store: MemoryOSStore,
@@ -2048,9 +2062,6 @@ def _graph_layer_shadow_lines(
     if not edges:
         return []
 
-    # ── Shadow log ALWAYS written (audit trail) ─────────────────
-    _record_graph_layer_shadow(store, anchor_ids, edges)
-
     # ── Knob gate ──────────────────────────────────────────────
     from .knob_overrides import resolve_knob as _resolve_knob
     injection_enabled = _resolve_knob(
@@ -2059,9 +2070,18 @@ def _graph_layer_shadow_lines(
         roots=store.roots,
     )
     if not injection_enabled:
+        # Shadow v1:knob 关闭也落账,但每条边标记 injected=False/
+        # knob_disabled — 旧版在 knob 门之前写入,「查到边」与「注入命中」
+        # 共用一份语义,权重反馈闭环会把从未展示过的边当命中强化(F2)。
+        decisions = [
+            {"edge": edge, "injected": False, "outcome": "knob_disabled"}
+            for edge in edges
+            if isinstance(edge, dict)
+        ]
+        _record_graph_layer_shadow(store, anchor_ids, decisions)
         return []
 
-    lines, _decisions = _render_graph_layer_lines(
+    lines, decisions = _render_graph_layer_lines(
         store,
         edges,
         anchor_ids=anchor_ids,
@@ -2069,6 +2089,8 @@ def _graph_layer_shadow_lines(
         source_ids=source_ids,
         events=events,
     )
+    # ── Shadow log written AFTER rendering (audit trail, v1) ────
+    _record_graph_layer_shadow(store, anchor_ids, decisions)
     return lines
 
 
@@ -2309,11 +2331,17 @@ def _render_graph_layer_lines(
 def _record_graph_layer_shadow(
     store: MemoryOSStore,
     anchor_ids: list[str],
-    edges: list[dict],
+    decisions: list[dict],
 ) -> None:
     """Append a bounded shadow record to system/graph_layer_shadow.jsonl.
 
-    Matches the SubstrateRecall shadow-log pattern but for graph edges.
+    Schema v1(F2 2026-08-07):写入发生在渲染**之后**,每条边带
+    ``injected``(是否真实进入 agent 上下文)与封闭 ``outcome``
+    (GRAPH_SHADOW_OUTCOMES)。v0 在 knob 门之前落账,「查到边」与「注入
+    命中」混用一份文件 — 权重反馈闭环把 knob 关闭/被过滤的边也当命中
+    强化。anchor_ids 同步写入(v0 只有 anchor_count,F1 类方向问题在生产
+    数据上无法回溯测量)。
+
     This is purely audit/inspection data — NOT injected into agent context.
     """
     path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
@@ -2322,29 +2350,40 @@ def _record_graph_layer_shadow(
     except Exception:
         return  # fail-open: shadow loss must not break prefetch
     _now_stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    edge_rows = []
+    injected_count = 0
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        edge = decision.get("edge")
+        if not isinstance(edge, dict):
+            continue
+        injected = bool(decision.get("injected", False))
+        if injected:
+            injected_count += 1
+        edge_rows.append({
+            "relation_type": str(edge.get("relation_type", "unknown")),
+            "from_record_type": str(edge.get("from_record_type", "")),
+            "from_record_id": str(edge.get("from_record_id", "")),
+            "to_record_type": str(edge.get("to_record_type", "")),
+            "to_record_id": str(edge.get("to_record_id", "")),
+            "weight": float(edge.get("weight", 1.0)),
+            "injected": injected,
+            "outcome": str(decision.get("outcome", "") or "unknown"),
+        })
     record = {
-        "schema_version": "memory-os.graph_layer_shadow.v0",
-        "phase": "1",
+        "schema_version": "memory-os.graph_layer_shadow.v1",
         "anchor_count": len(anchor_ids),
-        "edge_count": len(edges),
+        "anchor_ids": [str(a) for a in anchor_ids],
+        "edge_count": len(edge_rows),
+        "injected_count": injected_count,
         # created_at is the name metadata_retention._record_created_at ages on
         # (backlog 9); recorded_at stays for existing readers of this ledger.
         # Forward-only: historical recorded_at-only rows remain unaged -- an
         # owner decision, recorded in the backlog.
         "created_at": _now_stamp,
         "recorded_at": _now_stamp,
-        "edges": [
-            {
-                "relation_type": str(edge.get("relation_type", "unknown")),
-                "from_record_type": str(edge.get("from_record_type", "")),
-                "from_record_id": str(edge.get("from_record_id", "")),
-                "to_record_type": str(edge.get("to_record_type", "")),
-                "to_record_id": str(edge.get("to_record_id", "")),
-                "weight": float(edge.get("weight", 1.0)),
-            }
-            for edge in edges
-            if isinstance(edge, dict)
-        ],
+        "edges": edge_rows,
     }
     try:
         from .jsonl_io import append_jsonl_locked

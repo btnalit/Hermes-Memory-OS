@@ -5,18 +5,23 @@ Owner 决策 2026-08-06:「动态图谱应该是动态去更新关系的…不�
 治理机制:
 
   - **强化**:prefetch 注入命中(``system/graph_layer_shadow.jsonl``,由
-    ``_record_graph_layer_shadow`` 真实生产)→ 命中边 weight +HIT_BOOST
-    (cap 1.0),经 W0 同款 canonical 写回持久;
+    ``_record_graph_layer_shadow`` 真实生产)→ 命中边 weight 强化,经 W0
+    同款 canonical 写回持久。**只有 ``injected=True`` 的边算命中**(shadow
+    v1/F2):knob 关闭、被权重下限过滤、目标解析失败的边都会落账但不算
+    命中 — v0 时代「查到边」与「注入命中」共用一份语义,从未展示过的边
+    也被当命中强化过。缺 ``injected`` 字段的历史行按旧语义(算命中)。
   - **遗忘**:active 边 ``FORGET_AFTER_DAYS`` 无命中 → invalidated
     (G3 不删,每轮上限 FORGET_MAX_PER_RUN)。遗忘水位取
-    max(created_at, last_hit, 闭环首跑时间) — 「60 天无命中」必须从开始
-    记录命中之日起算,否则闭环上线首日会屠杀所有存量老边;且只有
-    shadow 账本存在(注入路径活跃过)才执行遗忘,注入关闭期间无命中
-    数据 ≠ 边没价值。
+    max(created_at, last_hit, first_injection_at) — 「60 天无命中」必须从
+    **首次真实注入**之日起算(v0 用闭环首跑时间,但 knob 关闭期间 shadow
+    照样有行,守卫 ``shadow_exists and lines`` 会在从未展示过任何东西的
+    时期放行遗忘);无 first_injection_at(注入从未活跃)不遗忘。
 
 Durable state: ``system/edge_weight_feedback_state.json``
-(processed_line_count cursor + per-edge last_hit + first_run_at)。
-Completion Is Not Output: closed outcome + production counters.
+(processed_line_count cursor + per-edge last_hit + first_run_at +
+first_injection_at)。Completion Is Not Output: closed outcome +
+production counters(含 already_saturated / skipped_not_injected /
+invalidated_never_hit / forget_eligible_backlog)。
 
 Runs as a cognitive-loop step.
 """
@@ -70,11 +75,22 @@ def run_edge_weight_feedback(
     processed = int(state.get("processed_line_count") or 0)
     last_hit: dict[str, str] = dict(state.get("edge_last_hit") or {})
     first_run_at = str(state.get("first_run_at") or "") or current.isoformat()
+    # v0→v1 state 迁移:v0 只有 first_run_at(闭环首跑)。生产的 shadow 自
+    # E8c 起才有真实注入,首跑(2026-08-07)与首次注入同日,保守继承。
+    # 只对 v0 状态迁移:v1 状态里 first_injection_at 为空是「注入从未活跃」
+    # 的真实信号(knob 关闭期),回落 first_run_at 会误开遗忘。
+    first_injection_at = str(state.get("first_injection_at") or "")
+    if not first_injection_at and str(state.get("schema_version") or "").endswith(".v0"):
+        first_injection_at = str(state.get("first_run_at") or "")
 
     reinforced = 0
     forgotten = 0
     failed = 0
     unresolved_hits = 0
+    skipped_not_injected = 0
+    already_saturated = 0
+    invalidated_never_hit = 0
+    forget_eligible = 0
 
     shadow_exists = shadow_path.exists()
     lines: list[str] = []
@@ -111,6 +127,14 @@ def run_edge_weight_feedback(
             for edge_ref in record.get("edges") or []:
                 if not isinstance(edge_ref, dict):
                     continue
+                # Shadow v1(F2):只有真实进入 agent 上下文的边算命中。
+                # 缺字段的历史 v0 行按旧语义(算命中),已消费 cursor 之前
+                # 的行不受影响。
+                if edge_ref.get("injected", True) is False:
+                    skipped_not_injected += 1
+                    continue
+                if not first_injection_at:
+                    first_injection_at = hit_at
                 try:
                     row = conn.execute(
                         "select edge_id, weight from memory_edges"
@@ -131,16 +155,25 @@ def run_edge_weight_feedback(
                 result = update_edge_weight(
                     conn, edge_id, float(row["weight"]) + HIT_BOOST, roots=roots,
                 )
-                if result:
+                if result and result.get("weight_update_noop"):
+                    # F3:权重已在目标值(饱和)— 强化没有发生,不许计成
+                    # reinforced(生产首轮报 32 条「强化」,全部是此类
+                    # no-op)。但命中是真实的:必须刷新 last_hit,否则被
+                    # 高频使用的饱和边会被遗忘环处决。
+                    already_saturated += 1
+                    last_hit[edge_id] = hit_at
+                elif result:
                     reinforced += 1
                     last_hit[edge_id] = hit_at
                 else:
                     failed += 1
 
         # ── 2. Forget long-idle active edges ───────────────────────────
-        # Only when the injection path has ever been live (shadow ledger
-        # exists): no hit data while injection is off ≠ worthless edges.
-        if shadow_exists and lines:
+        # Only when injection has EVER really delivered lines to the agent
+        # (first_injection_at):v0 守卫是「shadow 文件存在且非空」,但 knob
+        # 关闭期间 shadow 照样有行(v1 更是每次都落账)— 那个守卫会在从未
+        # 展示过任何东西的时期放行遗忘,正是它要防的「上线首日屠杀存量」。
+        if first_injection_at:
             cutoff = (current - timedelta(days=FORGET_AFTER_DAYS)).isoformat()
             try:
                 actives = conn.execute(
@@ -150,30 +183,42 @@ def run_edge_weight_feedback(
             except sqlite3.Error:
                 actives = []
             for row in actives:
-                if forgotten >= FORGET_MAX_PER_RUN:
-                    break
                 edge_id = str(row["edge_id"])
                 anchor = max(
                     str(row["created_at"] or ""),
                     last_hit.get(edge_id, ""),
-                    first_run_at,
+                    first_injection_at,
                 )
-                if anchor and anchor < cutoff:
-                    result = transition_edge_state(
-                        conn, edge_id, "invalidated", roots=roots,
-                    )
-                    if result and result.get("state") == "invalidated":
-                        forgotten += 1
-                        last_hit.pop(edge_id, None)
-                    else:
-                        failed += 1
+                if not anchor or anchor >= cutoff:
+                    continue
+                # 全量计数 eligible(积压可见性):cap 只限制本轮处决数,
+                # 大规模遗忘潮会摊成多轮 — 监控要能看到待遗忘积压,否则
+                # 看起来像闭环卡住。
+                forget_eligible += 1
+                if forgotten >= FORGET_MAX_PER_RUN:
+                    continue
+                never_hit = edge_id not in last_hit
+                result = transition_edge_state(
+                    conn, edge_id, "invalidated", roots=roots,
+                )
+                if result and result.get("state") == "invalidated":
+                    forgotten += 1
+                    if never_hit:
+                        # 从未获得任何展示机会就被判「无命中」— 该计数若
+                        # 居高不下,说明探索轮转覆盖不足(饿死信号),不是
+                        # 边没价值。
+                        invalidated_never_hit += 1
+                    last_hit.pop(edge_id, None)
+                else:
+                    failed += 1
     finally:
         conn.close()
 
     # ── 3. Persist cursor + hit watermarks (durable state) ─────────────
     state_out = {
-        "schema_version": "memory-os.edge_weight_feedback_state.v0",
+        "schema_version": "memory-os.edge_weight_feedback_state.v1",
         "first_run_at": first_run_at,
+        "first_injection_at": first_injection_at,
         "processed_line_count": len(lines),
         "edge_last_hit": last_hit,
         "updated_at": current.isoformat(),
@@ -183,10 +228,12 @@ def run_edge_weight_feedback(
     except Exception:
         failed += 1
 
-    if reinforced or forgotten:
+    if reinforced or forgotten or already_saturated:
         outcome = "reinforced"
     elif not shadow_exists:
         outcome = "no_shadow_ledger"
+    elif not first_injection_at:
+        outcome = "injection_never_live"
     else:
         outcome = "no_new_hits"
 
@@ -196,7 +243,11 @@ def run_edge_weight_feedback(
         "outcome": outcome,
         "new_hit_record_count": len(new_lines),
         "reinforced_count": reinforced,
+        "already_saturated_count": already_saturated,
+        "skipped_not_injected_count": skipped_not_injected,
         "forgotten_count": forgotten,
+        "invalidated_never_hit_count": invalidated_never_hit,
+        "forget_eligible_backlog": max(0, forget_eligible - forgotten),
         "unresolved_hit_count": unresolved_hits,
         "failed_count": failed,
         "tracked_edge_count": len(last_hit),
