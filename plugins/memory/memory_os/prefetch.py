@@ -1903,9 +1903,12 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
     if not search_query:
         return []
 
-    def _hits_of(term: str, *, limit: int) -> list[str]:
+    def _hits_of(term: str, *, limit: int, record_type: str | None = None) -> list[str]:
         try:
-            result = index.search(term, limit=limit)
+            if record_type is None:
+                result = index.search(term, limit=limit)
+            else:
+                result = index.search(term, limit=limit, record_type=record_type)
         except Exception:
             return []
         found: list[str] = []
@@ -1917,9 +1920,16 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
                 found.append(rid)
         return found
 
+    # E8b:结晶限定段优先 — FTS 通用命中被事件量级淹没(生产实测 top 8
+    # 清一色 event),而边密度在结晶层;锚点池 = 结晶命中(前)∪ 通用命中,
+    # cap 5。旧 index/mock 不支持 record_type 时 fail-open 降级为空段。
+    crystallized_ids = _hits_of(
+        search_query, limit=2, record_type="crystallized_record",
+    )
     ids = _hits_of(search_query, limit=5)
-    if ids:
-        return ids
+    merged = _dedupe(crystallized_ids + ids)[:5]
+    if merged:
+        return merged
 
     # ── E8 回退(2026-08-07 生产实锤)────────────────────────────────
     # 派生的多词 search_query 在 FTS AND 语义下经常 0 命中(实测

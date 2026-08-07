@@ -1929,16 +1929,20 @@ def test_r1_structural_source_has_no_candidate_state():
 
 
 class _E8MockIndex:
-    """可编程 search mock:按查询词返回预设命中。"""
+    """可编程 search mock:按 (查询词[, record_type]) 返回预设命中。"""
 
-    def __init__(self, hits_by_query):
+    def __init__(self, hits_by_query, typed_hits=None):
         self.hits_by_query = hits_by_query
+        self.typed_hits = typed_hits or {}
         self.queries = []
 
-    def search(self, query, limit=5):
-        self.queries.append(query)
-        hits = self.hits_by_query.get(query, [])
-        return {"hits": [{"record_id": rid, "record_type": "crystallized_record"} for rid in hits]}
+    def search(self, query, limit=5, record_type=None):
+        self.queries.append((query, record_type))
+        if record_type is not None:
+            hits = self.typed_hits.get((query, record_type), [])
+        else:
+            hits = self.hits_by_query.get(query, [])
+        return {"hits": [{"record_id": rid, "record_type": record_type or "event"} for rid in hits]}
 
 
 def test_e8_and_failure_falls_back_to_per_term_union():
@@ -1977,13 +1981,15 @@ def test_e8_chinese_keywords_recovered_when_latin_terms_miss():
 
 
 def test_e8_direct_hit_needs_no_fallback():
-    """回归:派生查询直接命中时不回退(单次 search,行为不变)。"""
+    """回归:派生查询直接命中时不做逐词回退(双段主查询后即返回)。"""
     index = _E8MockIndex({"Memory-OS Hermes": ["cry_direct"]})
     anchors = _collect_anchor_ids("聊聊 Memory-OS 和 Hermes", index)
     assert anchors == ["cry_direct"]
-    assert index.queries == ["Memory-OS Hermes"], (
-        f"no fallback queries expected on direct hit: {index.queries}"
-    )
+    # 双段主查询(结晶限定 + 通用)各一次,无逐词回退查询
+    assert index.queries == [
+        ("Memory-OS Hermes", "crystallized_record"),
+        ("Memory-OS Hermes", None),
+    ], f"no per-term fallback expected on direct hit: {index.queries}"
 
 
 def test_e8_fallback_bounded():
@@ -1994,6 +2000,29 @@ def test_e8_fallback_bounded():
     # 构造派生出 6 个拉丁词的 query
     anchors = _collect_anchor_ids("check w0 w1 w2 w3 w4 w5 please", index)
     assert len(anchors) <= 5, f"anchor cap must hold: {anchors}"
+
+
+def test_e8_crystallized_hits_prioritized_into_anchor_pool():
+    """E8b counterfactual:结晶命中必须进锚点池并排在前面。
+
+    生产实锤(2026-08-07):FTS 通用命中被事件量级淹没(top 8 清一色
+    event),而边密度在结晶层(active 边端点:9 结晶 vs 26 事件,后者是
+    仅 30 条溯源边的固定集合)——通用锚点几乎永远落不到带边节点上。
+    修复:锚点收集用双段查询,record_type='crystallized_record' 限定段
+    优先,通用段补足。无修复:mock 的通用命中全 event → 锚点无结晶 → 必红。
+    """
+    index = _E8MockIndex(
+        {"Memory-OS Hermes": ["evt_1", "evt_2", "evt_3", "evt_4", "evt_5"]},
+        typed_hits={("Memory-OS Hermes", "crystallized_record"): ["cry_hot"]},
+    )
+    anchors = _collect_anchor_ids("聊聊 Memory-OS 和 Hermes", index)
+    assert "cry_hot" in anchors, (
+        f"crystallized hits must enter the anchor pool: {anchors}"
+    )
+    assert anchors[0] == "cry_hot", (
+        f"crystallized hits must be prioritized (edge density lives there): {anchors}"
+    )
+    assert len(anchors) <= 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════
