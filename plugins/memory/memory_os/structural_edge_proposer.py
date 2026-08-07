@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .audit import append_audit
+from .edge_weights import birth_weight
 
 
 # Dice coefficient threshold for body-text similarity — above this the pair
@@ -126,7 +127,7 @@ def _detect_relation(
             "to_record_type": "crystallized_record",
             "to_record_id": rid_b,
             "relation_type": "co_occurs",
-            "weight": 1.0,
+            "weight": birth_weight("structural", "shared_source_event"),
             "source_event_id": shared_event,
             "proposed_by": "structural",
             "state": "active",
@@ -142,7 +143,7 @@ def _detect_relation(
             "to_record_type": "crystallized_record",
             "to_record_id": to_id,
             "relation_type": "depends_on",
-            "weight": 1.0,
+            "weight": birth_weight("structural", "explicit_reference"),
             "source_event_id": None,
             "proposed_by": "structural",
             "state": "active",
@@ -167,7 +168,7 @@ def _detect_relation(
                 "to_record_type": "crystallized_record",
                 "to_record_id": rid_b,
                 "relation_type": rtype,
-                "weight": 1.0,
+                "weight": birth_weight("structural", "body_similarity"),
                 "source_event_id": None,
                 "proposed_by": "structural",
                 "state": "active",
@@ -185,7 +186,7 @@ def _detect_relation(
                 "to_record_type": "crystallized_record",
                 "to_record_id": rid_b,
                 "relation_type": "co_occurs",
-                "weight": 1.0,
+                "weight": birth_weight("structural", "temporal_proximity"),
                 "source_event_id": None,
                 "proposed_by": "structural",
                 "state": "active",

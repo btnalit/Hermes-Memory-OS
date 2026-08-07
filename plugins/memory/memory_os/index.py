@@ -1585,8 +1585,13 @@ def update_edge_weight(
     col_names = [str(c[1]) for c in conn.execute("pragma table_info(memory_edges)").fetchall()]
     current = dict(zip(col_names, row))
     bounded = min(1.0, max(0.0, float(new_weight)))
-    if float(current.get("weight") or 0.0) == bounded:
-        return current  # no-op
+    if abs(float(current.get("weight") or 0.0) - bounded) < 0.005:
+        # No-op must be DISTINGUISHABLE from a real write(F3):旧版返回真值
+        # dict,R4 把从未发生的强化计成 reinforced(生产首轮 32 条全部如此)。
+        # 0.005 最小增量下限同时防止乘性强化在 cap 附近每次命中都向
+        # graph/edges.jsonl 追加一条几乎相同的 canonical 行(index_sync 每
+        # 30 分钟全量重投影该文件)。
+        return {**current, "weight_update_noop": True}
     updated_edge = {
         "edge_id": str(current.get("edge_id", "")),
         "from_record_type": str(current.get("from_record_type", "")),

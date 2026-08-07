@@ -403,23 +403,25 @@ def test_register_override_rejects_value_not_in_allowed_non_bool(store_root):
 # ── A3.10: graph_layer_injection_enabled knob ──────────────────────────────
 
 def test_graph_layer_injection_enabled_is_registered_lane_switch(store_root):
-    """graph_layer_injection_enabled should be a lane_switch knob, default False."""
+    """graph_layer_injection_enabled: lane_switch, default True(P1 2026-08-07,
+    owner 裁定图谱为永久能力 — 开关保留作回滚,not for graduation;旧默认
+    False 靠无过期 override 撑着,override 丢失即静默变暗且监控不响)。"""
     from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, resolve_knob
 
     spec = OVERRIDABLE_KNOBS.get("graph_layer_injection_enabled")
     assert spec is not None, "graph_layer_injection_enabled must be in OVERRIDABLE_KNOBS"
     assert spec.get("kind") == "lane_switch"
-    assert spec.get("default") is False
+    assert spec.get("default") is True
     assert spec.get("allowed") == [True, False]
     assert spec.get("meta") is False
 
     # Verify resolve_knob returns default when no override exists
     result = resolve_knob(
         "graph_layer_injection_enabled",
-        default=False,
+        default=True,
         _store_root=store_root,
     )
-    assert result is False
+    assert result is True
 
 
 def test_non_bool_allowed_list_would_not_trigger_type_guard():

@@ -94,13 +94,15 @@ def run_edge_provenance(
                 continue
             in_run.add(key)
             if index and hasattr(index, "write_governed_edge"):
+                from .edge_weights import birth_weight
+
                 result = index.write_governed_edge(
                     from_record_type="event",
                     from_record_id=event_id,
                     to_record_type="crystallized_record",
                     to_record_id=record_id,
                     relation_type="evidence_for",
-                    weight=1.0,
+                    weight=birth_weight("provenance", "source_event_provenance"),
                     source_event_id=event_id,
                     proposed_by="provenance",
                     # 元数据在结晶批准时已过 OwnerGate → auto-active;

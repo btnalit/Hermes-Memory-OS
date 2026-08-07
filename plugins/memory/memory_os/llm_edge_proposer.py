@@ -309,15 +309,19 @@ def run_llm_proposer(
             # 取代旧的 §6/G4/T2.3.2 需审契约 — 动态图谱不占审批带宽)。
             init_state = "active"
 
-            # Write edge — weight=1.0 for Phase 1-2 (confidence is provenance only)
+            # P3:出生权重 = 0.45 + 0.30 × confidence — confidence 本就被
+            # _call_llm 采集,旧实现写入时硬编码 1.0 丢弃(出生即饱和,
+            # 权重排序与命中强化双双失效)。
             if index and hasattr(index, "write_governed_edge"):
+                from .edge_weights import llm_birth_weight
+
                 edge = index.write_governed_edge(
                     from_record_type="crystallized_record",
                     from_record_id=records[i]["id"],
                     to_record_type="crystallized_record",
                     to_record_id=records[j]["id"],
                     relation_type=rtype,
-                    weight=1.0,
+                    weight=llm_birth_weight(confidence),
                     source_event_id=None,
                     proposed_by="llm",
                     state=init_state,

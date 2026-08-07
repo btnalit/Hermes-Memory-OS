@@ -286,9 +286,14 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "deployed cron registry snapshot resolves fewer group members than the installed registry defines - regenerate the snapshot (install/onboarding step)",
         "production_behavior": "warn_if_production",
     },
-    "v2_output_knob_override_expired": {
+    "v2_output_knob_override_mismatch": {
         "classification": "known_optional",
-        "reason": "an output-affecting knob override expired while enabled - owner decides renewal; clean hosts have no overrides so this only fires where one was configured",
+        "reason": "an output-affecting knob's effective value differs from its expected live value - owner decides; clean hosts have no overrides so the default resolves to the expected value and this stays silent",
+        "production_behavior": "warn_if_production",
+    },
+    "v2_graph_injection_shadow_collection_failed": {
+        "classification": "known_optional",
+        "reason": "graph injection shadow ledger could not be read - collection failure surfaced instead of a fabricated zero",
         "production_behavior": "warn_if_production",
     },
     "v2_output_knob_override_collection_failed": {
@@ -1724,23 +1729,39 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "code": "v2_output_knob_override_state",
                 "value": _ok_knobs,
             })
-            _expired_enabled = [
+            # P1 2026-08-07:判据从「override 是否过期」换成「生效值是否为
+            # 期望值」。旧判据两个方向都错:confirmed 行过期后 resolver 仍
+            # 生效(假警),而默认翻 True 后真正的危险态是一条 active 的
+            # override_value=False(旧判据结构上看不见)。
+            _mismatched = [
                 name for name, row in _ok_knobs.items()
-                if isinstance(row, dict)
-                and row.get("present") is True
-                and bool(row.get("override_value"))
-                and row.get("expired") is True
+                if isinstance(row, dict) and row.get("mismatch") is True
             ]
-            if _expired_enabled:
+            if _mismatched:
                 warn.append({
-                    "code": "v2_output_knob_override_expired",
-                    "knobs": _expired_enabled,
-                    "value": {name: _ok_knobs.get(name) for name in _expired_enabled},
+                    "code": "v2_output_knob_override_mismatch",
+                    "knobs": _mismatched,
+                    "value": {name: _ok_knobs.get(name) for name in _mismatched},
                 })
         else:
             warn.append({
                 "code": "v2_output_knob_override_collection_failed",
                 "value": output_knob_override_state,
+            })
+
+    _gis_raw = snapshot.get("graph_injection_shadow")
+    if isinstance(_gis_raw, dict):
+        if _gis_raw.get("collected"):
+            # deliberately ungraded INFO:healthy_no_sample 在其面上说明
+            # 无样本(不买绿);knob 侧的 mismatch WARN 才是分级信号。
+            info.append({
+                "code": "v2_graph_injection_shadow_state",
+                "value": _gis_raw,
+            })
+        else:
+            warn.append({
+                "code": "v2_graph_injection_shadow_collection_failed",
+                "value": _gis_raw,
             })
 
     _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
@@ -7207,10 +7228,16 @@ def cognitive_loop_step_evidence():
 
 
 def output_knob_override_state():
-    # W6 (E5): expiry visibility for output-affecting knob overrides.
-    # graph_layer_injection_enabled's enabled override expired 2026-07-01
-    # with no monitor signal — injection went silently dark.
-    _output_knobs = ("graph_layer_injection_enabled",)
+    # W6 (E5) → P1 2026-08-07: the graded signal is now "effective value !=
+    # expected live value". The expiry-only check failed both directions:
+    # the resolver only expires state=='active' rows ('confirmed' outlives
+    # its expires_at → monitor cried wolf), and after the default flip the
+    # dangerous state is an ACTIVE override_value=False, which an expiry
+    # check structurally cannot see. Effective value comes from the deployed
+    # resolver itself — a mirrored reimplementation here is exactly how the
+    # expiry-vocabulary drift happened.
+    _expected_live = {"graph_layer_injection_enabled": True}
+    _output_knobs = tuple(_expected_live)
     path = os.path.join(_hermes_home, "memory-os/system/knob_overrides.jsonl")
     try:
         rows = _read_jsonl(path)
@@ -7226,30 +7253,113 @@ def output_knob_override_state():
     now = datetime.now(timezone.utc)
     knobs = {}
     for knob in _output_knobs:
+        expected = _expected_live[knob]
+        effective = None
+        effective_source = ""
+        try:
+            from pathlib import Path as _Path
+
+            from plugins.memory.memory_os.knob_overrides import (
+                OVERRIDABLE_KNOBS as _knob_specs,
+            )
+            from plugins.memory.memory_os.knob_overrides import (
+                resolve_knob as _resolve_knob,
+            )
+
+            _default = (_knob_specs.get(knob) or {}).get("default", expected)
+            effective = _resolve_knob(
+                knob,
+                _default,
+                _store_root=_Path(_hermes_home) / "memory-os" / "system",
+            )
+            effective_source = "resolver"
+        except Exception as exc:
+            effective_source = f"resolver_unavailable:{type(exc).__name__}"
+        entry = {
+            "expected_live_value": expected,
+            "effective_value": effective,
+            "effective_source": effective_source,
+            # None (resolver unavailable) counts as mismatch: an ungradeable
+            # output knob must surface, not silently pass.
+            "mismatch": (effective is None) or (bool(effective) != bool(expected)),
+        }
         row = latest_by_knob.get(knob)
         if not row:
-            knobs[knob] = {"present": False}
-            continue
-        expires_at = str(row.get("expires_at") or "").strip()
-        expired = False
-        if expires_at:
-            try:
-                _exp = expires_at[:-1] + "+00:00" if expires_at.endswith("Z") else expires_at
-                parsed = datetime.fromisoformat(_exp)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                expired = parsed <= now
-            except ValueError:
-                expired = False
-        knobs[knob] = {
-          "present": True,
-          "override_value": row.get("override_value"),
-          "expires_at": expires_at,
-          "expired": expired,
-          "state": str(row.get("state") or ""),
-          "ts": str(row.get("ts") or ""),
-        }
+            entry["present"] = False
+        else:
+            expires_at = str(row.get("expires_at") or "").strip()
+            expired = False
+            if expires_at:
+                try:
+                    _exp = expires_at[:-1] + "+00:00" if expires_at.endswith("Z") else expires_at
+                    parsed = datetime.fromisoformat(_exp)
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    expired = parsed <= now
+                except ValueError:
+                    expired = False
+            entry.update({
+              "present": True,
+              "override_value": row.get("override_value"),
+              "expires_at": expires_at,
+              "expired": expired,
+              "state": str(row.get("state") or ""),
+              "ts": str(row.get("ts") or ""),
+            })
+        knobs[knob] = entry
     return {"collected": True, "knobs": knobs}
+
+
+def graph_injection_shadow_state():
+    # Completion Is Not Output(shadow v1 2026-08-07):注入健康要看生产
+    # 证据(injected 行数/outcome 分布),不能只看配置端 knob。零样本必须
+    # 报 healthy_no_sample,不得算 PASS 证据(纪元边界规则:空 gated 集
+    # 不许买绿)。deliberately ungraded — 上游闲置会良性地把样本清零。
+    path = os.path.join(_hermes_home, "memory-os/system/graph_layer_shadow.jsonl")
+    if not os.path.exists(path):
+        return {
+            "collected": True,
+            "status": "healthy_no_sample",
+            "v1_rows_7d": 0,
+            "injected_count_7d": 0,
+            "outcome_distribution_7d": {},
+        }
+    try:
+        rows = _read_jsonl(path)
+    except Exception as exc:
+        return {"collected": False, "error_code": type(exc).__name__}
+    cutoff = (
+        (datetime.now(timezone.utc) - timedelta(days=7))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    v1_rows = 0
+    injected = 0
+    outcomes = {}
+    for row in rows[-2000:]:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("schema_version") or "") != "memory-os.graph_layer_shadow.v1":
+            continue
+        created = str(row.get("created_at") or "")
+        if created and created < cutoff:
+            continue
+        v1_rows += 1
+        try:
+            injected += int(row.get("injected_count") or 0)
+        except (TypeError, ValueError):
+            pass
+        for edge in row.get("edges") or []:
+            if isinstance(edge, dict):
+                oc = str(edge.get("outcome") or "unknown")
+                outcomes[oc] = outcomes.get(oc, 0) + 1
+    return {
+        "collected": True,
+        "status": "healthy_no_sample" if v1_rows == 0 else "sampled",
+        "v1_rows_7d": v1_rows,
+        "injected_count_7d": injected,
+        "outcome_distribution_7d": outcomes,
+    }
 
 def module_cadence_summary():
     reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/module_cadence/reports.jsonl"))
@@ -8957,6 +9067,7 @@ print(json.dumps({
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "cognitive_loop_step_evidence": cognitive_loop_step_evidence(),
   "output_knob_override_state": output_knob_override_state(),
+  "graph_injection_shadow": graph_injection_shadow_state(),
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
   "owner_review": owner_review,

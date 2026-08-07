@@ -478,8 +478,20 @@ def test_t1_4_6_g7_deterministic_recall_independent(tmp_path):
 
 
 def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
-    """T1.5.1: Phase 1 — edges are shadow-logged, NOT injected into context."""
+    """T1.5.1(P1 更新):回滚开关关火时 — edges are shadow-logged, NOT
+    injected into context。默认已翻 True(owner 裁定),关火需显式 False
+    override;knob_disabled 的边落账但 injected=False(F2)。"""
     store, index = _store(tmp_path)
+    from plugins.memory.memory_os.knob_overrides import register_override as _reg
+    _reg(
+        "graph_layer_injection_enabled",
+        False,
+        prior=True,
+        proposed_by="test",
+        approved_via="test",
+        expires_at="",
+        roots=store.roots,
+    )
     # Seed an event so FTS5 has content
     event = EventEnvelope.from_dict(build_event(seed=100, profile="graph-layer-test"))
     store.append_event(event)
@@ -511,13 +523,20 @@ def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
     lines = shadow_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) >= 1, "Expected at least 1 shadow log entry"
 
-    # Verify shadow log structure
+    # Verify shadow log structure (v1: injected/outcome per edge + anchor_ids)
     record = json.loads(lines[-1])
-    assert record.get("schema_version") == "memory-os.graph_layer_shadow.v0"
-    assert record.get("phase") == "1"
+    assert record.get("schema_version") == "memory-os.graph_layer_shadow.v1"
     assert record.get("anchor_count") >= 1
+    assert record.get("anchor_ids"), "v1 must persist anchor ids"
     assert record.get("edge_count") >= 1
+    # knob 关闭:边落账但全部 injected=False/knob_disabled — 权重反馈闭环
+    # 不得把这些当命中(F2)
+    assert record.get("injected_count") == 0
     edges = record.get("edges", [])
+    assert edges and all(
+        e.get("injected") is False and e.get("outcome") == "knob_disabled"
+        for e in edges
+    ), f"knob-off edges must be marked not-injected: {edges}"
     assert any(
         e.get("relation_type") == "co_occurs"
         and e.get("from_record_id") == event.id
@@ -1591,175 +1610,246 @@ def test_t2_3_6_format_tags_list(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Phase 1.6 — Edge target resolution helpers (Task 1 of P1a)
+# Phase 1.6 — Edge target resolution helpers(P2 改造后:批量解析 + 预览状态)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_resolve_edge_target_preview_found(tmp_path):
-    """When crystallized record exists, return body preview."""
-    from plugins.memory.memory_os.prefetch import _resolve_edge_target_preview
-    from plugins.memory.memory_os.roots import MemoryOSRoots
-    from plugins.memory.memory_os.store import MemoryOSStore
-    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
-    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
-
-    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
-    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
-    store = MemoryOSStore(roots)
-    store.initialize()
-
-    # Write a crystallized record
-    svc = CrystallizedMemoryService(store)
-    candidate = CrystallizedCandidate(
-        candidate_id="cand-1",
-        kind="preference",
-        body="用户偏好深色主题界面",
-        source_event_ids=["evt_seed_001"],
-    )
-    decision = ApprovalDecision(
-        candidate_id="cand-1",
-        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
-        reviewer="owner",
-        reviewed_at="2026-06-22T10:00:00Z",
-        note="test",
-        source_state="active",
-    )
-    svc.write_approved_record(candidate, decision, file_name="owner_approved.md")
-
-    # Non-existent record -> None
-    preview = _resolve_edge_target_preview(store, "nonexistent_id")
-    assert preview is None
-
-    # Find the actual record_id from what was written
-    records = svc.read_records("owner_approved.md")
-    assert len(records) == 1
-    record_id = records[0].frontmatter["id"]
-    preview = _resolve_edge_target_preview(store, record_id)
-    assert preview is not None
-    assert "深色主题" in preview
-
-
-def test_resolve_edge_target_preview_excludes_revoked_record(tmp_path):
-    from plugins.memory.memory_os.prefetch import _resolve_edge_target_preview
-    from plugins.memory.memory_os.roots import MemoryOSRoots
-    from plugins.memory.memory_os.store import MemoryOSStore
+def _write_cry_record(store, *, body, candidate_id, file_name, kind="note"):
+    """真实 producer 写入结晶记录并返回 record_id(counterfactual 教训:
+    手写 fixture 会让反事实空转,必须走 CrystallizedMemoryService)。"""
     from plugins.memory.memory_os.crystallized import (
         CrystallizedCandidate,
         CrystallizedMemoryService,
     )
     from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
 
-    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
-    store = MemoryOSStore(roots)
-    store.initialize()
-    service = CrystallizedMemoryService(store)
-    candidate = CrystallizedCandidate(
-        candidate_id="cand-revoked-preview",
-        kind="preference",
-        body="SECRET-NONCE-REVOKED-PREVIEW",
-        source_event_ids=["evt-revoked-preview"],
-    )
-    decision = ApprovalDecision(
-        candidate_id=candidate.candidate_id,
-        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
-        reviewer="owner",
-        reviewed_at="2026-06-22T10:00:00Z",
-    )
-    service.write_approved_record(
-        candidate,
-        decision,
-        file_name="owner_approved.md",
-    )
-    record_id = str(service.read_records("owner_approved.md")[0].frontmatter["id"])
-    service.revoke_record(record_id, revoked_by="owner", reason="test")
-
-    assert _resolve_edge_target_preview(store, record_id) is None
-
-    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
-
-    lines = _graph_layer_injection_lines(
-        store,
-        [
-            {
-                "edge_id": "edge-revoked-preview",
-                "to_record_type": "crystallized_record",
-                "to_record_id": record_id,
-                "relation_type": "similar_to",
-                "weight": 0.8,
-                "state": "active",
-            }
-        ],
-    )
-    assert lines == []
-
-
-def test_graph_layer_injection_lines_formats_edges(tmp_path):
-    """Injection line formatting: each edge produces relation_type + body preview."""
-    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
-    from plugins.memory.memory_os.roots import MemoryOSRoots
-    from plugins.memory.memory_os.store import MemoryOSStore
-    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
-    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
-
-    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
-    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
-    store = MemoryOSStore(roots)
-    store.initialize()
-
     svc = CrystallizedMemoryService(store)
     candidate = CrystallizedCandidate(
-        candidate_id="cand-graph-1",
-        kind="note",
-        body="图谱测试记忆内容",
-        source_event_ids=["evt_seed_002"],
+        candidate_id=candidate_id,
+        kind=kind,
+        body=body,
+        source_event_ids=[f"evt_seed_{candidate_id}"],
     )
     decision = ApprovalDecision(
-        candidate_id="cand-graph-1",
+        candidate_id=candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="owner",
         reviewed_at="2026-06-22T10:00:00Z",
         note="test",
         source_state="active",
     )
-    svc.write_approved_record(candidate, decision, file_name="test_graph.md")
+    svc.write_approved_record(candidate, decision, file_name=file_name)
+    return str(svc.read_records(file_name)[-1].frontmatter["id"])
 
-    records = svc.read_records("test_graph.md")
-    record_id = records[0].frontmatter["id"]
+
+def test_batch_resolve_and_graph_preview(tmp_path):
+    """批量解析一次扫描建映射;_graph_preview 区分 ok/inactive/missing。"""
+    from plugins.memory.memory_os.prefetch import (
+        _batch_resolve_crystallized,
+        _graph_preview,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    rid = _write_cry_record(
+        store, body="用户偏好深色主题界面", candidate_id="cand-batch-1",
+        file_name="batch_a.md", kind="preference",
+    )
+    rid_revoked = _write_cry_record(
+        store, body="SECRET-NONCE-REVOKED-PREVIEW", candidate_id="cand-batch-2",
+        file_name="batch_b.md", kind="preference",
+    )
+    CrystallizedMemoryService(store).revoke_record(
+        rid_revoked, revoked_by="owner", reason="test",
+    )
+
+    cry_map = _batch_resolve_crystallized(store, {rid, rid_revoked, "nonexistent_id"})
+    assert rid in cry_map
+    assert rid_revoked in cry_map, "revoked records must resolve (for inactive detection)"
+    assert "nonexistent_id" not in cry_map
+
+    text, status = _graph_preview(rid, "crystallized_record", cry_map, {})
+    assert status == "ok" and text and "深色主题" in text
+    assert _graph_preview(rid_revoked, "crystallized_record", cry_map, {}) == (None, "inactive")
+    assert _graph_preview("nonexistent_id", "crystallized_record", cry_map, {})[1] == "missing"
+
+    # 事件端点走 events 缓存
+    text, status = _graph_preview("evt_9", "event", {}, {"evt_9": "事件摘要内容测试"})
+    assert status == "ok" and text and "事件摘要" in text
+    assert _graph_preview("evt_gone", "event", {}, {})[1] == "missing"
+
+
+def test_render_drops_revoked_and_unresolved_neighbors(tmp_path):
+    """撤销邻居整行抑制(target_inactive);解析失败的结晶邻居整行丢弃
+    (unresolved)— record_id 永不作为兜底行出现(P2:裸 id 阅读方对不上
+    号,只会诱导编造引用;诊断归 shadow outcome)。反事实:旧实现会落
+    [unresolved:cry_...] 行。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    rid_anchor = _write_cry_record(
+        store, body="锚点记录:图谱注入方向归一约定", candidate_id="cand-dir-a",
+        file_name="dir_a.md",
+    )
+    rid_revoked = _write_cry_record(
+        store, body="SECRET-NONCE-REVOKED-PREVIEW", candidate_id="cand-dir-r",
+        file_name="dir_r.md",
+    )
+    CrystallizedMemoryService(store).revoke_record(
+        rid_revoked, revoked_by="owner", reason="test",
+    )
 
     edges = [
         {
-            "edge_id": "edge-1",
-            "to_record_type": "crystallized_record",
-            "to_record_id": record_id,
-            "relation_type": "co_occurs",
-            "weight": 0.85,
+            "edge_id": "edge-revoked",
             "from_record_type": "crystallized_record",
-            "from_record_id": "cry_src",
+            "from_record_id": rid_anchor,
+            "to_record_type": "crystallized_record",
+            "to_record_id": rid_revoked,
+            "relation_type": "co_occurs",
+            "weight": 0.9,
             "state": "active",
         },
         {
-            "edge_id": "edge-2",
-            "to_record_type": "crystallized_record",
-            "to_record_id": "nonexistent_cry_999",
-            "relation_type": "similar_to",
-            "weight": 0.60,
+            "edge_id": "edge-missing",
             "from_record_type": "crystallized_record",
-            "from_record_id": "cry_src",
+            "from_record_id": rid_anchor,
+            "to_record_type": "crystallized_record",
+            "to_record_id": "cry_nonexistent_999",
+            "relation_type": "co_occurs",
+            "weight": 0.8,
             "state": "active",
         },
     ]
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[rid_anchor], seen=set(),
+    )
+    assert lines == [], f"neither neighbor is renderable: {lines}"
+    assert "SECRET-NONCE" not in " ".join(lines)
+    by_target = {str(d["edge"]["to_record_id"]): d for d in decisions}
+    assert by_target[rid_revoked]["outcome"] == "target_inactive"
+    assert by_target["cry_nonexistent_999"]["outcome"] == "unresolved"
+    assert all(d["injected"] is False for d in decisions)
 
+
+def test_render_formats_direction_normalized_chinese_lines(tmp_path):
+    """新行文法 + F1 方向归一反事实。
+
+    B→A 的边(锚点在 to 侧):旧实现无条件取 to_record_id 当展示目标,会把
+    锚点自己当"关联记忆"展示且 depends_on 方向读反;新实现必须展示 B 的
+    正文,短语用 to 侧的「被以下内容依赖」。行内永不出现 record_id。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    rid_a = _write_cry_record(
+        store, body="锚点记录:图谱注入的方向归一约定说明",
+        candidate_id="cand-f1-a", file_name="f1_a.md",
+    )
+    rid_b = _write_cry_record(
+        store, body="邻居记录:被依赖的底层配置基线说明",
+        candidate_id="cand-f1-b", file_name="f1_b.md",
+    )
+
+    edges = [{
+        "edge_id": "edge-f1",
+        "from_record_type": "crystallized_record",
+        "from_record_id": rid_b,
+        "to_record_type": "crystallized_record",
+        "to_record_id": rid_a,
+        "relation_type": "depends_on",
+        "weight": 0.85,
+        "state": "active",
+    }]
     seen: set[tuple[str, str]] = set()
-    lines = _graph_layer_injection_lines(store, edges, seen=seen)
+    source_ids: list[str] = []
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[rid_a], seen=seen, source_ids=source_ids,
+    )
 
-    # At least one line should be resolved successfully
-    assert len(lines) >= 1
-    # First edge should contain relation_type and body preview
-    assert "co_occurs" in lines[0] or "图谱测试" in lines[0]
-    # Second edge resolution failure -> fallback to record_id
-    assert any("nonexistent_cry_999" in line for line in lines)
-    # seen should contain the successfully resolved record
-    assert ("crystallized_record", record_id) in seen
+    assert len(lines) == 1, f"expected one rendered line: {lines}"
+    line = lines[0]
+    assert line.startswith("- 「"), f"line must lead with anchor preview: {line}"
+    assert "锚点记录" in line, f"anchor preview must name the anchor: {line}"
+    assert "被以下内容依赖" in line, f"to-side depends_on phrase expected: {line}"
+    assert "邻居记录" in line, f"neighbor body must be rendered, not the anchor: {line}"
+    assert "关联度 0.85" in line
+    assert rid_a not in line and rid_b not in line, f"record_id must never render: {line}"
+    assert len(line) <= 220
+    assert ("crystallized_record", rid_b) in seen, "dedup registers the NEIGHBOR"
+    assert ("crystallized_record", rid_a) not in seen, "anchor must not be re-registered"
+    assert source_ids == [f"crystallized_record:{rid_b}"], (
+        f"attribution must follow the displayed neighbor: {source_ids}"
+    )
+    assert decisions[0]["injected"] is True
+    assert decisions[0]["outcome"] == "emitted_full"
+
+
+def test_render_from_side_phrase_and_aggregation(tmp_path):
+    """from 侧短语(依赖于/细化了)+ 同 (锚点,邻居) 多边聚合为一行。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    rid_a = _write_cry_record(
+        store, body="锚点记录:注入行文法契约", candidate_id="cand-agg-a",
+        file_name="agg_a.md",
+    )
+    rid_b = _write_cry_record(
+        store, body="邻居记录:字符预算与聚合规则", candidate_id="cand-agg-b",
+        file_name="agg_b.md",
+    )
+
+    edges = [
+        {
+            "edge_id": "edge-agg-1",
+            "from_record_type": "crystallized_record",
+            "from_record_id": rid_a,
+            "to_record_type": "crystallized_record",
+            "to_record_id": rid_b,
+            "relation_type": "co_occurs",
+            "weight": 0.6,
+            "state": "active",
+        },
+        {
+            "edge_id": "edge-agg-2",
+            "from_record_type": "crystallized_record",
+            "from_record_id": rid_a,
+            "to_record_type": "crystallized_record",
+            "to_record_id": rid_b,
+            "relation_type": "refines",
+            "weight": 0.8,
+            "state": "active",
+        },
+    ]
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[rid_a], seen=set(),
+    )
+    assert len(lines) == 1, f"same (anchor,neighbor) pair must aggregate: {lines}"
+    line = lines[0]
+    assert "同源共现于" in line and "细化了" in line and "、" in line, line
+    assert "关联度 0.80" in line, f"aggregated weight takes the max: {line}"
+    assert len(decisions) == 2
+    assert all(d["injected"] is True for d in decisions)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2025,20 +2115,37 @@ def test_e8_crystallized_hits_prioritized_into_anchor_pool():
     assert len(anchors) <= 5
 
 
-def test_e8c_dedup_hit_emits_relation_stub_line(tmp_path):
-    """E8c counterfactual:目标已被其他段展示时,注入不得静默吞行 —— 产短关系行。
+def test_e8c_dedup_hit_emits_short_preview_line(tmp_path):
+    """E8c 升级版反事实:目标已被其他段展示时不得静默吞行,降级为
+    「已列出·」+ 60 字符正文短预览 — 不再打 ↺ + 裸 record_id。
 
-    生产实锤(2026-08-07 06:30Z):锚点命中、查到 2 条边、shadow 落账,但
-    两个目标恰好已被 Indexed/Crystallized 段展示 → 跨段去重把行全吃掉 →
-    Related Memory 恒空。小图谱阶段检索命中集与一跳邻居集高度重叠,
-    该设计让图谱贡献永远隐形。「已展示的两条记忆彼此相关」是图谱独有
-    信息 — 去重命中降级为短关系行(↺ 标记,不重复正文),而非消失。
+    生产实锤(2026-08-07 06:30Z):小图谱阶段检索命中集与一跳邻居集高度
+    重叠,静默去重让 Related Memory 恒空;而裸 id 短行阅读方对不上号
+    (其它区段不显示 record_id)。短预览是同一正文的精确前缀,即为跨段
+    对齐键。方向归一后本场景锚点=结晶(to 侧),邻居=事件(经 events
+    缓存解析),evidence_for 的 to 侧短语为「其证据为」。
     """
-    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="graph-stub-test")
     store = MemoryOSStore(roots)
     store.initialize()
+    rid = _write_cry_record(
+        store, body="结晶正文:图谱与状态层的联动约定,阅读方按正文前缀对齐",
+        candidate_id="cand-e8c", file_name="e8c.md",
+    )
+    ev = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id="evt_src_1",
+        ts="2026-08-07T00:00:00Z",
+        profile="graph-stub-test",
+        source="fixture",
+        kind="conversation_turn",
+        summary="事件摘要:昨天讨论了图谱注入的方向归一细节",
+        tags=[],
+        safe_ref={},
+    )
 
     edges = [{
         "relation_type": "evidence_for",
@@ -2046,18 +2153,98 @@ def test_e8c_dedup_hit_emits_relation_stub_line(tmp_path):
         "from_record_type": "event",
         "from_record_id": "evt_src_1",
         "to_record_type": "crystallized_record",
-        "to_record_id": "cry_already_shown",
+        "to_record_id": rid,
         "state": "active",
     }]
-    seen = {("crystallized_record", "cry_already_shown")}
-    lines = _graph_layer_injection_lines(store, edges, seen=seen)
-    assert len(lines) == 1, f"dedup hit must yield a relation stub, not silence: {lines}"
-    assert "evidence_for" in lines[0]
-    assert "↺" in lines[0], f"stub must be marked as already-shown: {lines[0]}"
-    assert len(lines[0]) <= 160, f"stub must stay short: {lines[0]!r}"
+    seen = {("crystallized_record", rid), ("event", "evt_src_1")}
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[rid], seen=seen, events=[ev],
+    )
+    assert len(lines) == 1, f"dedup hit must yield a short-preview line, not silence: {lines}"
+    line = lines[0]
+    assert "已列出·" in line, f"dedup hit must carry the already-listed marker: {line}"
+    assert "其证据为" in line, f"to-side evidence_for phrase expected: {line}"
+    assert "事件摘要" in line, f"neighbor (event) preview must render: {line}"
+    assert "evt_src_1" not in line and rid not in line, f"no record_id in lines: {line}"
+    assert "↺" not in line, f"legacy id-stub marker must be gone: {line}"
+    assert len(line) <= 220, f"stub line must stay bounded: {line!r}"
+    assert decisions[0]["outcome"] == "emitted_stub"
+    assert decisions[0]["injected"] is True
 
 
-def test_e8_fallback_terms_also_query_crystallized_segment():
+def test_exploration_slots_rotate_daily_and_bound_selection(tmp_path):
+    """P3 反饿死反事实:候选 > 8 时选 top-6 按权重 + 2 个探索位。
+
+    分层出生权重若无探索位,排序固化后弱边永无展示 → 永无命中 → 60 天
+    被判「无命中」处决(自我实现遗忘)。探索位按天确定性轮转(无随机数,
+    热路径可复现):同日两次调用结果完全一致;跨日探索子集变化;落选边
+    以 not_selected 落账(封闭 outcome)。
+    """
+    from plugins.memory.memory_os.prefetch import (
+        GRAPH_EXPLOIT_SLOTS,
+        GRAPH_EXPLORE_SLOTS,
+        _render_graph_layer_lines,
+    )
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="explore-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    rid_anchor = _write_cry_record(
+        store, body="锚点记录:探索位轮转契约", candidate_id="cand-exp-anchor",
+        file_name="exp_anchor.md",
+    )
+    neighbor_ids = []
+    for i in range(12):
+        neighbor_ids.append(_write_cry_record(
+            store,
+            body=f"邻居记录{i}:内容标识 NEIGHBOR-{i} 的独立正文",
+            candidate_id=f"cand-exp-{i}",
+            file_name=f"exp_{i}.md",
+        ))
+    edges = [
+        {
+            "edge_id": f"edge-exp-{i}",
+            "from_record_type": "crystallized_record",
+            "from_record_id": rid_anchor,
+            "to_record_type": "crystallized_record",
+            "to_record_id": neighbor_ids[i],
+            "relation_type": "co_occurs",
+            "weight": round(0.90 - i * 0.02, 2),  # 0.90 .. 0.68, all ≥ floor
+            "state": "active",
+        }
+        for i in range(12)
+    ]
+
+    def _selected_neighbors(day):
+        source_ids: list[str] = []
+        lines, decisions = _render_graph_layer_lines(
+            store, list(edges), anchor_ids=[rid_anchor],
+            seen=set(), source_ids=source_ids, day_ordinal=day,
+        )
+        return lines, decisions, source_ids
+
+    day0 = 738000
+    lines_a, decisions_a, sel_a = _selected_neighbors(day0)
+    lines_b, _decisions_b, sel_b = _selected_neighbors(day0)
+    assert lines_a == lines_b and sel_a == sel_b, "same-day selection must be deterministic"
+
+    cap = GRAPH_EXPLOIT_SLOTS + GRAPH_EXPLORE_SLOTS
+    assert len(lines_a) == cap, f"selection must bound lines to {cap}: {len(lines_a)}"
+    not_selected = [d for d in decisions_a if d["outcome"] == "not_selected"]
+    assert len(not_selected) == 12 - cap, "the rest must be ledgered as not_selected"
+
+    # top-6 按权重恒在(exploit 位)
+    top6 = {f"crystallized_record:{nid}" for nid in neighbor_ids[:GRAPH_EXPLOIT_SLOTS]}
+    assert top6 <= set(sel_a), f"exploit slots must keep the top-{GRAPH_EXPLOIT_SLOTS}"
+
+    # 探索位跨日轮转:一周内至少出现两种探索子集(确定性哈希,非随机)
+    explore_sets = set()
+    for day in range(day0, day0 + 7):
+        _lines, _decisions, sel = _selected_neighbors(day)
+        explore_sets.add(tuple(sorted(set(sel) - top6)))
+    assert len(explore_sets) >= 2, (
+        f"exploration slots must rotate across days: {explore_sets}"
+    )
     """E8b counterfactual(生产复验补钉):逐词回退同样必须带结晶限定段。
 
     生产实测:主查询双段皆 0(AND 失效同样打击结晶限定段)→ 走逐词回退,

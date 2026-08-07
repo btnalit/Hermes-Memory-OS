@@ -890,12 +890,16 @@ def test_metadata_retention_ages_out_both_prefetch_shadow_ledgers(tmp_path):
         store,
         ["crystallized:anchor_a"],
         [{
-            "relation_type": "refines",
-            "from_record_type": "crystallized_record",
-            "from_record_id": "a",
-            "to_record_type": "crystallized_record",
-            "to_record_id": "b",
-            "weight": 0.8,
+            "edge": {
+                "relation_type": "refines",
+                "from_record_type": "crystallized_record",
+                "from_record_id": "a",
+                "to_record_type": "crystallized_record",
+                "to_record_id": "b",
+                "weight": 0.8,
+            },
+            "injected": True,
+            "outcome": "emitted_full",
         }],
     )
     _record_substrate_shadow_recall(

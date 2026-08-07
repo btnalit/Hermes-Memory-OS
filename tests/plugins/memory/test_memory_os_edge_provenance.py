@@ -125,15 +125,22 @@ def test_w4_event_anchor_reaches_crystallized(tmp_path):
     edges = index.query_edges(["evt_anchor_7"], depth=1, state="active", limit=8)
     assert edges, "event anchor must reach the crystallized record via provenance edge"
     assert any(str(e.get("to_record_id")) == "cry_prov_d" for e in edges)
+    # P3:溯源边出生权重来自证据分层表(反事实:回退硬编码 1.0 即红)
+    from plugins.memory.memory_os.edge_weights import birth_weight as _bw
+
+    prov = [e for e in edges if str(e.get("to_record_id")) == "cry_prov_d"]
+    assert float(prov[0].get("weight")) == pytest.approx(
+        _bw("provenance", "source_event_provenance")
+    )
 
 
 def test_w4_injection_suppresses_unresolved_noncrystallized_targets(tmp_path):
-    """注入过滤:非 crystallized 目标解析失败时不得落 [unresolved:] 兜底行。
-
-    事件会被 retention 清出热存储 — 已归档事件作为注入目标只能产生噪音;
-    crystallized 目标的 [unresolved:] 兜底保持(可诊断性)。
+    """注入过滤:非 crystallized 邻居解析失败(已被 retention 归档)时整行
+    抑制,outcome=non_crystallized_target;解析失败的结晶邻居同样整行丢弃,
+    outcome=unresolved — record_id 不再作为兜底行出现(P2:诊断归 shadow
+    outcome,不进 agent 上下文)。
     """
-    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
 
     store, _index = _store(tmp_path)
     edges = [
@@ -156,10 +163,12 @@ def test_w4_injection_suppresses_unresolved_noncrystallized_targets(tmp_path):
             "state": "active",
         },
     ]
-    lines = _graph_layer_injection_lines(store, edges, seen=set())
-    assert not any("evt_archived_404" in line for line in lines), (
-        f"unresolved non-crystallized target must be suppressed: {lines}"
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=["cry_src"], seen=set(),
     )
-    assert any("nonexistent_cry_777" in line for line in lines), (
-        "crystallized unresolved fallback must be preserved"
+    assert lines == [], (
+        f"neither neighbor is renderable — no id-fallback lines allowed: {lines}"
     )
+    by_target = {str(d["edge"]["to_record_id"]): d["outcome"] for d in decisions}
+    assert by_target["evt_archived_404"] == "non_crystallized_target"
+    assert by_target["nonexistent_cry_777"] == "unresolved"

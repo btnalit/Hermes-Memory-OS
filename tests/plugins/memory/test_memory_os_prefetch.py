@@ -1266,34 +1266,101 @@ def test_deterministic_floor_recall_header_annotation(tmp_path):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_graph_layer_injection_disabled_by_default(tmp_path):
-    """Default knob=False: Related Memory section is empty (shadow-only)."""
+def test_graph_layer_injection_default_on_and_false_override_rolls_back(tmp_path):
+    """P1 反事实(两个方向):无 override 时注入默认开启(owner 裁定图谱
+    为永久能力 — 旧默认 False 时本场景无 Related Memory);显式 False
+    override 关火(开关保留作回滚)。"""
+    import sqlite3
+
+    from plugins.memory.memory_os.index import write_governed_edge
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate,
+        CrystallizedMemoryService,
+    )
+
     roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
     roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    (roots.memory_os_root / "system").mkdir(parents=True, exist_ok=True)
     store = MemoryOSStore(roots)
     store.initialize()
-    index = MemoryOSIndex(roots)
 
-    context = build_prefetch(
-        "test query",
-        budget_chars=4000,
-        store=store,
-        index=index,
+    event = EventEnvelope.from_dict(build_event(seed=201, profile="test"))
+    store.append_event(event)
+
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-default-on",
+        kind="note",
+        body="默认开启验证目标记录:回滚开关契约",
+        source_event_ids=[event.id],
     )
-    # Related Memory should not appear when knob defaults off
-    assert "Related Memory" not in context
+    decision = ApprovalDecision(
+        candidate_id="cand-default-on",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+        note="test",
+        source_state="active",
+    )
+    svc.write_approved_record(candidate, decision, file_name="default_on.md")
+    target_id = str(svc.read_records("default_on.md")[0].frontmatter["id"])
+
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+    conn = sqlite3.connect(str(index.roots.index_path))
+    conn.row_factory = sqlite3.Row
+    write_governed_edge(
+        conn,
+        index.roots,
+        from_record_type="event",
+        from_record_id=event.id,
+        to_record_type="crystallized_record",
+        to_record_id=target_id,
+        relation_type="co_occurs",
+        state="active",
+    )
+    conn.close()
+
+    # ── 无 override:默认注入 ──
+    context = build_prefetch("event", budget_chars=4000, store=store, index=index)
+    assert "Related Memory" in context, (
+        f"default-on injection expected without any override:\n{context}"
+    )
+
+    # ── 显式 False override:回滚关火 ──
+    from plugins.memory.memory_os.knob_overrides import register_override as _reg
+    _reg(
+        "graph_layer_injection_enabled",
+        False,
+        prior=True,
+        proposed_by="test",
+        approved_via="test",
+        expires_at="",
+        roots=roots,
+    )
+    context_off = build_prefetch("event", budget_chars=4000, store=store, index=index)
+    assert "Related Memory" not in context_off, (
+        f"explicit False override must roll injection back:\n{context_off}"
+    )
 
 
 def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     """knob=True with an active edge produces injection lines.
 
-    Uses a non-existent target record_id so the edge is not
-    cross-section deduped by seen entries from Crystallized Memory
-    or Recent Event Summaries (both of which populate seen).
+    P2 契约:边目标必须是真实结晶记录(真 producer 写入 — 旧版用不存在的
+    目标 id 绕过跨段去重,同时依赖已删除的 [unresolved:id] 兜底行)。真实
+    目标可能已被 Crystallized 段展示,去重命中降级为「已列出·」短预览行,
+    Related Memory 无论如何出现;record_id 永不进入上下文。
     """
     import sqlite3
 
     from plugins.memory.memory_os.index import write_governed_edge
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate,
+        CrystallizedMemoryService,
+    )
 
     roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
     roots.memory_os_root.mkdir(parents=True, exist_ok=True)
@@ -1308,26 +1375,38 @@ def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     store.append_event(event)
     anchor_id = event.id
 
+    # ── Write a REAL crystallized record as the edge target ──
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-graph-knob",
+        kind="note",
+        body="图谱注入目标记录:行文法与去重降级契约",
+        source_event_ids=[anchor_id],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand-graph-knob",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+        note="test",
+        source_state="active",
+    )
+    svc.write_approved_record(candidate, decision, file_name="graph_knob.md")
+    target_id = str(svc.read_records("graph_knob.md")[0].frontmatter["id"])
+
     # ── Build index so FTS5 can find the event ──
     index = MemoryOSIndex(roots)
     index.rebuild_from_store(store)
 
-    # ── Write an active edge: event → non-existent target ──
-    # Using a non-existent target avoids cross-section dedup
-    # (Crystallized Memory adds real crystallized_record ids to seen;
-    #  Recent Event Summaries adds selected event ids to seen).
     conn = sqlite3.connect(str(index.roots.index_path))
     conn.row_factory = sqlite3.Row
-    # W4 语义更新:非 crystallized 目标解析失败时不再落 [unresolved:] 兜底
-    # (事件会被 retention 清理,悬挂目标属噪音)。本测试改用 crystallized
-    # 类型的不存在目标 — 兜底行为保留,跨段去重规避意图不变。
     write_governed_edge(
         conn,
         index.roots,
         from_record_type="event",
         from_record_id=anchor_id,
         to_record_type="crystallized_record",
-        to_record_id="cry_nonexistent_target_999",
+        to_record_id=target_id,
         relation_type="co_occurs",
         state="active",
     )
@@ -1356,10 +1435,14 @@ def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     assert "Related Memory" in context, (
         f"Expected 'Related Memory' section when knob enabled. Context:\n{context}"
     )
-    # Should contain the fallback injection line (target doesn't resolve
-    # as a crystallized record, so record_id is shown)
-    assert "co_occurs" in context
-    assert "unresolved" in context
+    # 新行文法短语(同源共现于)仅由 Related Memory 产生
+    assert "同源共现于" in context, (
+        f"graph relation phrase expected in context:\n{context}"
+    )
+    assert target_id not in context, (
+        f"record_id must never enter the agent context:\n{context}"
+    )
+    assert "unresolved" not in context
 
 
 def _append_event(store, *, event_id, ts, session_id, source_class="foreground", kind="conversation_turn", summary="", source="fixture", tags=None):
