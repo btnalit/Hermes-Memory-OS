@@ -6262,12 +6262,10 @@ def _digest_text_preview(
     return _rendered_digest_text(rendered_sections, store=store)[:2000]
 
 
-# W3 (E1) — edge review digest vocabulary.  EDGE_REVIEW_DIGEST_STATE is the
-# state this digest CONSUMES; the promotion lane (edge_promotion.py) is the
-# producer.  The bidirectional guard test pins the two together so the E1
-# drift (digest querying a state nothing produces) cannot silently recur.
-EDGE_REVIEW_DIGEST_STATE = "owner_eligible"
-EDGE_REVIEW_DIGEST_TOP_K = 10
+# R3 (owner 决策 2026-08-06): the digest carries NO edge-review section any
+# more — 「每次要我去审批就不对了」。Edges auto-activate (R1/R2) and are
+# demoted by the weight-feedback loop; reject_edge stays available as an
+# owner correction tool but is never pushed for approval.
 
 
 def _rendered_digest_text(
@@ -6331,88 +6329,9 @@ def _rendered_digest_text(
         lines.extend(section_lines)
         lines.append("")
 
-    # 待审批 edges 区段（owner review for governed edges）
-    if store is not None:
-        try:
-            from .index import MemoryOSIndex, _initialize_schema
-            index = MemoryOSIndex(store.roots)
-            if index.roots.index_path.exists():
-                conn = sqlite3.connect(str(index.roots.index_path))
-                conn.row_factory = sqlite3.Row
-                try:
-                    _initialize_schema(conn)
-                    total_eligible = int(conn.execute(
-                        "select count(*) from memory_edges where state = ?",
-                        (EDGE_REVIEW_DIGEST_STATE,),
-                    ).fetchone()[0])
-                    rows = conn.execute(
-                        "select * from memory_edges where state = ?"
-                        " order by weight desc, created_at asc limit ?",
-                        (EDGE_REVIEW_DIGEST_STATE, EDGE_REVIEW_DIGEST_TOP_K),
-                    ).fetchall()
-                    if rows:
-                        edge_lines = ["## Pending Edge Review", ""]
-                        for row in rows:
-                            edge_id = row["edge_id"]
-                            rel = row["relation_type"]
-                            weight = row["weight"]
-                            from_id = row["from_record_id"]
-                            to_id = row["to_record_id"]
-                            edge_lines.append(
-                                f"- [{rel} w={weight:.2f}] {from_id} -> {to_id}\n"
-                                f"  approve_edge:{edge_id} | reject_edge:{edge_id}"
-                            )
-                        remaining = total_eligible - len(rows)
-                        if remaining > 0:
-                            edge_lines.append(
-                                f"- 还有 {remaining} 条边待审(按权重轮播,下期继续)。"
-                            )
-                        edge_lines.append(
-                            "- 批量:approve_edge:id1,id2 | reject_edge:id1,id2(逗号分隔)。"
-                        )
-                        candidate = lines + edge_lines + [""]
-                        if len("\n".join(candidate).rstrip()) <= max_chars:
-                            lines.extend(edge_lines)
-                            lines.append("")
-                finally:
-                    conn.close()
-        except Exception as exc:
-            # fail-open: edge digest must not break main digest
-            try:
-                _append_jsonl(
-                    store.roots.memory_os_root / "system" / "error_records.jsonl",
-                    build_error_record(
-                        component="owner_actions._rendered_digest_text",
-                        operation="edge_digest_query",
-                        error_code="edge_digest_query_failed",
-                        severity="warning",
-                        recoverable=True,
-                        details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
-                    ),
-                )
-            except Exception as record_exc:
-                try:
-                    append_audit(
-                        store.roots.audit_path,
-                        action="owner_digest_error_record_failed",
-                        status="warning",
-                        target=str(store.roots.memory_os_root / "system" / "error_records.jsonl"),
-                        details={
-                            "component": "owner_actions._rendered_digest_text",
-                            "operation": "edge_digest_query",
-                            "original_error_type": type(exc).__name__,
-                            "original_error_message": str(exc)[:200],
-                            "error_record_write_error_type": type(record_exc).__name__,
-                            "error_record_write_error_message": str(record_exc)[:200],
-                        },
-                    )
-                except Exception as audit_exc:
-                    print(
-                        "Memory-OS owner digest edge error reporting failed: "
-                        f"record={type(record_exc).__name__}:{str(record_exc)[:120]} "
-                        f"audit={type(audit_exc).__name__}:{str(audit_exc)[:120]}",
-                        file=sys.stderr,
-                    )
+    # R3 (owner 决策 2026-08-06): 边审批区段已废除 — 图谱全自动生长
+    # (R1 proposer 直接 active、R2 存量自动激活、权重反馈闭环动态淘汰),
+    # digest 不再向 owner 推送任何边审批项。reject_edge 保留为纠错工具。
 
     final_overview = _rendered_overview_lines(
         counts or {},

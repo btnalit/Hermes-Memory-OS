@@ -35,6 +35,9 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/execution_gate.py::_append_jsonl::path.open_a::path": "execution_gate_private_writer",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::append_jsonl_locked_call::v3_seed_edges_daily_path(store)": "v3_seed_evidence_daily_observation",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::atomic_json_replace_call::v3_seed_evidence_snapshot_path(store)": "v3_seed_evidence_snapshot_observation",
+    # R4 权重反馈闭环的 durable state(cursor + per-edge last_hit)——认知
+    # 循环步骤内的原子 JSON 状态替换,非追加账本。
+    "plugins/memory/memory_os/edge_weight_feedback.py::run_edge_weight_feedback::atomic_json_replace_call::state_path": "edge_weight_feedback_state_observation",
     "plugins/memory/memory_os/v3_wandering.py::record_v3_wandering_run::append_jsonl_locked_call::v3_wandering_runs_path(store)": "v3_wandering_aggregate_run_ledger",
     "plugins/memory/memory_os/v3_body_packet.py::write_body_packet_manifest::governed_append_under_lock_call::target": "v3_body_packet_manifest",
     "plugins/memory/memory_os/v3_body_packet.py::remove_body_manifests::governed_atomic_rewrite_call::target": "v3_body_packet_manifest_retention",

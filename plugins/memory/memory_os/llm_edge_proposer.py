@@ -3,10 +3,11 @@
 Phase 2.3 — calls the configured LLM (via low_clue_recall._call_hermes_runtime_model)
 to determine relationships between crystallized record pairs.
 
-Auto-active types (co_occurs, evidence_for) promote to `active` directly.
-Review-required types (contradicts, depends_on, refines) always stay as `candidate`
-— owner review is non-negotiable per §6, G4, T2.3.2.
-Confidence is stored as provenance metadata, NOT as a review bypass.
+R1 (owner 决策 2026-08-06): all relation types are auto-active — the graph
+is a derived advisory projection that updates itself; wrong edges are
+demoted by the weight-feedback loop, not by owner review (supersedes the
+old §6/G4/T2.3.2 review-required contract).
+Confidence is stored as provenance metadata.
 """
 
 from __future__ import annotations
@@ -33,10 +34,16 @@ _DEFAULT_LLM_CONFIG: dict[str, Any] = {
 }
 
 # Relation types that auto-promote to active (low risk).
-_AUTO_ACTIVE_TYPES = frozenset({"co_occurs", "evidence_for"})
+# R1 (owner 决策 2026-08-06): 动态图谱全自动 — 全部关系类型 auto-active。
+# 边是派生投影(advisory),不触碰 OwnerGate 永久边界;contradicts 的下游
+# 消费(crystallization_gate)只产 owner 可见标记,自动生效不执行任何动作。
+# 错误的边由权重反馈闭环(命中加权/无命中遗忘)动态淘汰。
+_AUTO_ACTIVE_TYPES = frozenset(
+    {"co_occurs", "evidence_for", "refines", "contradicts", "depends_on"}
+)
 
 # Relation types that stay candidate (needs owner review).
-_REVIEW_REQUIRED_TYPES = frozenset({"contradicts", "depends_on", "refines"})
+_REVIEW_REQUIRED_TYPES = frozenset()  # R1: no relation type requires owner review
 
 _MAX_PAIRS = 100
 
@@ -298,13 +305,9 @@ def run_llm_proposer(
                 continue
             existing_edges.add(dedup_key)
 
-            # Determine initial state based on risk
-            if rtype in _AUTO_ACTIVE_TYPES:
-                init_state = "active"
-            else:
-                # REVIEW_REQUIRED types always start as candidate:
-                # owner review is non-negotiable per §6, G4, T2.3.2
-                init_state = "candidate"
+            # R1: all relation types are auto-active (owner 决策 2026-08-06,
+            # 取代旧的 §6/G4/T2.3.2 需审契约 — 动态图谱不占审批带宽)。
+            init_state = "active"
 
             # Write edge — weight=1.0 for Phase 1-2 (confidence is provenance only)
             if index and hasattr(index, "write_governed_edge"):

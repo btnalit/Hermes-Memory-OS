@@ -741,7 +741,10 @@ def test_t2_1_1_write_refines_edge(tmp_path):
         f"Expected >=1 proposed edge, got {result}"
     )
 
-    # Verify edge is in memory_edges — co_occurs, and NO structural refines
+    # Verify edge is in memory_edges — co_occurs, and NO structural refines.
+    # R1 (owner 决策 2026-08-06:动态图谱全自动,不需要人工审批):proposer
+    # 产出直接 active — 边是派生投影(advisory),错误的边由权重反馈闭环
+    # 动态淘汰,不占用 owner 审批带宽。
     conn2 = _conn(index)
     rows = conn2.execute(
         "select * from memory_edges where relation_type = 'co_occurs'"
@@ -751,7 +754,7 @@ def test_t2_1_1_write_refines_edge(tmp_path):
     ).fetchone()[0]
     conn2.close()
     assert len(rows) >= 1
-    assert rows[0]["state"] == "candidate"
+    assert rows[0]["state"] == "active", "R1: proposer output must be live immediately"
     assert rows[0]["proposed_by"] == "structural"
     assert refines == 0, "structural must not emit refines (W1/E2)"
 
@@ -1852,6 +1855,64 @@ def test_w0_projection_last_writer_wins_per_edge_id(tmp_path):
     row = index.get_edge("edge_lww_1")
     assert row is not None
     assert row["state"] == "active", "projection must be last-writer-wins per edge_id"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 (owner 决策 2026-08-06) — 动态图谱全自动:全部关系类型 auto-active
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_r1_llm_vocabulary_all_types_auto_active():
+    """R1 词表守卫:llm proposer 不再有需审类型 — 全部关系 auto-active。
+
+    Owner 决策:「动态图谱应该是动态去更新关系的…不需要人工介入」。
+    边是派生投影(advisory_only 家族),不触碰任何 OwnerGate 永久边界;
+    contradicts 的下游消费(crystallization_gate)本就只产 owner 可见的
+    标记,边自动生效不会自动执行任何动作。错误的边由权重反馈闭环
+    (命中加权/无命中遗忘)动态淘汰。
+    """
+    from plugins.memory.memory_os.llm_edge_proposer import (
+        _AUTO_ACTIVE_TYPES,
+        _REVIEW_REQUIRED_TYPES,
+    )
+
+    assert _REVIEW_REQUIRED_TYPES == frozenset(), (
+        "R1: no relation type requires owner review any more"
+    )
+    assert _AUTO_ACTIVE_TYPES == frozenset(
+        {"co_occurs", "evidence_for", "refines", "contradicts", "depends_on"}
+    )
+
+
+def test_r1_vector_proposes_active_directly(tmp_path):
+    """R1 counterfactual: vector 提案直接 active(此前写 candidate)。"""
+    store, index = _store(tmp_path)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_r1_a",
+        to_record_type="crystallized_record", to_record_id="cry_r1_b",
+        relation_type="co_occurs", weight=0.8, proposed_by="vector",
+        state="active",
+    )
+    assert edge and edge["state"] == "active"
+    # vector proposer 源码不得再写 candidate 态(源码级守卫,防回退)
+    import inspect
+
+    from plugins.memory.memory_os import vector_edge_proposer
+    source = inspect.getsource(vector_edge_proposer)
+    assert 'state="candidate"' not in source, (
+        "R1: vector proposer must emit active edges"
+    )
+
+
+def test_r1_structural_source_has_no_candidate_state():
+    """R1 源码级守卫:structural proposer 不得再产 candidate 态边。"""
+    import inspect
+
+    from plugins.memory.memory_os import structural_edge_proposer
+    source = inspect.getsource(structural_edge_proposer)
+    assert '"state": "candidate"' not in source, (
+        "R1: structural proposer must emit active edges"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

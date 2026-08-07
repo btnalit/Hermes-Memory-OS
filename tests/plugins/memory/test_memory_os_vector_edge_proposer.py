@@ -412,7 +412,8 @@ def test_edge_has_vector_proposed_by(tmp_path):
     assert len(rows) >= 1
     for row in rows:
         assert row["proposed_by"] == "vector"
-        assert row["state"] == "candidate"
+        # R1 (owner 决策 2026-08-06): proposer 产出直接 active,不再审批
+        assert row["state"] == "active"
 
 
 def test_edge_weight_reflects_similarity(tmp_path):

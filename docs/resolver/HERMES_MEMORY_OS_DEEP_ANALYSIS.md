@@ -998,7 +998,11 @@ hermes_cli 的 `import agent.portal_tags` 永远命中幽灵包（namespace 动�
    `test_s6_final_overlay_injects_fully_on_every_route` 钉死——任何重新
    引入的路由抑制必须先红该测试并经 owner 重新决策。router 的整段排除
    已撤销（`test_w7_s6_casual_continuity_does_not_exclude_overlay_section`）。
-2. **注入续期**：`graph_layer_injection_enabled` 是否重开、续期时限与复查日期。
+2. **注入续期 —— 已决（2026-08-06 终局）**：owner 裁定图谱应「自己生成、
+   按匹配注入自动逐层展开、动态更新关系、不需要人工介入」——
+   `graph_layer_injection_enabled` 开启且无过期；同轮废除边审批模型
+   （R1 全类型 auto-active、R2 存量自动激活、R3 digest 审批区段删除、
+   R4 权重反馈闭环上线）。详见 checklist CH.3。
 3. **V3 激活门判据**：见 13.4 —— 现判据在当前使用模式下实际不可达，改或不改都需 owner 明确决定。
 
 ### 13.4 V3 激活前置核实（2026-08-06 实测）

@@ -186,30 +186,24 @@ def test_retired_right_brain_blocks_expression_policy_write(tmp_path):
     assert not (tmp_path / "system-modules" / "right_brain_expression_adapter").exists()
 
 
-def test_rendered_digest_records_audit_when_edge_error_record_write_fails(tmp_path, monkeypatch):
+def test_rendered_digest_does_not_touch_edge_index(tmp_path):
+    """R3 语义反转:digest 不再渲染边审批区段,也不再触碰 index。
+
+    原测试钉的是 edge digest 查询失败的双重错误处理 — 该分支随 R3
+    (owner 决策:边全自动,不推审批)整体废除。现契约:即使 index 文件
+    是损坏的,digest 渲染也照常完成且不含任何边审批内容。
+    """
     store = _store(tmp_path)
     store.roots.index_path.parent.mkdir(parents=True, exist_ok=True)
     store.roots.index_path.write_text("not a sqlite database", encoding="utf-8")
-    audit_calls = []
 
-    def fail_append_jsonl(path, record):
-        raise OSError("synthetic error-record write failure")
-
-    def capture_append_audit(*args, **kwargs):
-        audit_calls.append(kwargs)
-
-    monkeypatch.setattr(owner_actions_module, "_append_jsonl", fail_append_jsonl)
-    monkeypatch.setattr(owner_actions_module, "append_audit", capture_append_audit)
-
-    owner_actions_module._rendered_digest_text(
+    text = owner_actions_module._rendered_digest_text(
         {"action_required": [], "review_suggested": [], "fyi": []},
         store=store,
     )
-
-    assert audit_calls
-    assert audit_calls[-1]["action"] == "owner_digest_error_record_failed"
-    assert audit_calls[-1]["status"] == "warning"
-    assert audit_calls[-1]["details"]["error_record_write_error_type"] == "OSError"
+    assert text  # renders fine — the digest no longer opens the index
+    assert "Pending Edge Review" not in text
+    assert "approve_edge:" not in text
 
 
 def _review_command(rendered, anchor: str, action_type: str) -> str:
