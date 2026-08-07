@@ -662,7 +662,12 @@ def _build_prefetch_sections(
         sections,
         "Related Memory",
         _graph_layer_shadow_lines(
-            store, _first_anchors, index=index, seen=seen, source_ids=graph_ids
+            store,
+            _first_anchors,
+            index=index,
+            seen=seen,
+            source_ids=graph_ids,
+            events=events_cache,
         ),
     )
     if graph_ids:
@@ -1975,6 +1980,35 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
 # PROMOTION_TARGET_STATE 一起被双向守卫测试钉死。
 GRAPH_INJECTION_EDGE_STATE = "active"
 
+# 图谱注入行的方向敏感关系短语表(主语固定为锚点侧)。Module 级:短语词表
+# 必须能被守卫测试对照 producer 实际产出的 relation_type 全集双向校验——
+# 词表与 producer 漂移的 gate 什么也不检查(CLAUDE.md「词表漂移」教训)。
+GRAPH_RELATION_PHRASES: dict[tuple[str, str], str] = {
+    ("co_occurs", "anchor_is_from"): "同源共现于",
+    ("co_occurs", "anchor_is_to"): "同源共现于",
+    ("depends_on", "anchor_is_from"): "依赖于",
+    ("depends_on", "anchor_is_to"): "被以下内容依赖",
+    ("refines", "anchor_is_from"): "细化了",
+    ("refines", "anchor_is_to"): "被以下内容细化",
+    ("evidence_for", "anchor_is_from"): "佐证了",
+    ("evidence_for", "anchor_is_to"): "其证据为",
+    ("contradicts", "anchor_is_from"): "与以下内容冲突",
+    ("contradicts", "anchor_is_to"): "与以下内容冲突",
+}
+# 未知 relation_type 的兜底短语(方向无关)。
+GRAPH_FALLBACK_PHRASE = "关联于"
+
+# 注入的权重噪声下限。出生权重分层后这是不设防的安全底线(守卫测试钉
+# min(出生权重) >= 此值),真实排序依赖权重本身,不依赖它。
+GRAPH_INJECTION_WEIGHT_FLOOR = 0.3
+GRAPH_MAX_LINES = 8
+GRAPH_ANCHOR_PREVIEW_CHARS = 12
+# 跨段去重命中的短预览长度:是结晶段同一正文 220 字符裁剪的精确前缀,
+# 对阅读方 LLM 是零歧义对齐键(比 record_id 可靠——其它区段不显示 id)。
+GRAPH_DEDUP_PREVIEW_CHARS = 60
+
+_GRAPH_CRYSTALLIZED_TYPES = frozenset({"crystallized_record", "crystallized"})
+
 
 def _graph_layer_shadow_lines(
     store: MemoryOSStore,
@@ -1983,16 +2017,14 @@ def _graph_layer_shadow_lines(
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
     source_ids: list[str] | None = None,
+    events: list[Any] | None = None,
 ) -> list[str]:
-    """Phase 2: knob-gated graph layer edge injection with shadow audit.
+    """Knob-gated graph layer edge injection with shadow audit.
 
-    Under Phase 1 (knob disabled): writes candidate edges to
-    system/graph_layer_shadow.jsonl for audit and returns [] so no
-    hash-record-id pairs enter the agent's memory-context block.
-
-    Under Phase 2 (knob enabled): resolves edge targets to human-readable
-    body previews, applies cross-section dedup, and returns injection lines
-    for the Related Memory section. Shadow log is written regardless.
+    Knob disabled: writes candidate edges to system/graph_layer_shadow.jsonl
+    for audit and returns []. Knob enabled: renders direction-normalized,
+    human-readable Related Memory lines (see _render_graph_layer_lines).
+    Shadow log is written regardless.
 
     Rules:
     - anchor_ids: 第一跳选出的 record_id 集合(来自 FTS5 hit)
@@ -2003,6 +2035,7 @@ def _graph_layer_shadow_lines(
     - anchor_ids 为空 → 直接返回 [] (空 shadow 是诚实信号)
     - Config gate: graph_layer_injection_enabled knob (default=False)
     - Cross-section dedup via `seen` set
+    - events: 调用方的 events 缓存,用于事件类锚点/邻居的预览解析
     """
     if not anchor_ids:
         return []
@@ -2028,133 +2061,249 @@ def _graph_layer_shadow_lines(
     if not injection_enabled:
         return []
 
-    # ── Phase 2 injection ──────────────────────────────────────
-    return _graph_layer_injection_lines(store, edges, seen=seen, source_ids=source_ids)
+    lines, _decisions = _render_graph_layer_lines(
+        store,
+        edges,
+        anchor_ids=anchor_ids,
+        seen=seen,
+        source_ids=source_ids,
+        events=events,
+    )
+    return lines
 
 
-def _resolve_edge_target_preview(
+def _batch_resolve_crystallized(
     store: MemoryOSStore,
+    record_ids: set[str] | list[str],
+) -> dict[str, Any]:
+    """Resolve a bounded id set in ONE pass over the crystallized store.
+
+    逐 id 调 CrystallizedMemoryService.find_record 会对每个 id 重新 glob 全部
+    结晶文件(热路径最坏 2×8 次全量扫描);这里一次遍历建 {id: record} 映射,
+    预览解析与 inactive 判定共用同一份 record。fail-open:异常返回已收集的
+    部分映射。
+    """
+    wanted = {str(r).strip() for r in record_ids if str(r or "").strip()}
+    found: dict[str, Any] = {}
+    if not wanted:
+        return found
+    try:
+        svc = CrystallizedMemoryService(store)
+        root = store.roots.crystallized_root
+        if not root.exists():
+            return found
+        for path in sorted(root.glob("*.md")):
+            for record in svc.read_records(path.name):
+                rid = str(record.frontmatter.get("id") or "")
+                if rid in wanted and rid not in found:
+                    found[rid] = record
+            if len(found) == len(wanted):
+                break
+    except Exception:
+        return found
+    return found
+
+
+def _graph_preview(
     record_id: str,
-) -> str | None:
-    """Resolve a record_id to a human-readable body preview for graph edges.
+    record_type: str,
+    cry_map: dict[str, Any],
+    event_summaries: dict[str, str],
+) -> tuple[str | None, str]:
+    """Resolve a graph edge endpoint to ``(redacted_preview, status)``.
 
-    Returns a clipped+redacted body preview, or None if the record
-    cannot be found / is inactive / has no parseable body.
-
-    Fail-open: any exception -> None (graph injection degrades gracefully).
+    status ∈ {"ok", "inactive", "missing"}。结晶记录走批量映射(inactive 与
+    missing 可区分),事件走调用方 events 缓存;其余一律 missing(fail-open)。
     """
     normalized = str(record_id or "").strip()
     if not normalized:
-        return None
-    try:
-        svc = CrystallizedMemoryService(store)
-        record = svc.find_record(normalized)
-        if record is None or not is_active_crystallized_frontmatter(record.frontmatter):
-            return None
-        text = _redact(_clip(record.body, 180))
-        if not text or _is_diagnostic_style_seed(text):
-            return None
-        return text
-    except Exception:
-        return None
+        return None, "missing"
+    record = cry_map.get(normalized)
+    if record is not None:
+        try:
+            if not is_active_crystallized_frontmatter(record.frontmatter):
+                return None, "inactive"
+            text = _redact(_clip(str(record.body or ""), 220))
+            if not text or _is_diagnostic_style_seed(text):
+                return None, "missing"
+            return text, "ok"
+        except Exception:
+            return None, "missing"
+    summary = event_summaries.get(normalized, "")
+    if summary:
+        text = _redact(_clip(summary, 220))
+        if text and not _is_diagnostic_style_seed(text):
+            return text, "ok"
+    return None, "missing"
 
 
-def _edge_target_is_inactive(store: MemoryOSStore, record_id: str) -> bool:
-    normalized = str(record_id or "").strip()
-    if not normalized:
-        return False
-    try:
-        record = CrystallizedMemoryService(store).find_record(normalized)
-    except Exception:
-        return False
-    return record is not None and not is_active_crystallized_frontmatter(record.frontmatter)
-
-
-def _graph_layer_injection_lines(
+def _render_graph_layer_lines(
     store: MemoryOSStore,
     edges: list[dict],
     *,
+    anchor_ids: list[str],
     seen: set[tuple[str, str]] | None = None,
     source_ids: list[str] | None = None,
-) -> list[str]:
-    """Format graph edges as human-readable injection lines for agent context.
+    events: list[Any] | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Render graph edges as owner-readable Related Memory lines.
 
-    Each edge produces one line: relation_type, weight, and resolved body
-    preview of the target record. If the target cannot be resolved, falls
-    back to showing the record_id (fail-open -- hash is better than silence).
+    行文法(F1/P2 2026-08-07):方向归一 + 中文自然语言短语 + 锚点短预览:
 
-    Cross-section dedup: records already in `seen` are skipped; newly
-    emitted records are added to `seen`.
+        - 「{锚点预览}」{关系短语}:{邻居正文预览}({已列出·}关联度 {w:.2f})
 
-    Rules:
-    - Max 8 lines (matches edge query limit=8)
-    - Each line <= 220 chars (matches other section caps)
-    - Edge weight < 0.3 is skipped (low-confidence noise)
-    - Fail-open: any resolution error -> fallback to record_id
+    规则:
+    - 方向归一:展示目标永远是边上非锚点的一端(neighbor)。旧实现无条件取
+      to_record_id — 当边是「X→锚点」时会把锚点自己当"关联记忆"展示,且
+      depends_on 的方向语义读反。
+    - 永不打印 record_id:解析失败整行丢弃(诊断归 shadow 账本的 outcome,
+      不进 agent 上下文 — 旧 [unresolved:id] 行会诱导 LLM 编造引用)。
+    - 跨段去重命中不丢行(继承 E8c):降级为 60 字符短预览 + 「已列出·」
+      标记 — 短预览是结晶段同一正文的精确前缀,零歧义对齐键。
+    - 同一 (锚点,邻居) 的多条边聚合为一行,短语「、」连接,关联度取最大。
+    - 每行 ≤220 字符、最多 GRAPH_MAX_LINES 行、weight < FLOOR 跳过。
+    - 返回 (lines, decisions):decisions 给每条边一个封闭 outcome
+      (emitted_full / emitted_stub / below_weight_floor / target_inactive /
+      non_crystallized_target / unresolved / not_selected),供 shadow 账本
+      区分「注入」与「查到但未注入」。
     """
-    MAX_LINES = 8
-    lines: list[str] = []
+    anchor_set = {str(a).strip() for a in anchor_ids if str(a or "").strip()}
+    decisions: list[dict] = []
+
+    # ── 1. 方向归一 + 权重下限 ─────────────────────────────────────
+    workable: list[dict] = []
     for edge in edges:
         if not isinstance(edge, dict):
             continue
-        if len(lines) >= MAX_LINES:
-            break
-
+        from_id = str(edge.get("from_record_id") or "").strip()
+        to_id = str(edge.get("to_record_id") or "").strip()
+        if not from_id or not to_id:
+            continue
         weight = float(edge.get("weight", 1.0))
-        if weight < 0.3:
-            continue  # low-confidence edge, not worth agent context
-
-        to_type = str(edge.get("to_record_type", "unknown"))
-        to_id = str(edge.get("to_record_id", ""))
-        relation = str(edge.get("relation_type", "related"))
-
-        if not to_id:
+        if weight < GRAPH_INJECTION_WEIGHT_FLOOR:
+            decisions.append(
+                {"edge": edge, "injected": False, "outcome": "below_weight_floor"}
+            )
             continue
-
-        # Cross-section dedup — E8c: a target already shown by another
-        # section is NOT silently dropped.  "These two already-shown
-        # memories are RELATED" is information only the graph carries; in
-        # the small-graph phase the retrieval hit set and the one-hop
-        # neighborhood overlap heavily, so silent dedup kept the Related
-        # Memory section permanently empty (production 2026-08-07: edges
-        # found + shadow written, zero lines).  Emit a short relation stub
-        # (↺ = already shown above) instead of the full body.
-        if seen is not None and to_type and to_id:
-            if (to_type, to_id) in seen:
-                stub_ref = _clip(to_id, 40)
-                weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")
-                lines.append(f"- [{relation}·{weight_str}] ↺ {stub_ref}")
-                if source_ids is not None:
-                    source_ids.append(f"{to_type}:{to_id}")
-                continue
-
-        # Resolve target body preview
-        body = _resolve_edge_target_preview(store, to_id)
-        if body:
-            display_text = body
-        elif _edge_target_is_inactive(store, to_id):
-            # Never turn a revoked/demoted canonical target into an unresolved
-            # identifier-only recall line; inactive targets are fully suppressed.
-            continue
-        elif to_type not in {"crystallized_record", "crystallized"}:
-            # W4: non-crystallized targets (events, working items) age out of
-            # hot storage by design (retention prunes events); an unresolved
-            # identifier line for them is pure noise, not a diagnostic.
-            continue
+        if to_id in anchor_set and from_id not in anchor_set:
+            direction = "anchor_is_to"
+            anchor_id, anchor_type = to_id, str(edge.get("to_record_type") or "")
+            neighbor_id, neighbor_type = from_id, str(edge.get("from_record_type") or "")
         else:
-            # Missing crystallized targets remain diagnosable without
-            # exposing inactive content.
-            display_text = f"[unresolved:{to_id}]"
+            # 锚点在 from 侧;两端皆锚点或(防御)两端皆非锚点时同样取 to 为
+            # 展示目标 — 行仍表达「两条已知记忆相关」这一图谱独有信息。
+            direction = "anchor_is_from"
+            anchor_id, anchor_type = from_id, str(edge.get("from_record_type") or "")
+            neighbor_id, neighbor_type = to_id, str(edge.get("to_record_type") or "")
+        workable.append({
+            "edge": edge,
+            "weight": weight,
+            "direction": direction,
+            "anchor_id": anchor_id,
+            "anchor_type": anchor_type,
+            "neighbor_id": neighbor_id,
+            "neighbor_type": neighbor_type,
+        })
 
-        weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")
-        lines.append(f"- [{relation}·{weight_str}] {display_text}")
+    if not workable:
+        return [], decisions
 
-        if seen is not None and to_type and to_id:
-            seen.add((to_type, to_id))
-        if source_ids is not None and to_type and to_id:
-            source_ids.append(f"{to_type}:{to_id}")
+    # ── 2. 预览源批量解析(一次结晶扫描 + events 缓存)────────────────
+    preview_ids: set[str] = set()
+    for item in workable:
+        preview_ids.add(item["anchor_id"])
+        preview_ids.add(item["neighbor_id"])
+    cry_map = _batch_resolve_crystallized(store, preview_ids)
+    event_summaries: dict[str, str] = {}
+    for ev in events or []:
+        try:
+            ev_id = str(getattr(ev, "id", "") or "")
+            if ev_id and ev_id in preview_ids:
+                event_summaries[ev_id] = str(getattr(ev, "summary", "") or "")
+        except Exception:
+            continue
 
-    return lines
+    # ── 3. 按 (锚点,邻居) 聚合 ─────────────────────────────────────
+    groups: dict[tuple[str, str], dict] = {}
+    for item in workable:
+        key = (item["anchor_id"], item["neighbor_id"])
+        group = groups.setdefault(key, {
+            "anchor_id": item["anchor_id"],
+            "anchor_type": item["anchor_type"],
+            "neighbor_id": item["neighbor_id"],
+            "neighbor_type": item["neighbor_type"],
+            "phrases": [],
+            "weight": 0.0,
+            "items": [],
+        })
+        phrase = GRAPH_RELATION_PHRASES.get(
+            (str(item["edge"].get("relation_type") or ""), item["direction"]),
+            GRAPH_FALLBACK_PHRASE,
+        )
+        if phrase not in group["phrases"]:
+            group["phrases"].append(phrase)
+        group["weight"] = max(group["weight"], item["weight"])
+        group["items"].append(item)
+
+    # ── 4. 渲染 ────────────────────────────────────────────────────
+    lines: list[str] = []
+    for group in groups.values():
+        if len(lines) >= GRAPH_MAX_LINES:
+            for item in group["items"]:
+                decisions.append(
+                    {"edge": item["edge"], "injected": False, "outcome": "not_selected"}
+                )
+            continue
+
+        n_text, n_status = _graph_preview(
+            group["neighbor_id"], group["neighbor_type"], cry_map, event_summaries,
+        )
+        if n_status != "ok" or not n_text:
+            if n_status == "inactive":
+                # Revoked/demoted canonical targets are fully suppressed.
+                outcome = "target_inactive"
+            elif group["neighbor_type"] in _GRAPH_CRYSTALLIZED_TYPES:
+                outcome = "unresolved"
+            else:
+                # W4: 非结晶目标(事件等)按保留策略淡出热存储,解析失败的
+                # 标识符行是纯噪声,不是诊断。
+                outcome = "non_crystallized_target"
+            for item in group["items"]:
+                decisions.append(
+                    {"edge": item["edge"], "injected": False, "outcome": outcome}
+                )
+            continue
+
+        a_text, a_status = _graph_preview(
+            group["anchor_id"], group["anchor_type"], cry_map, event_summaries,
+        )
+        if a_status == "ok" and a_text:
+            anchor_label = _clip(a_text, GRAPH_ANCHOR_PREVIEW_CHARS)
+        elif group["anchor_type"] == "event":
+            anchor_label = "近期事件"
+        else:
+            anchor_label = "相关记忆"
+
+        dedup_hit = (
+            seen is not None
+            and (group["neighbor_type"], group["neighbor_id"]) in seen
+        )
+        prefix = f"- 「{anchor_label}」{'、'.join(group['phrases'])}:"
+        suffix = f"({'已列出·' if dedup_hit else ''}关联度 {group['weight']:.2f})"
+        body_budget = max(40, 220 - len(prefix) - len(suffix))
+        if dedup_hit:
+            body_budget = min(body_budget, GRAPH_DEDUP_PREVIEW_CHARS)
+        lines.append(prefix + _clip(n_text, body_budget) + suffix)
+
+        outcome = "emitted_stub" if dedup_hit else "emitted_full"
+        for item in group["items"]:
+            decisions.append({"edge": item["edge"], "injected": True, "outcome": outcome})
+        if seen is not None:
+            seen.add((group["neighbor_type"], group["neighbor_id"]))
+        if source_ids is not None:
+            source_ids.append(f"{group['neighbor_type']}:{group['neighbor_id']}")
+
+    return lines, decisions
 
 
 def _record_graph_layer_shadow(
