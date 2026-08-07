@@ -3857,6 +3857,32 @@ OwnerGate 永久边界,错误的边应由使用信号淘汰而非人工把关。
 active→注入消费+反馈遗忘、invalidated 终态;digest 不再是任何边状态的
 消费者(census 断言 `EDGE_REVIEW_DIGEST_STATE` 不复存在)。
 
+### CH.4 —— E8 锚点管线失效:图谱注入"无感"的最后一公里(2026-08-07)
+
+Owner 部署后实测"完全没感觉到动态图谱注入",三层诊断(全部生产实锤):
+
+1. **测试话术走 casual 兜底路由且无检索命中** — 04:01-04:17Z 三次
+   prefetch 的 selected 段无 Indexed Recall → FTS 零命中 → 锚点空 →
+   图谱一跳展开无起点(匹配才注入的设计行为,非故障)。
+2. **E8(真缺陷):锚点管线对中文对话结构性失效**。
+   `plan_query_route` 的 `entities or chinese_keywords` 短路 — query 含
+   任何拉丁词时中文实词整体丢弃;派生出的多词 search_query 在 FTS AND
+   语义下断崖式 0 命中(实测 'Memory-OS Hermes':两词单查各 5 命中,
+   AND 交集 0;'审批 闭环' 同样 0)。双重作用 → 锚点恒空 → **shadow
+   月命中仅 4 条、历史 1019 次 prefetch 仅 19.5% 有 FTS 命中的根因**。
+   修复:`_collect_anchor_ids` 增加有界回退(派生词逐词并集 + 中文
+   关键词表补词;词 ≤6/每词 limit 3/锚点 ≤5),**不碰全局共享的
+   plan_query_route 谓词**(W 规则:改共享谓词前全面 grep;Indexed
+   Recall 的派生行为不变,中文丢词的通用改进另议)。4 条反事实
+   (AND 回退/中文补词/直接命中不回退/有界)先红后绿。
+3. ~~Gateway 24 天未重启~~ **实测更正(owner 指出后复查)**:初判把主机上
+   无关测试容器的 s6 监督进程误认作 gateway——真实 gateway 进程为
+   `/usr/local/lib/hermes-agent/venv/.../gateway run`,owner 重启有效
+   (复查时 etime 40 分钟),runtime 布局 prefetch.py 带 W7 标记 —— 今日
+   新代码**已加载**。教训:**监督进程的 etime 不是被监督进程的 etime**,
+   判断进程年龄必须找到真实子进程,不能拿 supervisor/wrapper 凑数。
+   E8 部署后需再重启一次 gateway 以加载(时机归 owner)。
+
 **CH.3 部署与生产验证(2026-08-07 03:26Z 实测)**:PR #38 → main
 `766d797`(CI dispatch success);deploy apply+postcheck 全绿;
 `graph_layer_injection_enabled` override 写入

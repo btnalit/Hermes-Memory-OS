@@ -1902,18 +1902,59 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
     search_query = str(route.get("search_query", "")).strip()
     if not search_query:
         return []
-    try:
-        result = index.search(search_query, limit=5)
-    except Exception:
-        return []
-    ids: list[str] = []
-    for hit in result.get("hits", []):
-        if not isinstance(hit, dict):
-            continue
-        rid = str(hit.get("record_id", "")).strip()
-        if rid:
-            ids.append(rid)
-    return ids
+
+    def _hits_of(term: str, *, limit: int) -> list[str]:
+        try:
+            result = index.search(term, limit=limit)
+        except Exception:
+            return []
+        found: list[str] = []
+        for hit in (result.get("hits", []) if isinstance(result, dict) else []):
+            if not isinstance(hit, dict):
+                continue
+            rid = str(hit.get("record_id", "")).strip()
+            if rid:
+                found.append(rid)
+        return found
+
+    ids = _hits_of(search_query, limit=5)
+    if ids:
+        return ids
+
+    # ── E8 回退(2026-08-07 生产实锤)────────────────────────────────
+    # 派生的多词 search_query 在 FTS AND 语义下经常 0 命中(实测
+    # 'Memory-OS Hermes' 两词单查各 5 命中、AND 交集 0),而
+    # plan_query_route 的 `entities or chinese_keywords` 短路又把中文
+    # 实词整体丢弃 — 双重作用下锚点恒空,图谱一跳展开永不触发
+    # (shadow 月命中仅 4 条的根因)。回退:①派生词逐词并集;②仍空则
+    # 用中文关键词表匹配原 query 逐词并集。全程有界:词 ≤6、每词
+    # limit 3、锚点 ≤5。只改锚点收集,不碰全局共享的 plan_query_route。
+    # 派生词逐词(单词派生无 AND 问题,重查等于原查询,跳过)…
+    derived_terms = [t for t in search_query.split() if t]
+    if len(derived_terms) <= 1:
+        derived_terms = []
+    # …加上被 entities 短路丢弃的中文关键词(仅用于锚点回退)
+    effective_keywords = (
+        _fast_path_keywords_override
+        if _fast_path_keywords_override is not None
+        else _FAST_PATH_CHINESE_KEYWORDS
+    )
+    redacted = _redact(" ".join(str(query).split()))
+    chinese_terms = [
+        kw for kw in effective_keywords
+        if kw in redacted and kw not in _FAST_PATH_STOP_WORDS
+    ]
+    fallback_terms = _dedupe(derived_terms + chinese_terms)[:6]
+    seen_ids: list[str] = []
+    for term in fallback_terms:
+        if len(seen_ids) >= 5:
+            break
+        for rid in _hits_of(term, limit=3):
+            if rid not in seen_ids:
+                seen_ids.append(rid)
+            if len(seen_ids) >= 5:
+                break
+    return seen_ids
 
 
 # W3 词表守卫锚点:图谱注入只消费此状态的边;owner approve(active 化)
