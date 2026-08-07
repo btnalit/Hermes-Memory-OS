@@ -3875,6 +3875,20 @@ Owner 部署后实测"完全没感觉到动态图谱注入",三层诊断(全部�
    plan_query_route 谓词**(W 规则:改共享谓词前全面 grep;Indexed
    Recall 的派生行为不变,中文丢词的通用改进另议)。4 条反事实
    (AND 回退/中文补词/直接命中不回退/有界)先红后绿。
+**CH.4 部署与端到端验证(2026-08-07 实测)**:E8(PR #40 `6d68955`)+
+E8b 结晶优先(PR #41 `cf98f48`)+ E8b 回退双段补钉(PR #42 `41e6054`),
+三段 CI dispatch success、deploy apply+postcheck 全绿。生产复验驱动的
+两次补钉:①E8 后锚点 0→5 但清一色 event(FTS 通用命中被事件量级淹没,
+'审批'/'Memory-OS'/'Hermes' top8 全 event;边密度在结晶层)→ E8b
+index.search 加 record_type 过滤+锚点双段;②主查询双段皆 0(AND 失效
+同样打击限定段)走逐词回退而回退无限定段 → 补钉回退双段独立池。
+**最终端到端实证**:同一条此前 0 锚点的中文 query → 锚点
+[cry×2, evt×3] → **Related Memory 段出现**,真实展开 2 条相关记忆。
+全量 3246 passed / 13 skipped。附带观察:一条边目标显示
+[unresolved:cry_...](指向已不在现役的结晶记录)— 属既有 fallback
+设计,权重反馈遗忘或 reject_edge 可清理,不阻塞。
+**Gateway 需再重启一次以加载 E8/E8b(时机归 owner)。**
+
 3. ~~Gateway 24 天未重启~~ **实测更正(owner 指出后复查)**:初判把主机上
    无关测试容器的 s6 监督进程误认作 gateway——真实 gateway 进程为
    `/usr/local/lib/hermes-agent/venv/.../gateway run`,owner 重启有效
