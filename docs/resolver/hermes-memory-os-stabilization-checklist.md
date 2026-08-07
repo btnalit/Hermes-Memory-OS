@@ -5188,3 +5188,15 @@ casual 兜底路由下词表不匹配的 Indexed 内容不免票是被
 working` 钉住的既有强度 — 实现首版含 indexed 被该测试当场拦下,按
 「不放宽既有测试迁就新改动」裁决收窄;indexed 的同族问题(FTS 命中被
 词表二审否决)是否也修,归 owner 单独裁决(待办)。
+
+**CK 部署与生产实证(2026-08-07,`5a5e246`)**:apply 全绿,两份拷贝
+grep 确认;casual 路由真实数据实证 Related Memory 入选 score 0.5、
+reason_codes 含 graph_anchor_provenance;召回澄清型 query 走
+ambiguous_recall 仍按设计整段排除;无锚点命中的 query 诚实无段。
+Indexed 裁决所依据的历史账本数据(1030 行/303 次/词表否决 18=6%/近期
+1/15)见待办存档。全量 3270 passed / 13 skipped。
+
+- **CK**(2026-08-07):router 弱谓词二审否决图谱段 — agent 亲测反馈定位,
+  graph_anchor_provenance +0.35(不豁免风险码/路由排除/预算,反事实
+  钉住);indexed 按历史生产数据裁定维持现状;生产实证 casual 路由
+  Related Memory 入选带溯源码;全量 3270/13。
