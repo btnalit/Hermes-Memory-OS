@@ -2245,6 +2245,69 @@ def test_exploration_slots_rotate_daily_and_bound_selection(tmp_path):
     assert len(explore_sets) >= 2, (
         f"exploration slots must rotate across days: {explore_sets}"
     )
+
+
+def test_cl_cjk_query_bigrams_helper():
+    """CL:双字词组派生 — 停用字断窗、滑动窗口、保序去重、cap。"""
+    from plugins.memory.memory_os.prefetch import _cjk_query_bigrams
+
+    assert _cjk_query_bigrams("动态图谱的注入效果") == [
+        "动态", "态图", "图谱", "注入", "入效", "效果",
+    ]
+    assert _cjk_query_bigrams("好的") == []
+    assert _cjk_query_bigrams("abc only ascii") == []
+    assert len(_cjk_query_bigrams("一二三四五六七八九十甲乙丙丁", cap=8)) == 8
+
+
+def test_cl_bigram_fallback_reaches_non_vocab_chinese_topics():
+    """CL 反事实(owner 实测「聊动态图谱不命中,说记忆就中」的根因):
+    纯中文非词表话题必须经 query 双字词组回退拿到锚点。修复缺席:固定
+    词表(21 词)无 图谱/动态/注入,整句 slow_path AND 0 命中,派生词
+    单 token 跳过 → 锚点恒空,图谱永不遍历 — 必红。"""
+    index = _E8MockIndex(
+        {"图谱": ["evt_g1"]},
+        typed_hits={("图谱", "crystallized_record"): ["cry_graph"]},
+    )
+    anchors = _collect_anchor_ids("动态图谱现在活起来没有", index)
+    assert anchors, "bigram fallback must produce anchors for non-vocab Chinese topics"
+    assert anchors[0] == "cry_graph", (
+        f"crystallized hits must lead the pool (edge density lives there): {anchors}"
+    )
+    assert "evt_g1" in anchors
+
+
+def test_cl_task_anchor_supplements_short_query_anchors():
+    """CL 反事实:query 锚点不足 5 时用当前任务锚文本补位(聊的话题往往
+    在任务锚里早有记录 — agent 建议③);query 派生锚点保序在前。修复
+    缺席:任务锚不参与锚点收集,补位不存在 — 必红。"""
+    index = _E8MockIndex(
+        {"图谱": ["evt_q1"]},
+        typed_hits={("Memory-OS", "crystallized_record"): ["cry_task"]},
+    )
+    anchors = _collect_anchor_ids(
+        "聊聊图谱",
+        index,
+        task_anchor_text="推进 Memory-OS 稳定化收尾",
+    )
+    assert anchors[0] == "evt_q1", f"query-derived anchors keep priority: {anchors}"
+    assert "cry_task" in anchors, (
+        f"task-anchor terms must supplement when query anchors run short: {anchors}"
+    )
+
+
+def test_cl_task_anchor_does_not_dilute_full_query_anchors():
+    """query 已拿满 5 个锚点时任务锚不得稀释(补位仅在不足时)。"""
+    index = _E8MockIndex(
+        {"图谱": ["evt_1", "evt_2", "evt_3", "evt_4", "evt_5"]},
+        typed_hits={("Memory-OS", "crystallized_record"): ["cry_task"]},
+    )
+    anchors = _collect_anchor_ids(
+        "聊聊图谱",
+        index,
+        task_anchor_text="推进 Memory-OS 稳定化收尾",
+    )
+    assert len(anchors) == 5
+    assert "cry_task" not in anchors
     """E8b counterfactual(生产复验补钉):逐词回退同样必须带结晶限定段。
 
     生产实测:主查询双段皆 0(AND 失效同样打击结晶限定段)→ 走逐词回退,

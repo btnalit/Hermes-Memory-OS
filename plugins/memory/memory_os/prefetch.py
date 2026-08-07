@@ -657,7 +657,9 @@ def _build_prefetch_sections(
     # Second-hop graph traversal: anchor_ids come from FTS5 results.
     # _collect_anchor_ids calls index.search() a second time (微秒级,可忽略).
     # See docstring at _collect_anchor_ids for details.
-    _first_anchors = _collect_anchor_ids(query, index)
+    _first_anchors = _collect_anchor_ids(
+        query, index, task_anchor_text=str(current_task_anchor or ""),
+    )
     graph_ids: list[str] = []
     _append_section(
         sections,
@@ -1892,13 +1894,58 @@ def _event_lines(
     return lines
 
 
-def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
+# CL(2026-08-08)锚点双字词回退的 CJK 停用字:纯功能字,分段用 — 命中它
+# 就断开双字词窗口。刻意最小化:内容性强的字(现/实/成…)一律不入,
+# 宁可多产几个无命中的噪声双字词(FTS 空查有界无害),不可切碎真实词。
+_CJK_STOP_CHARS = frozenset(
+    "的了吗呢吧啊哦呀嘛是在就都很还也这那我你他她它与和或不没之个把被给对从要会能想说请帮"
+)
+_CJK_RUN_PATTERN = re.compile(r"[一-鿿]+")
+
+
+def _cjk_query_bigrams(text: str, *, cap: int = 8) -> list[str]:
+    """从文本派生 CJK 双字词组(滑动窗口,停用字断窗,保序去重,cap 8)。
+
+    E8 的回退补词只覆盖 21 个固定词表词 — 纯中文非词表话题(动态图谱/
+    注入/…)恒零锚点,而 FTS5 unicode61 逐字分词下任意双字短语本可命中
+    (生产实测:'图谱'/'动态'/'注入' 单查各 5 命中,含结晶层记录)。
+    从 query 本身派生双字词,词表盲区从此不再是锚点入口的硬约束。
+    """
+    bigrams: list[str] = []
+    for run in _CJK_RUN_PATTERN.findall(str(text or "")):
+        segment: list[str] = []
+        for ch in run:
+            if ch in _CJK_STOP_CHARS:
+                for i in range(len(segment) - 1):
+                    bigrams.append(segment[i] + segment[i + 1])
+                segment = []
+            else:
+                segment.append(ch)
+        for i in range(len(segment) - 1):
+            bigrams.append(segment[i] + segment[i + 1])
+    out: list[str] = []
+    for bigram in bigrams:
+        if bigram not in out:
+            out.append(bigram)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _collect_anchor_ids(
+    query: str,
+    index: object | None,
+    *,
+    task_anchor_text: str = "",
+) -> list[str]:
     """从第一跳 FTS5 召回结果中提取 record_id,作为第二跳图遍历的 anchor。
 
     Anchor 靠内容匹配(搜索)产生,遍历靠 id。空查询/无 index → 返回 []。
     与 _indexed_lines 使用相同的 plan_query_route 派生 search_query。
     在生产中,与 _indexed_lines 各调一次 index.search()(FTS5 微秒级,可忽略)。
     Mock index 追踪查询次数时,注意搜索次数因 Shadow 区块增加一次。
+    task_anchor_text(CL):当前任务锚文本 — query 锚点不足时的补位来源
+    (聊的话题往往在任务锚里早有记录)。
     """
     if not query or not query.strip() or index is None:
         return []
@@ -1926,6 +1973,29 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
                 found.append(rid)
         return found
 
+    def _supplement_from_task_anchor(anchors: list[str]) -> list[str]:
+        # CL:query 锚点不足 5 时,用当前任务锚文本补位(聊的话题往往在
+        # 任务锚里早有记录)。query 派生锚点保序在前;有界:≤3 词、每词
+        # 双段各 limit 2。
+        if len(anchors) >= 5 or not str(task_anchor_text or "").strip():
+            return anchors
+        anchor_redacted = _redact(" ".join(str(task_anchor_text).split()))
+        ascii_words = [
+            word
+            for word in _ASCII_ENTITY_PATTERN.findall(anchor_redacted)
+            if word.lower() not in _ROUTE_STOP_ENTITIES
+        ]
+        terms = _dedupe(ascii_words + _cjk_query_bigrams(anchor_redacted))[:3]
+        pool: list[str] = []
+        for term in terms:
+            for rid in _hits_of(term, limit=2, record_type="crystallized_record"):
+                if rid not in pool:
+                    pool.append(rid)
+            for rid in _hits_of(term, limit=2):
+                if rid not in pool:
+                    pool.append(rid)
+        return _dedupe(anchors + pool)[:5]
+
     # E8b:结晶限定段优先 — FTS 通用命中被事件量级淹没(生产实测 top 8
     # 清一色 event),而边密度在结晶层;锚点池 = 结晶命中(前)∪ 通用命中,
     # cap 5。旧 index/mock 不支持 record_type 时 fail-open 降级为空段。
@@ -1935,7 +2005,7 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
     ids = _hits_of(search_query, limit=5)
     merged = _dedupe(crystallized_ids + ids)[:5]
     if merged:
-        return merged
+        return _supplement_from_task_anchor(merged)
 
     # ── E8 回退(2026-08-07 生产实锤)────────────────────────────────
     # 派生的多词 search_query 在 FTS AND 语义下经常 0 命中(实测
@@ -1960,7 +2030,13 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
         kw for kw in effective_keywords
         if kw in redacted and kw not in _FAST_PATH_STOP_WORDS
     ]
-    fallback_terms = _dedupe(derived_terms + chinese_terms)[:6]
+    # CL(2026-08-08):词表补词之外,再从 query 本身派生 CJK 双字词组 —
+    # 21 词固定表覆盖不了的纯中文话题(动态图谱/注入/…)从此有入口
+    # (unicode61 逐字分词下双字短语 FTS 可命中)。词表词在前(证据更强),
+    # 双字词组补位,总量仍 cap 6。
+    fallback_terms = _dedupe(
+        derived_terms + chinese_terms + _cjk_query_bigrams(redacted)
+    )[:6]
     # 回退同样双段:结晶限定段先收(独立池,防被事件填满),通用段后补。
     crystallized_pool: list[str] = []
     general_pool: list[str] = []
@@ -1973,7 +2049,9 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
         for rid in _hits_of(term, limit=3):
             if rid not in general_pool:
                 general_pool.append(rid)
-    return _dedupe(crystallized_pool + general_pool)[:5]
+    return _supplement_from_task_anchor(
+        _dedupe(crystallized_pool + general_pool)[:5]
+    )
 
 
 # W3 词表守卫锚点:图谱注入只消费此状态的边;owner approve(active 化)
