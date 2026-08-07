@@ -8333,52 +8333,59 @@ def test_w6_graph_governance_state_info_entry():
     ), "a report predating edge_step_results must not fabricate a measurement"
 
 
-def test_w6_output_knob_override_expiry_visibility():
-    """E5 counterfactual:输出型 knob 的 enabled override 静默过期必须 WARN。
+def test_p1_output_knob_effective_value_mismatch_visibility():
+    """P1 反事实(W6/E5 判据换轨):生效值 ≠ 期望值必须 WARN。
 
-    生产事故:graph_layer_injection_enabled 的 override 2026-07-01 过期,
-    无任何监控项报告 — 图谱注入静默关闭一个月无人知晓。
+    旧 expired 判据两个方向都错:resolver 只让 state=='active' 的行过期
+    ('confirmed' 过期后仍生效 → 假警);默认翻 True 后真正的危险态是一条
+    active 的 override_value=False — expired 判据结构上看不见它。E5 原
+    事故形状(enabled override 过期 → 生效值跌回默认)在新判据下同样表现
+    为 mismatch=True。
     """
-    expired = monitor.classify_snapshot({
+    mismatched = monitor.classify_snapshot({
         "monitor_profile": "live",
         "output_knob_override_state": {
             "collected": True,
             "knobs": {
                 "graph_layer_injection_enabled": {
                     "present": True,
-                    "override_value": True,
-                    "expires_at": "2026-07-01T07:58:15+00:00",
-                    "expired": True,
+                    "override_value": False,
+                    "expires_at": "",
+                    "expired": False,
                     "state": "active",
+                    "expected_live_value": True,
+                    "effective_value": False,
+                    "effective_source": "resolver",
+                    "mismatch": True,
                 },
             },
         },
     })
     assert any(
-        item["code"] == "v2_output_knob_override_expired" for item in expired["warn"]
-    ), "an enabled-then-expired output knob override must WARN"
+        item["code"] == "v2_output_knob_override_mismatch" for item in mismatched["warn"]
+    ), "an output knob whose effective value differs from expected must WARN"
     assert any(
-        item["code"] == "v2_output_knob_override_state" for item in expired["info"]
+        item["code"] == "v2_output_knob_override_state" for item in mismatched["info"]
     )
 
-    # 未过期(或无 override)→ 仅 INFO,不 WARN
+    # 生效值 == 期望值(default_live,无 override)→ 仅 INFO,不 WARN
     healthy = monitor.classify_snapshot({
         "monitor_profile": "live",
         "output_knob_override_state": {
             "collected": True,
             "knobs": {
                 "graph_layer_injection_enabled": {
-                    "present": True,
-                    "override_value": True,
-                    "expires_at": "2099-01-01T00:00:00+00:00",
-                    "expired": False,
-                    "state": "active",
+                    "present": False,
+                    "expected_live_value": True,
+                    "effective_value": True,
+                    "effective_source": "resolver",
+                    "mismatch": False,
                 },
             },
         },
     })
     assert not any(
-        item["code"] == "v2_output_knob_override_expired" for item in healthy["warn"]
+        item["code"] == "v2_output_knob_override_mismatch" for item in healthy["warn"]
     )
     assert any(
         item["code"] == "v2_output_knob_override_state" for item in healthy["info"]
@@ -8397,7 +8404,119 @@ def test_w6_output_knob_override_expiry_visibility():
         for item in failed["warn"]
     )
 
-    # 词表守卫:两个新 WARN 码必须在 clean-host 分类表注册
+    # 词表守卫:WARN 码必须在 clean-host 分类表注册
     # (BJ 教训:未注册的 WARN 在 clean-host 落 unclassified 即 FAIL)。
-    for code in ("v2_output_knob_override_expired", "v2_output_knob_override_collection_failed"):
+    for code in (
+        "v2_output_knob_override_mismatch",
+        "v2_output_knob_override_collection_failed",
+        "v2_graph_injection_shadow_collection_failed",
+    ):
         assert code in monitor.CLEAN_HOST_WARN_CLASSIFICATIONS, code
+
+
+def _exec_graph_knob_probe_prefix(hermes_home) -> dict[str, Any]:
+    """Exec the verbatim embedded-script source that defines
+    output_knob_override_state()/graph_injection_shadow_state() (both live
+    inside the giant r'''...''' remote-script literal, not as module
+    attributes). Split point `def module_cadence_summary` is the first
+    top-level def after graph_injection_shadow_state."""
+    script = monitor._remote_probe_script(str(hermes_home))
+    prefix = script.split("def module_cadence_summary", 1)[0]
+    namespace: dict[str, Any] = {}
+    exec(prefix, namespace)
+    return namespace
+
+
+def test_p1_output_knob_state_matches_resolver(tmp_path):
+    """守卫:监控的 effective_value 必须与部署 resolver 对同一份账本的结论
+    一致(镜像重实现的词表漂移正是 E5 家族的成因)。fixture 用 confirmed +
+    已过期 expires_at — 历史上两边分歧的实例:resolver 不让 confirmed
+    过期,旧监控按时间戳判过期。"""
+    import json as _json
+
+    system_dir = tmp_path / "memory-os" / "system"
+    system_dir.mkdir(parents=True)
+    (system_dir / "knob_overrides.jsonl").write_text(
+        _json.dumps({
+            "knob": "graph_layer_injection_enabled",
+            "override_value": False,
+            "state": "confirmed",
+            "expires_at": "2020-01-01T00:00:00+00:00",
+            "ts": "2019-12-01T00:00:00+00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, resolve_knob
+
+    _default = OVERRIDABLE_KNOBS["graph_layer_injection_enabled"]["default"]
+    expected_effective = resolve_knob(
+        "graph_layer_injection_enabled", _default, _store_root=system_dir,
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    state = namespace["output_knob_override_state"]()
+    row = state["knobs"]["graph_layer_injection_enabled"]
+    assert row["effective_source"] == "resolver"
+    assert row["effective_value"] == expected_effective, (
+        "monitor must report the DEPLOYED resolver's conclusion, not a mirror"
+    )
+    assert row["mismatch"] == (bool(expected_effective) is not True)
+
+
+def test_v2_graph_injection_shadow_state_collection_and_wiring(tmp_path):
+    """shadow v1 生产证据采集:零样本报 healthy_no_sample(不买绿);v1 行
+    按 injected/outcome 聚合;采集失败 WARN。v0 行不计入(纪元边界)。"""
+    import json as _json
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    empty = namespace["graph_injection_shadow_state"]()
+    assert empty["collected"] is True
+    assert empty["status"] == "healthy_no_sample"
+    assert empty["v1_rows_7d"] == 0
+
+    system_dir = tmp_path / "memory-os" / "system"
+    system_dir.mkdir(parents=True)
+    now_stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rows = [
+        {  # v0 历史行:不计入 v1 统计
+            "schema_version": "memory-os.graph_layer_shadow.v0",
+            "created_at": now_stamp,
+            "edges": [{"relation_type": "co_occurs"}],
+        },
+        {
+            "schema_version": "memory-os.graph_layer_shadow.v1",
+            "created_at": now_stamp,
+            "injected_count": 2,
+            "edges": [
+                {"outcome": "emitted_full", "injected": True},
+                {"outcome": "emitted_full", "injected": True},
+                {"outcome": "not_selected", "injected": False},
+            ],
+        },
+    ]
+    (system_dir / "graph_layer_shadow.jsonl").write_text(
+        "".join(_json.dumps(r) + "\n" for r in rows), encoding="utf-8",
+    )
+    sampled = namespace["graph_injection_shadow_state"]()
+    assert sampled["status"] == "sampled"
+    assert sampled["v1_rows_7d"] == 1
+    assert sampled["injected_count_7d"] == 2
+    assert sampled["outcome_distribution_7d"] == {"emitted_full": 2, "not_selected": 1}
+
+    # 分类接线:collected → INFO;采集失败 → WARN
+    graded = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "graph_injection_shadow": sampled,
+    })
+    assert any(
+        item["code"] == "v2_graph_injection_shadow_state" for item in graded["info"]
+    )
+    failed = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "graph_injection_shadow": {"collected": False, "error_code": "OSError"},
+    })
+    assert any(
+        item["code"] == "v2_graph_injection_shadow_collection_failed"
+        for item in failed["warn"]
+    )

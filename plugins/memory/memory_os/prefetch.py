@@ -6,6 +6,7 @@ import functools
 import json
 import re
 import unicodedata
+import zlib
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -2002,6 +2003,13 @@ GRAPH_FALLBACK_PHRASE = "关联于"
 # min(出生权重) >= 此值),真实排序依赖权重本身,不依赖它。
 GRAPH_INJECTION_WEIGHT_FLOOR = 0.3
 GRAPH_MAX_LINES = 8
+# 候选取数放宽到 32(SQL 已按 weight desc 排序,SQLite+索引成本可忽略),
+# Python 侧再选注入位:top-6 按权重 + 2 个探索位。探索位是反饿死机制 —
+# 分层出生权重若单独存在,排序固化后弱边永无展示 → 永无命中 → 60 天被
+# 判「无命中」处决(自我实现遗忘;生产密度约 110 边/结晶记录抢 8 名额)。
+GRAPH_EDGE_CANDIDATE_LIMIT = 32
+GRAPH_EXPLOIT_SLOTS = 6
+GRAPH_EXPLORE_SLOTS = 2
 GRAPH_ANCHOR_PREVIEW_CHARS = 12
 # 跨段去重命中的短预览长度:是结晶段同一正文 220 字符裁剪的精确前缀,
 # 对阅读方 LLM 是零歧义对齐键(比 record_id 可靠——其它区段不显示 id)。
@@ -2047,7 +2055,10 @@ def _graph_layer_shadow_lines(
     - state='active'
     - 不打断 main prefetch 路径(fail-open: 查询出错返回 [])
     - anchor_ids 为空 → 直接返回 [] (空 shadow 是诚实信号)
-    - Config gate: graph_layer_injection_enabled knob (default=False)
+    - Config gate: graph_layer_injection_enabled knob(default=True — owner
+      裁定图谱为永久能力;开关保留作回滚,写 False override 关火。旧默认
+      False 依赖一条无过期 override 撑着,override 丢失即静默变暗且监控
+      不响 — E5 事故形状)
     - Cross-section dedup via `seen` set
     - events: 调用方的 events 缓存,用于事件类锚点/邻居的预览解析
     """
@@ -2056,7 +2067,12 @@ def _graph_layer_shadow_lines(
     if index is None or not hasattr(index, "query_edges"):
         return []
     try:
-        edges = index.query_edges(anchor_ids, depth=1, state=GRAPH_INJECTION_EDGE_STATE, limit=8)
+        edges = index.query_edges(
+            anchor_ids,
+            depth=1,
+            state=GRAPH_INJECTION_EDGE_STATE,
+            limit=GRAPH_EDGE_CANDIDATE_LIMIT,
+        )
     except Exception:
         return []
     if not edges:
@@ -2064,9 +2080,11 @@ def _graph_layer_shadow_lines(
 
     # ── Knob gate ──────────────────────────────────────────────
     from .knob_overrides import resolve_knob as _resolve_knob
+    # 默认 True:注册表的 default 只是元数据,resolve_knob 用的是这里传入
+    # 的值 — 两处必须一致翻转(只改注册表运行时零变化)。
     injection_enabled = _resolve_knob(
         "graph_layer_injection_enabled",
-        default=False,
+        default=True,
         roots=store.roots,
     )
     if not injection_enabled:
@@ -2167,6 +2185,7 @@ def _render_graph_layer_lines(
     seen: set[tuple[str, str]] | None = None,
     source_ids: list[str] | None = None,
     events: list[Any] | None = None,
+    day_ordinal: int | None = None,
 ) -> tuple[list[str], list[dict]]:
     """Render graph edges as owner-readable Related Memory lines.
 
@@ -2230,7 +2249,37 @@ def _render_graph_layer_lines(
     if not workable:
         return [], decisions
 
-    # ── 2. 预览源批量解析(一次结晶扫描 + events 缓存)────────────────
+    # ── 2. 注入位选择:top-K 按权重 + 探索位(反饿死)─────────────────
+    # 权重降序(稳定排序保持 SQL 的 created_at desc 次序作并列平局);
+    # 排序尾部按天确定性轮转出 2 个探索位:无随机数(热路径必须可复现)、
+    # 不读反馈闭环的 durable state(不把热路径耦合到 cron lane)。
+    # 「从未获得展示机会」不得等价于「无命中」— 遗忘侧配套
+    # invalidated_never_hit 计数验证轮转覆盖。
+    workable.sort(key=lambda item: -item["weight"])
+    if len(workable) > GRAPH_EXPLOIT_SLOTS + GRAPH_EXPLORE_SLOTS:
+        exploit = workable[:GRAPH_EXPLOIT_SLOTS]
+        remainder = workable[GRAPH_EXPLOIT_SLOTS:]
+        if day_ordinal is None:
+            day_ordinal = datetime.now(timezone.utc).date().toordinal()
+
+        def _rotation_key(item: dict) -> int:
+            edge_id = str(
+                item["edge"].get("edge_id")
+                or f"{item['anchor_id']}:{item['neighbor_id']}"
+            )
+            # zlib.crc32:跨进程稳定(内建 hash() 对字符串带盐,重启即变)
+            return zlib.crc32(f"{day_ordinal}:{edge_id}".encode("utf-8"))
+
+        explore = sorted(remainder, key=_rotation_key)[:GRAPH_EXPLORE_SLOTS]
+        explore_marks = {id(item) for item in explore}
+        for item in remainder:
+            if id(item) not in explore_marks:
+                decisions.append(
+                    {"edge": item["edge"], "injected": False, "outcome": "not_selected"}
+                )
+        workable = exploit + explore
+
+    # ── 3. 预览源批量解析(一次结晶扫描 + events 缓存)────────────────
     preview_ids: set[str] = set()
     for item in workable:
         preview_ids.add(item["anchor_id"])
@@ -2245,7 +2294,7 @@ def _render_graph_layer_lines(
         except Exception:
             continue
 
-    # ── 3. 按 (锚点,邻居) 聚合 ─────────────────────────────────────
+    # ── 4. 按 (锚点,邻居) 聚合 ─────────────────────────────────────
     groups: dict[tuple[str, str], dict] = {}
     for item in workable:
         key = (item["anchor_id"], item["neighbor_id"])
@@ -2267,7 +2316,7 @@ def _render_graph_layer_lines(
         group["weight"] = max(group["weight"], item["weight"])
         group["items"].append(item)
 
-    # ── 4. 渲染 ────────────────────────────────────────────────────
+    # ── 5. 渲染 ────────────────────────────────────────────────────
     lines: list[str] = []
     for group in groups.values():
         if len(lines) >= GRAPH_MAX_LINES:

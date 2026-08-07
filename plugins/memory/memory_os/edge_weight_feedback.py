@@ -35,7 +35,11 @@ from typing import Any
 from .audit import append_audit
 from .state_overlay import _atomic_write_json
 
-HIT_BOOST = 0.05
+# 乘性强化:w += RATE × (1 − w)。1.0 是不可达渐近线 — 高分区并列消失
+# (排序始终有区分度),且 weight==1.0 从此可判定为未迁移遗留行。出生
+# 0.55 起 5 次命中 ≈0.76、10 次 ≈0.86、20 次 ≈0.96。旧版加性 +0.05 在
+# 全 1.0 出生权重下永远抬不动任何边(P3)。
+HIT_LEARNING_RATE = 0.12
 FORGET_AFTER_DAYS = 60
 FORGET_MAX_PER_RUN = 50
 STATE_FILENAME = "edge_weight_feedback_state.json"
@@ -152,8 +156,12 @@ def run_edge_weight_feedback(
                     unresolved_hits += 1
                     continue
                 edge_id = str(row["edge_id"])
+                current_weight = float(row["weight"])
                 result = update_edge_weight(
-                    conn, edge_id, float(row["weight"]) + HIT_BOOST, roots=roots,
+                    conn,
+                    edge_id,
+                    current_weight + HIT_LEARNING_RATE * (1.0 - current_weight),
+                    roots=roots,
                 )
                 if result and result.get("weight_update_noop"):
                     # F3:权重已在目标值(饱和)— 强化没有发生,不许计成

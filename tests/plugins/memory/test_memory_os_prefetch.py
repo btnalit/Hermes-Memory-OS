@@ -1266,22 +1266,83 @@ def test_deterministic_floor_recall_header_annotation(tmp_path):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_graph_layer_injection_disabled_by_default(tmp_path):
-    """Default knob=False: Related Memory section is empty (shadow-only)."""
+def test_graph_layer_injection_default_on_and_false_override_rolls_back(tmp_path):
+    """P1 反事实(两个方向):无 override 时注入默认开启(owner 裁定图谱
+    为永久能力 — 旧默认 False 时本场景无 Related Memory);显式 False
+    override 关火(开关保留作回滚)。"""
+    import sqlite3
+
+    from plugins.memory.memory_os.index import write_governed_edge
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate,
+        CrystallizedMemoryService,
+    )
+
     roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
     roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    (roots.memory_os_root / "system").mkdir(parents=True, exist_ok=True)
     store = MemoryOSStore(roots)
     store.initialize()
-    index = MemoryOSIndex(roots)
 
-    context = build_prefetch(
-        "test query",
-        budget_chars=4000,
-        store=store,
-        index=index,
+    event = EventEnvelope.from_dict(build_event(seed=201, profile="test"))
+    store.append_event(event)
+
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-default-on",
+        kind="note",
+        body="默认开启验证目标记录:回滚开关契约",
+        source_event_ids=[event.id],
     )
-    # Related Memory should not appear when knob defaults off
-    assert "Related Memory" not in context
+    decision = ApprovalDecision(
+        candidate_id="cand-default-on",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+        note="test",
+        source_state="active",
+    )
+    svc.write_approved_record(candidate, decision, file_name="default_on.md")
+    target_id = str(svc.read_records("default_on.md")[0].frontmatter["id"])
+
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+    conn = sqlite3.connect(str(index.roots.index_path))
+    conn.row_factory = sqlite3.Row
+    write_governed_edge(
+        conn,
+        index.roots,
+        from_record_type="event",
+        from_record_id=event.id,
+        to_record_type="crystallized_record",
+        to_record_id=target_id,
+        relation_type="co_occurs",
+        state="active",
+    )
+    conn.close()
+
+    # ── 无 override:默认注入 ──
+    context = build_prefetch("event", budget_chars=4000, store=store, index=index)
+    assert "Related Memory" in context, (
+        f"default-on injection expected without any override:\n{context}"
+    )
+
+    # ── 显式 False override:回滚关火 ──
+    from plugins.memory.memory_os.knob_overrides import register_override as _reg
+    _reg(
+        "graph_layer_injection_enabled",
+        False,
+        prior=True,
+        proposed_by="test",
+        approved_via="test",
+        expires_at="",
+        roots=roots,
+    )
+    context_off = build_prefetch("event", budget_chars=4000, store=store, index=index)
+    assert "Related Memory" not in context_off, (
+        f"explicit False override must roll injection back:\n{context_off}"
+    )
 
 
 def test_graph_layer_injection_enabled_produces_lines(tmp_path):

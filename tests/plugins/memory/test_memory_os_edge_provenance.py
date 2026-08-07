@@ -125,6 +125,13 @@ def test_w4_event_anchor_reaches_crystallized(tmp_path):
     edges = index.query_edges(["evt_anchor_7"], depth=1, state="active", limit=8)
     assert edges, "event anchor must reach the crystallized record via provenance edge"
     assert any(str(e.get("to_record_id")) == "cry_prov_d" for e in edges)
+    # P3:溯源边出生权重来自证据分层表(反事实:回退硬编码 1.0 即红)
+    from plugins.memory.memory_os.edge_weights import birth_weight as _bw
+
+    prov = [e for e in edges if str(e.get("to_record_id")) == "cry_prov_d"]
+    assert float(prov[0].get("weight")) == pytest.approx(
+        _bw("provenance", "source_event_provenance")
+    )
 
 
 def test_w4_injection_suppresses_unresolved_noncrystallized_targets(tmp_path):

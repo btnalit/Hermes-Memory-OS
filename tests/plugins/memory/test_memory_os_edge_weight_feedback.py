@@ -70,9 +70,10 @@ def _weight_of(index, edge_id):
 
 
 def test_r4_hit_reinforces_weight_durably(tmp_path):
-    """反事实:注入命中必须强化边权重,且经 W0 机制在重投影后保持。"""
+    """反事实:注入命中必须强化边权重(乘性 w += RATE×(1−w)),且经 W0
+    机制在重投影后保持。"""
     from plugins.memory.memory_os.edge_weight_feedback import (
-        HIT_BOOST,
+        HIT_LEARNING_RATE,
         run_edge_weight_feedback,
     )
 
@@ -84,32 +85,38 @@ def test_r4_hit_reinforces_weight_durably(tmp_path):
     assert result["status"] == "ok"
     assert result["reinforced_count"] == 1
 
+    expected = 0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
     weight, state = _weight_of(index, edge["edge_id"])
     assert state == "active"
-    assert weight == pytest.approx(0.5 + HIT_BOOST)
+    assert weight == pytest.approx(expected)
 
     # 持久性:重投影后权重保持(无 canonical 写回时 sync 会回滚 → 必红)
     index.sync_from_store(store)
     weight2, _ = _weight_of(index, edge["edge_id"])
-    assert weight2 == pytest.approx(0.5 + HIT_BOOST)
+    assert weight2 == pytest.approx(expected)
 
 
-def test_r4_weight_capped_at_one(tmp_path):
+def test_r4_cap_is_unreachable_asymptote(tmp_path):
+    """乘性强化下 1.0 不可达:近 cap 边的命中是 already_saturated no-op
+    (最小增量 0.005 防 canonical 行刷屏),权重保持 — weight==1.0 从此
+    可判定为未迁移遗留行。"""
     from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
 
     store, index = _store(tmp_path)
     edge = _active_edge(index, 1, weight=0.98)
     _record_hit(store, edge)
 
-    run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["reinforced_count"] == 0
+    assert result["already_saturated_count"] == 1
     weight, _ = _weight_of(index, edge["edge_id"])
-    assert weight == pytest.approx(1.0)
+    assert weight == pytest.approx(0.98), "near-cap weight must not creep to 1.0"
 
 
 def test_r4_cursor_prevents_double_counting(tmp_path):
     """同一条 shadow 命中记录只计一次(durable cursor)。"""
     from plugins.memory.memory_os.edge_weight_feedback import (
-        HIT_BOOST,
+        HIT_LEARNING_RATE,
         run_edge_weight_feedback,
     )
 
@@ -123,7 +130,9 @@ def test_r4_cursor_prevents_double_counting(tmp_path):
     assert second["outcome"] == "no_new_hits"
 
     weight, _ = _weight_of(index, edge["edge_id"])
-    assert weight == pytest.approx(0.5 + HIT_BOOST), "double counting detected"
+    assert weight == pytest.approx(
+        0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
+    ), "double counting detected"
 
 
 def test_r4_forgets_long_unhit_active_edges(tmp_path):
@@ -198,7 +207,7 @@ def test_f2_legacy_v0_rows_still_count_as_hits(tmp_path):
     import json as _json
 
     from plugins.memory.memory_os.edge_weight_feedback import (
-        HIT_BOOST,
+        HIT_LEARNING_RATE,
         run_edge_weight_feedback,
     )
 
@@ -229,7 +238,7 @@ def test_f2_legacy_v0_rows_still_count_as_hits(tmp_path):
     result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
     assert result["reinforced_count"] == 1
     weight, _ = _weight_of(index, edge["edge_id"])
-    assert weight == pytest.approx(0.5 + HIT_BOOST)
+    assert weight == pytest.approx(0.5 + HIT_LEARNING_RATE * (1.0 - 0.5))
 
 
 def test_f3_saturated_hit_counts_separately_and_refreshes_last_hit(tmp_path):

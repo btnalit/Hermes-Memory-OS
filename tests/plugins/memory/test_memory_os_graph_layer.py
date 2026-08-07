@@ -478,8 +478,20 @@ def test_t1_4_6_g7_deterministic_recall_independent(tmp_path):
 
 
 def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
-    """T1.5.1: Phase 1 — edges are shadow-logged, NOT injected into context."""
+    """T1.5.1(P1 更新):回滚开关关火时 — edges are shadow-logged, NOT
+    injected into context。默认已翻 True(owner 裁定),关火需显式 False
+    override;knob_disabled 的边落账但 injected=False(F2)。"""
     store, index = _store(tmp_path)
+    from plugins.memory.memory_os.knob_overrides import register_override as _reg
+    _reg(
+        "graph_layer_injection_enabled",
+        False,
+        prior=True,
+        proposed_by="test",
+        approved_via="test",
+        expires_at="",
+        roots=store.roots,
+    )
     # Seed an event so FTS5 has content
     event = EventEnvelope.from_dict(build_event(seed=100, profile="graph-layer-test"))
     store.append_event(event)
@@ -2160,7 +2172,79 @@ def test_e8c_dedup_hit_emits_short_preview_line(tmp_path):
     assert decisions[0]["injected"] is True
 
 
-def test_e8_fallback_terms_also_query_crystallized_segment():
+def test_exploration_slots_rotate_daily_and_bound_selection(tmp_path):
+    """P3 反饿死反事实:候选 > 8 时选 top-6 按权重 + 2 个探索位。
+
+    分层出生权重若无探索位,排序固化后弱边永无展示 → 永无命中 → 60 天
+    被判「无命中」处决(自我实现遗忘)。探索位按天确定性轮转(无随机数,
+    热路径可复现):同日两次调用结果完全一致;跨日探索子集变化;落选边
+    以 not_selected 落账(封闭 outcome)。
+    """
+    from plugins.memory.memory_os.prefetch import (
+        GRAPH_EXPLOIT_SLOTS,
+        GRAPH_EXPLORE_SLOTS,
+        _render_graph_layer_lines,
+    )
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="explore-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    rid_anchor = _write_cry_record(
+        store, body="锚点记录:探索位轮转契约", candidate_id="cand-exp-anchor",
+        file_name="exp_anchor.md",
+    )
+    neighbor_ids = []
+    for i in range(12):
+        neighbor_ids.append(_write_cry_record(
+            store,
+            body=f"邻居记录{i}:内容标识 NEIGHBOR-{i} 的独立正文",
+            candidate_id=f"cand-exp-{i}",
+            file_name=f"exp_{i}.md",
+        ))
+    edges = [
+        {
+            "edge_id": f"edge-exp-{i}",
+            "from_record_type": "crystallized_record",
+            "from_record_id": rid_anchor,
+            "to_record_type": "crystallized_record",
+            "to_record_id": neighbor_ids[i],
+            "relation_type": "co_occurs",
+            "weight": round(0.90 - i * 0.02, 2),  # 0.90 .. 0.68, all ≥ floor
+            "state": "active",
+        }
+        for i in range(12)
+    ]
+
+    def _selected_neighbors(day):
+        source_ids: list[str] = []
+        lines, decisions = _render_graph_layer_lines(
+            store, list(edges), anchor_ids=[rid_anchor],
+            seen=set(), source_ids=source_ids, day_ordinal=day,
+        )
+        return lines, decisions, source_ids
+
+    day0 = 738000
+    lines_a, decisions_a, sel_a = _selected_neighbors(day0)
+    lines_b, _decisions_b, sel_b = _selected_neighbors(day0)
+    assert lines_a == lines_b and sel_a == sel_b, "same-day selection must be deterministic"
+
+    cap = GRAPH_EXPLOIT_SLOTS + GRAPH_EXPLORE_SLOTS
+    assert len(lines_a) == cap, f"selection must bound lines to {cap}: {len(lines_a)}"
+    not_selected = [d for d in decisions_a if d["outcome"] == "not_selected"]
+    assert len(not_selected) == 12 - cap, "the rest must be ledgered as not_selected"
+
+    # top-6 按权重恒在(exploit 位)
+    top6 = {f"crystallized_record:{nid}" for nid in neighbor_ids[:GRAPH_EXPLOIT_SLOTS]}
+    assert top6 <= set(sel_a), f"exploit slots must keep the top-{GRAPH_EXPLOIT_SLOTS}"
+
+    # 探索位跨日轮转:一周内至少出现两种探索子集(确定性哈希,非随机)
+    explore_sets = set()
+    for day in range(day0, day0 + 7):
+        _lines, _decisions, sel = _selected_neighbors(day)
+        explore_sets.add(tuple(sorted(set(sel) - top6)))
+    assert len(explore_sets) >= 2, (
+        f"exploration slots must rotate across days: {explore_sets}"
+    )
     """E8b counterfactual(生产复验补钉):逐词回退同样必须带结晶限定段。
 
     生产实测:主查询双段皆 0(AND 失效同样打击结晶限定段)→ 走逐词回退,

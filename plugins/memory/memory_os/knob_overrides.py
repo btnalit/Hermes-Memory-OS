@@ -69,9 +69,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # Graph injection. Default True: owner 裁定(2026-08-06/07)图谱为永久
+    # 能力,不需要人工介入 — the switch exists for rollback, not for
+    # graduation(同 lane_continuity_freshness_enabled 先例)。旧默认 False
+    # 靠一条无过期 override 撑着:override 一旦丢失/误撤,注入静默变暗且
+    # 监控结构上看不见(E5 事故形状)。注意 resolve_knob 用调用点传入的
+    # default,此处仅元数据 — 与 prefetch 调用点同步翻转。
     "graph_layer_injection_enabled": {
         "module": "prefetch",
-        "default": False,
+        "default": True,
         "kind": "lane_switch",
         "allowed": [True, False],
         "meta": False,
