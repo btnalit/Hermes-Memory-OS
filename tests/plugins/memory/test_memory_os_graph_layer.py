@@ -1916,6 +1916,87 @@ def test_r1_structural_source_has_no_candidate_state():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# E8 — 锚点收集回退:多词 AND 失效与中文丢词(图谱注入的最后一公里)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 生产实锤(2026-08-07):plan_query_route 的 `entities or chinese_keywords`
+# 在 query 含任何拉丁词时把中文实词整体丢弃;派生出的多词 search_query
+# (如 'Memory-OS Hermes')在 FTS AND 语义下 0 命中(两词单查各 5 命中,
+# 交集空)。锚点恒空 → 图谱一跳展开永不触发 → shadow 月命中仅 4 条、
+# owner 实测"完全没感觉到注入"。历史 1019 次 prefetch 仅 19.5% 有 FTS
+# 命中。修复只动 _collect_anchor_ids(锚点专用回退),不碰全局共享的
+# plan_query_route 谓词(改共享谓词前须全面 grep — W 规则)。
+
+
+class _E8MockIndex:
+    """可编程 search mock:按查询词返回预设命中。"""
+
+    def __init__(self, hits_by_query):
+        self.hits_by_query = hits_by_query
+        self.queries = []
+
+    def search(self, query, limit=5):
+        self.queries.append(query)
+        hits = self.hits_by_query.get(query, [])
+        return {"hits": [{"record_id": rid, "record_type": "crystallized_record"} for rid in hits]}
+
+
+def test_e8_and_failure_falls_back_to_per_term_union():
+    """E8 counterfactual:多词派生查询 0 命中时,必须逐词并集回退。
+
+    无修复:_collect_anchor_ids 一次 AND 查询 0 命中即返回 [] → 必红。
+    """
+    index = _E8MockIndex({
+        "Memory-OS Hermes": [],
+        "Memory-OS": ["cry_a"],
+        "Hermes": ["cry_b"],
+    })
+    anchors = _collect_anchor_ids("聊聊 Memory-OS 和 Hermes 的联动", index)
+    assert "cry_a" in anchors and "cry_b" in anchors, (
+        f"per-term fallback must recover anchors from AND-failed query: {anchors}"
+    )
+
+
+def test_e8_chinese_keywords_recovered_when_latin_terms_miss():
+    """E8 counterfactual:拉丁词短路丢弃的中文关键词必须参与锚点回退。"""
+    from plugins.memory.memory_os.prefetch import set_fast_path_keywords
+
+    index = _E8MockIndex({
+        "Hermes": [],          # 派生查询(单拉丁词)未命中
+        "部署": ["cry_zh"],    # 中文关键词命中
+    })
+    set_fast_path_keywords(["部署"])
+    try:
+        anchors = _collect_anchor_ids("Hermes 的部署情况怎么样了", index)
+    finally:
+        set_fast_path_keywords(None)
+    assert anchors == ["cry_zh"], (
+        f"Chinese keywords dropped by the entities-or short-circuit must be "
+        f"retried for anchors: {anchors}"
+    )
+
+
+def test_e8_direct_hit_needs_no_fallback():
+    """回归:派生查询直接命中时不回退(单次 search,行为不变)。"""
+    index = _E8MockIndex({"Memory-OS Hermes": ["cry_direct"]})
+    anchors = _collect_anchor_ids("聊聊 Memory-OS 和 Hermes", index)
+    assert anchors == ["cry_direct"]
+    assert index.queries == ["Memory-OS Hermes"], (
+        f"no fallback queries expected on direct hit: {index.queries}"
+    )
+
+
+def test_e8_fallback_bounded():
+    """回退有界:锚点总数 ≤5,查询词数有上限。"""
+    hits = {f"w{i}": [f"cry_{i}"] for i in range(10)}
+    hits[" ".join(f"w{i}" for i in range(6))] = []
+    index = _E8MockIndex(hits)
+    # 构造派生出 6 个拉丁词的 query
+    anchors = _collect_anchor_ids("check w0 w1 w2 w3 w4 w5 please", index)
+    assert len(anchors) <= 5, f"anchor cap must hold: {anchors}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # W1 (E2/E3) — 去重下沉写入口 + structural 收回语义提名权 + 配对去偏置
 # ═══════════════════════════════════════════════════════════════════════════
 
