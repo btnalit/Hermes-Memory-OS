@@ -3857,6 +3857,20 @@ OwnerGate 永久边界,错误的边应由使用信号淘汰而非人工把关。
 active→注入消费+反馈遗忘、invalidated 终态;digest 不再是任何边状态的
 消费者(census 断言 `EDGE_REVIEW_DIGEST_STATE` 不复存在)。
 
+**CH.3 部署与生产验证(2026-08-07 03:26Z 实测)**:PR #38 → main
+`766d797`(CI dispatch success);deploy apply+postcheck 全绿;
+`graph_layer_injection_enabled` override 写入
+(`ko_20260807T032634339954Z_2ead5a8827`,无过期,
+approved_via=owner-decision-2026-08-06-dynamic-graph-auto-injection,
+resolve 实测 True)。手动 loop 首轮:**edge_promotion 自动激活 25 条**
+(backlog 1274 递减中,TTL 100)、**edge_weight_feedback outcome=
+reinforced**(消化 4 条 shadow 命中记录、32 条边加权、0 误杀 — 防误杀
+水位实证)。Full Monitor **0 FAIL / 5 WARN**,且
+`v2_output_knob_override_expired` WARN 消失(E5 告警闭环:过期→告警→
+owner 决策→续期→告警解除,全链路走通)。全量测试 3240 passed /
+13 skipped(首跑抓到 1 条漏改的 vector candidate 断言 — 第五次
+"定向绿≠全量绿")。证据级别:`deploy_pass` + `live_monitor_pass`。
+
 **CH.2 部署与验证（同日）**：PR #36 → main `1580cc0`,CI dispatch
 success;`/opt` ff `92db7c6 → 1580cc0`,deploy apply+postcheck 全绿
 （`fail=[]`）;Full Monitor **0 FAIL / 6 WARN**。新出现的
