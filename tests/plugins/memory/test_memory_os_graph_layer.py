@@ -2025,6 +2025,34 @@ def test_e8_crystallized_hits_prioritized_into_anchor_pool():
     assert len(anchors) <= 5
 
 
+def test_e8_fallback_terms_also_query_crystallized_segment():
+    """E8b counterfactual(生产复验补钉):逐词回退同样必须带结晶限定段。
+
+    生产实测:主查询双段皆 0(AND 失效同样打击结晶限定段)→ 走逐词回退,
+    而回退只查通用 → 锚点仍被事件填满,结晶命中进不了池。无修复必红。
+    """
+    index = _E8MockIndex(
+        {
+            "Memory-OS Hermes": [],
+            "Memory-OS": ["evt_a", "evt_b", "evt_c"],
+            "Hermes": ["evt_d", "evt_e"],
+        },
+        typed_hits={
+            ("Memory-OS Hermes", "crystallized_record"): [],
+            ("Memory-OS", "crystallized_record"): ["cry_target"],
+            ("Hermes", "crystallized_record"): [],
+        },
+    )
+    anchors = _collect_anchor_ids("聊聊 Memory-OS 和 Hermes 的联动", index)
+    assert "cry_target" in anchors, (
+        f"per-term fallback must include the crystallized segment: {anchors}"
+    )
+    assert anchors[0] == "cry_target", (
+        f"crystallized hits must lead the pool in fallback too: {anchors}"
+    )
+    assert len(anchors) <= 5
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # W1 (E2/E3) — 去重下沉写入口 + structural 收回语义提名权 + 配对去偏置
 # ═══════════════════════════════════════════════════════════════════════════
