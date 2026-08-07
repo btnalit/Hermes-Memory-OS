@@ -1955,16 +1955,19 @@ def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
         if kw in redacted and kw not in _FAST_PATH_STOP_WORDS
     ]
     fallback_terms = _dedupe(derived_terms + chinese_terms)[:6]
-    seen_ids: list[str] = []
+    # 回退同样双段:结晶限定段先收(独立池,防被事件填满),通用段后补。
+    crystallized_pool: list[str] = []
+    general_pool: list[str] = []
     for term in fallback_terms:
-        if len(seen_ids) >= 5:
+        if len(crystallized_pool) + len(general_pool) >= 10:
             break
+        for rid in _hits_of(term, limit=2, record_type="crystallized_record"):
+            if rid not in crystallized_pool:
+                crystallized_pool.append(rid)
         for rid in _hits_of(term, limit=3):
-            if rid not in seen_ids:
-                seen_ids.append(rid)
-            if len(seen_ids) >= 5:
-                break
-    return seen_ids
+            if rid not in general_pool:
+                general_pool.append(rid)
+    return _dedupe(crystallized_pool + general_pool)[:5]
 
 
 # W3 词表守卫锚点:图谱注入只消费此状态的边;owner approve(active 化)
