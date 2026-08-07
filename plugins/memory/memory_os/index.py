@@ -214,7 +214,11 @@ class MemoryOSIndex:
         finally:
             conn.close()
 
-    def search(self, query: str, *, limit: int = 5) -> dict[str, Any]:
+    def search(self, query: str, *, limit: int = 5, record_type: str | None = None) -> dict[str, Any]:
+        """Search the FTS projection. *record_type* optionally restricts hits
+        to one record class (E8b: the anchor collector uses
+        record_type="crystallized_record" because edge density lives in the
+        crystallized layer while generic hits drown in event volume)."""
         if not self.roots.index_path.exists():
             return {"mode": "missing", "tokenizer": "", "hits": []}
         conn = sqlite3.connect(self.roots.index_path)
@@ -222,9 +226,9 @@ class MemoryOSIndex:
         try:
             _initialize_schema(conn)
             tokenizer = _metadata_value(conn, "fts_tokenizer") or "unknown"
-            hits = _fts_hits(conn, query, limit=limit)
+            hits = _fts_hits(conn, query, limit=limit, record_type=record_type)
             if not hits:
-                hits = _like_hits(conn, query, limit=limit)
+                hits = _like_hits(conn, query, limit=limit, record_type=record_type)
             return {"mode": "indexed", "tokenizer": tokenizer, "hits": hits}
         finally:
             conn.close()
@@ -1179,35 +1183,55 @@ def _normalize_projection_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _fts_hits(conn: sqlite3.Connection, query: str, *, limit: int) -> list[dict[str, str]]:
+def _fts_hits(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int,
+    record_type: str | None = None,
+) -> list[dict[str, str]]:
     if not query.strip():
         return []
+    type_clause = " and record_type = ?" if record_type else ""
+    params: tuple = (query, record_type, limit) if record_type else (query, limit)
     try:
         rows = conn.execute(
-            """
+            f"""
             select record_type, record_id, title, text
             from memory_fts
-            where memory_fts match ?
+            where memory_fts match ?{type_clause}
             limit ?
             """,
-            (query, limit),
+            params,
         ).fetchall()
     except sqlite3.Error:
         return []
     return [_row_to_hit(row) for row in rows]
 
 
-def _like_hits(conn: sqlite3.Connection, query: str, *, limit: int) -> list[dict[str, str]]:
+def _like_hits(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int,
+    record_type: str | None = None,
+) -> list[dict[str, str]]:
     if not query.strip():
         return []
+    type_clause = " and record_type = ?" if record_type else ""
+    params: tuple = (
+        (f"%{query}%", f"%{query}%", record_type, limit)
+        if record_type
+        else (f"%{query}%", f"%{query}%", limit)
+    )
     rows = conn.execute(
-        """
+        f"""
         select record_type, record_id, title, text
         from memory_fts
-        where title like ? or text like ?
+        where (title like ? or text like ?){type_clause}
         limit ?
         """,
-        (f"%{query}%", f"%{query}%", limit),
+        params,
     ).fetchall()
     return [_row_to_hit(row) for row in rows]
 
