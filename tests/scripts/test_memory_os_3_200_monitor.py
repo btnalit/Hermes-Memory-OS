@@ -8520,3 +8520,61 @@ def test_v2_graph_injection_shadow_state_collection_and_wiring(tmp_path):
         item["code"] == "v2_graph_injection_shadow_collection_failed"
         for item in failed["warn"]
     )
+
+
+def test_r4_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """双层白名单防漂移守卫(S3 生产验证实锤):R4 v1 计数要抵达监控读者,
+    必须先穿过 loop 包装器的键透传、再穿过采集端 _edge_fields 过滤 —
+    两层漏任何一层,计数对读者即不存在。本测试用真实包装器的输出喂真实
+    采集器,端到端断言四个计数存活。"""
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_weight_feedback as ewf
+
+    def _fake_run(index_path, *, index=None, audit_path=None, now=None):
+        return {
+            "status": "ok", "outcome": "reinforced",
+            "new_hit_record_count": 3, "reinforced_count": 1,
+            "already_saturated_count": 2, "skipped_not_injected_count": 4,
+            "forgotten_count": 5, "invalidated_never_hit_count": 5,
+            "forget_eligible_backlog": 7, "unresolved_hit_count": 0,
+            "failed_count": 0, "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ewf, "run_edge_weight_feedback", _fake_run)
+    wrapper_summary = runner._edge_weight_feedback({})
+
+    report = {
+        "cycle_id": "cycle-guard-1",
+        "status": "ok",
+        "steps": [{
+            "step": "edge_weight_feedback",
+            "status": "ok",
+            "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "reports.jsonl").write_text(
+        _json.dumps(report) + "\n", encoding="utf-8",
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    evidence = namespace["cognitive_loop_step_evidence"]()
+    surfaced = evidence["edge_step_results"]["edge_weight_feedback"]
+    assert surfaced["already_saturated_count"] == 2
+    assert surfaced["skipped_not_injected_count"] == 4
+    assert surfaced["invalidated_never_hit_count"] == 5
+    assert surfaced["forget_eligible_backlog"] == 7
+    assert surfaced["reinforced_count"] == 1
