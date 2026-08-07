@@ -3887,7 +3887,14 @@ index.search 加 record_type 过滤+锚点双段;②主查询双段皆 0(AND 失
 全量 3246 passed / 13 skipped。附带观察:一条边目标显示
 [unresolved:cry_...](指向已不在现役的结晶记录)— 属既有 fallback
 设计,权重反馈遗忘或 reject_edge 可清理,不阻塞。
-**Gateway 需再重启一次以加载 E8/E8b(时机归 owner)。**
+**E8c(owner 重启后复验,06:30Z 实锤)**:锚点命中、查到边、shadow
+落账(月来首次新行),但目标恰好已被 Indexed/Crystallized 段展示 →
+跨段去重静默吃光注入行 → Related Memory 恒空。小图谱阶段检索命中集
+与一跳邻居集高度重叠,静默去重让图谱贡献永远隐形。修(PR #44
+`0798c2a`):去重命中降级为 ↺ 短关系行(只含关系+id 引用,≤160 字符)
+——「已展示记忆间的关联」是图谱独有信息。端到端终验:两条不同中文
+query 的 Related Memory 均出现(完整行+↺ 行混合)。全量 3247 passed。
+**Gateway 需再重启一次以加载 E8b/E8c(时机归 owner)。**
 
 3. ~~Gateway 24 天未重启~~ **实测更正(owner 指出后复查)**:初判把主机上
    无关测试容器的 s6 监督进程误认作 gateway——真实 gateway 进程为
