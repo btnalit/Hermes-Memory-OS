@@ -122,6 +122,38 @@ def test_exposure_stats_separate_legacy_debt_from_schema_era_health_and_freeze_g
     assert stats["conservation_total_passes"] is True
 
 
+def test_v1_era_gapped_rows_are_debt_not_permanent_gate_fail(tmp_path):
+    """纪元 v1→v2 反事实(2026-08-07):v1 曾宣称归属完备,生产证伪 —
+    E8c 时代 graph 路径留下一条已展示但 source_ids 为空的 v1 纪元内自然行,
+    纪元门按全纪元计 gap → 永久 FAIL 且无法追溯补齐。版本升级后该行必须
+    降为已分类债务:不进 schema_era gap 门(修复缺席=常量仍为 v1 时本测试
+    必红),但 all_history 与 legacy 债务计数保留(分类而非抹除)。"""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "v1-era-graph-gap",
+        "created_at": "2026-08-07T09:51:49Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        # 字面 v1(不是常量):钉住的就是「旧纪元行不再受门约束」这件事
+        "attribution_schema": "memory-os.memory_sources_attribution.v1",
+        "selected": [_section(source_ids=[])],
+        "dropped": [],
+    })
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 8, 0, tzinfo=timezone.utc))
+
+    assert stats["schema_era_attribution_gap_count"] == 0, (
+        "v1 rows must leave the gated set after the era bump"
+    )
+    assert stats["all_history_attribution_gap_count"] == 1, (
+        "debt is classified, never erased"
+    )
+    assert stats["legacy_unattributed_record_count"] == 1
+    # 零 v2 样本:诚实护栏 — no-sample + 冻结,不买绿
+    assert stats["schema_era_health"] == "healthy_no_sample"
+    assert "attribution_era_no_sample" in stats["freeze_reasons"]
+
+
 def test_budget_pressure_streak_requires_consecutive_calendar_days(tmp_path):
     store = _store(tmp_path)
     append_memory_source_record(store.roots, {

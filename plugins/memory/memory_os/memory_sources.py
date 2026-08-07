@@ -26,7 +26,15 @@ SCHEMA_VERSION = "memory-os.memory_sources.v0"
 # handles rollup rows written before `trigger_class` existed. Without this
 # boundary, fixing the producer could never clear the FAIL: on production all 69
 # gapped rows are natural rows, so they sit inside the gated era forever.
-ATTRIBUTION_SCHEMA_VERSION = "memory-os.memory_sources_attribution.v1"
+# v1→v2(2026-08-07):v1 宣称「归属完备 producer」,生产数据证伪 — graph
+# 注入路径(F1 方向归一之前)存在一条 596 字符已展示、source_ids 为空的
+# v1 纪元内自然行(09:51Z),而纪元门按全纪元计 gap,该行会永久 FAIL 且
+# 无法追溯补齐(披露已发生)。按既有纪元边界模式处理:v1 行整体降为已
+# 分类债务(legacy_unattributed_record_count,all_history 计数保留),
+# v2 从今日(S1 归属线程钉死后的首个真正完备 producer)起受门约束;
+# 零 v2 样本走既有 healthy_no_sample + attribution_era_no_sample 冻结
+# 护栏,不买绿。
+ATTRIBUTION_SCHEMA_VERSION = "memory-os.memory_sources_attribution.v2"
 LAST_SCHEMA_VERSION = "memory-os.memory_sources_last.v0"
 HISTORY_SCHEMA_VERSION = "memory-os.memory_sources_history.v0"
 STATS_SCHEMA_VERSION = "memory-os.memory_sources_stats.v0"
