@@ -988,7 +988,16 @@ hermes_cli 的 `import agent.portal_tags` 永远命中幽灵包（namespace 动�
 
 ### 13.3 Owner 决策点（不阻塞上表，但阻塞"激活"）
 
-1. **S6**：`casual_continuity` 路由下 Overlay 的 active_projects 是否应一并抑制（当前泄漏锚点首 200 字符，含工具结果片段）—— 影响 W7 的最终形态。
+1. **S6 —— 已决（2026-08-06 终局）**：owner 裁定「状态层百分之百原样注入，
+   S6 降为观察项。状态层是整个记忆系统的精髓，活起来最重要的东西」。
+   演进过程：首版实现为 casual 路由整段排除 Overlay（owner 指出砍粗——
+   casual 是兜底默认路由，抑制面远大于泄漏面）→ 二版精确化为仅抑制
+   active_projects 一节 → 终局撤销一切路由抑制。现状：所有路由下 Overlay
+   全部节完整注入（Active 为 W7 live 覆盖后的实时锚点）；闲聊上下文携带
+   前台任务内容为**已知观察项**，不做代码抑制；owner 决策由
+   `test_s6_final_overlay_injects_fully_on_every_route` 钉死——任何重新
+   引入的路由抑制必须先红该测试并经 owner 重新决策。router 的整段排除
+   已撤销（`test_w7_s6_casual_continuity_does_not_exclude_overlay_section`）。
 2. **注入续期**：`graph_layer_injection_enabled` 是否重开、续期时限与复查日期。
 3. **V3 激活门判据**：见 13.4 —— 现判据在当前使用模式下实际不可达，改或不改都需 owner 明确决定。
 

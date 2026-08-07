@@ -580,7 +580,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Memory State Overlay", _state_overlay_lines(
         store, roots=store.roots, current_task_anchor=current_task_anchor,
-        session_id=session_id))
+        session_id=session_id, query=query))
     # Single-pass event read: three sections below (Continuity Bridge, Recent
     # Cross-Session, Recent Event Summaries) filter the same canonical event
     # stream. Scanning it once per prefetch keeps the per-turn cost flat in
@@ -1128,6 +1128,7 @@ def _state_overlay_lines(
     roots: Any,
     current_task_anchor: str | None = None,
     session_id: str = "",
+    query: str = "",
 ) -> list[str]:
     """Memory State Overlay section — derived projection for conversation context.
 
@@ -1153,6 +1154,12 @@ def _state_overlay_lines(
         from .state_overlay_schema import OVERLAY_SECTION_FIELDS
     except ImportError:
         return []
+
+    # S6 终局(owner 决策 2026-08-06):状态层在所有路由下百分之百原样注入,
+    # 包括 casual_continuity 兜底 — 「状态层是整个记忆系统的精髓」。闲聊
+    # 上下文携带前台任务内容属已知观察项,不做代码抑制;任何重新引入的
+    # 路由抑制(整段或按节)先红 test_s6_final_overlay_injects_fully_on_every_route,
+    # 须经 owner 重新决策。``query`` 参数保留:路由感知的观察/演进入口。
 
     # ── Fast path: read cron-cached overlay ──────────────────────────
     cached_path = roots.memory_os_root / "system" / "state_overlay" / "current.json"

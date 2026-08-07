@@ -425,10 +425,10 @@ def _route_exclusion_reason(section: ContextSection, route: str) -> str:
     if route == "casual_continuity" and (
         name == "current foreground task"
         or name == "working memory"
-        # W7/S6 (owner 决策 2026-08-06):Overlay 的 active_projects 携带
-        # 锚点首 200 字符 — 闲聊路由既然主动屏蔽前台任务,Overlay 不得
-        # 开侧门(W7 覆盖修复使其永远新鲜,不堵则泄漏稳定化)。
-        or name == "memory state overlay"
+        # S6 注(2026-08-06 二次精确化):Overlay 不在此整段排除。casual 是
+        # 兜底默认路由,整段排除会让所有无任务信号的消息丢失全部状态层;
+        # 泄漏面只有前台任务内容,由 prefetch._state_overlay_lines 按路由
+        # 抑制 active_projects 一节(suppress_active_projects),其余节保留。
         or "diagnostic" in name
         or "candidate" in name
         or name == "crystallized memory"

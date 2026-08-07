@@ -601,18 +601,19 @@ def test_context_router_casual_and_ambiguous_exclude_working_memory():
     assert any(item["section"] == "Working Memory" and "route_excludes_section" in item["reason_codes"] for item in ambiguous["dropped_sections"])
 
 
-def test_w7_s6_casual_continuity_excludes_state_overlay():
-    """S6 (owner 决策 2026-08-06:该抑制就抑制):casual_continuity 路由必须排除
-    Memory State Overlay。
+def test_w7_s6_casual_continuity_does_not_exclude_overlay_section():
+    """S6 二次精确化(owner 2026-08-06 追问后,语义反转):casual 路由**不再**
+    整段排除 Memory State Overlay。
 
-    泄漏机制:路由排除了 current foreground task,但 Overlay 的
-    active_projects 携带锚点首 200 字符(生产样本含 untrusted_tool_result
-    片段)→ 前台任务内容从 Overlay 侧门漏进闲聊上下文。W7 覆盖修复会把
-    Overlay 的 Active 变得永远新鲜,不堵侧门泄漏就会稳定化。
+    casual_continuity 是兜底默认路由 — 第一版整段排除让所有无任务信号的
+    消息丢失全部状态层(open_threads/recent_events/owner_preferences 均无
+    泄漏风险且对闲聊延续有用)。前台任务泄漏面由 prefetch 侧的
+    suppress_active_projects 按路由抑制 active_projects 一节承接
+    (见 test_memory_os_state_overlay 的 test_s6_* 反事实)。
     """
     overlay = ContextSection(
         section="Memory State Overlay",
-        text="- [Active] 修复图谱治理断链(来自锚点的前台任务内容)",
+        text="- [Threads] 开放线程对闲聊有用",
         source_class="state_overlay",
     )
     carryover = ContextSection(
@@ -624,11 +625,11 @@ def test_w7_s6_casual_continuity_excludes_state_overlay():
         "你觉得最近怎么样", sections=[overlay, carryover], budget_chars=1200,
     )
     assert casual["route"] == "casual_continuity"
-    assert any(
+    assert not any(
         item["section"] == "Memory State Overlay"
         and "route_excludes_section" in item["reason_codes"]
         for item in casual["dropped_sections"]
-    ), f"Overlay must be excluded on casual route: {casual['dropped_sections']}"
+    ), f"Overlay section must not be blanket-excluded on casual route: {casual['dropped_sections']}"
 
 
 def test_prefetch_context_router_apply_casual_does_not_treat_query_anchor_as_task(tmp_path):
