@@ -19,6 +19,19 @@ SCHEMA_VERSION = "memory-os.context_router.v0"
 INCLUDE_THRESHOLD = 0.30
 RANKING_MODE = "score_then_budget"
 
+# 图谱锚点溯源加分(CK 2026-08-07):Related Memory 的内容由当前 query 的
+# FTS 命中锚点一跳展开(锚点收集含 E8b 中文回退)— 相关性已在上游用真实
+# 查询词建立。本文件的打分词表(ASCII 实体 + 固定中文词表)是更弱的谓词,
+# 让它重新裁决会出现「FTS 命中、词表盲区、整段否决」:生产实测图谱行对
+# 纯中文 query 恒 0 分被 below_threshold 掉,锚点机制白干。加分不豁免
+# 风险码(-0.80 仍可击杀泄漏行)、路由排除与预算排序。
+# 刻意不含 "indexed":casual 兜底路由下词表不匹配的 Indexed Recall 内容
+# 不免票是被测试钉住的既有强度(test_casual_continuity_report_selects_
+# safe_carryover_without_mechanism_working);FTS 命中被词表二审否决的
+# 同族问题对 indexed 是否也该修,留 owner 单独裁决(待办登记)。
+_QUERY_PROVENANCE_SOURCE_CLASSES = frozenset({"graph_layer"})
+GRAPH_ANCHOR_PROVENANCE_SCORE = 0.35
+
 # FIX 3 (P3 audit): `allocated_chars` on each selected-section entry below is
 # an ADVISORY per-section budget projection computed by this dry-run/apply
 # router only -- it has no consumer. The real "apply" path
@@ -459,6 +472,12 @@ def _score_section(section: ContextSection, *, query: str, current_task_anchor: 
     if section.section == "Current Foreground Task" or entity_matches & anchor_terms["entities"]:
         score += 0.50
         reasons.append("foreground_anchor")
+    if (
+        section.source_class in _QUERY_PROVENANCE_SOURCE_CLASSES
+        and section.text.strip()
+    ):
+        score += GRAPH_ANCHOR_PROVENANCE_SCORE
+        reasons.append("graph_anchor_provenance")
     if section.metadata and section.metadata.get("fresh"):
         score += 0.10
         reasons.append("freshness_match")

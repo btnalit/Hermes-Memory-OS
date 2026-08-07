@@ -774,3 +774,65 @@ def test_context_router_cli_dry_run_outputs_json_and_does_not_write_store(tmp_pa
     assert output["mode"] == "dry_run"
     assert output["route"] == "active_task"
     assert before_audit == after_audit
+
+
+def test_ck_graph_anchor_provenance_passes_router_for_chinese_lines():
+    """CK 反事实(Hermes agent 真实体验实锤):图谱段相关性由锚点机制在
+    上游用真实查询词建立(FTS 命中一跳),router 的固定词表是更弱谓词 —
+    修复缺席时,与词表零交集的中文图谱行恒 0 分被 below_threshold 否决,
+    锚点机制白干(生产:shadow 活跃 23 边/4 关系,上下文却无 Related
+    Memory 段)。加分后免二审,但不豁免风险码与路由排除。"""
+    graph = ContextSection(
+        section="Related Memory",
+        # 新行文法、纯中文、与 _CHINESE_KEYWORDS 词表和 query 均无交集
+        text="- 「昨晚聊到的晚饭」同源共现于:上次说想试那家新开的粤菜馆,约在周五(关联度 0.55)",
+        source_class="graph_layer",
+    )
+    report = route_context_sections(
+        "那家店后来去了吗?",
+        sections=[graph],
+        current_task_anchor="",
+        budget_chars=1200,
+    )
+    selected = {item["section"] for item in report["selected_sections"]}
+    assert "Related Memory" in selected, (
+        f"anchor-established graph section must not be re-vetoed by the weaker "
+        f"vocabulary predicate: {report['dropped_sections']}"
+    )
+    entry = next(i for i in report["selected_sections"] if i["section"] == "Related Memory")
+    assert "graph_anchor_provenance" in entry["reason_codes"]
+
+
+def test_ck_graph_provenance_does_not_exempt_risk_codes():
+    """风险码仍可击杀:含机制词的图谱行 0.35-0.80 < 0.30 → 依旧丢弃。"""
+    leaky = ContextSection(
+        section="Related Memory",
+        text="- 「注入卡片」同源共现于:system prompt 与 prefetch 的内部反思细节(关联度 0.55)",
+        source_class="graph_layer",
+    )
+    report = route_context_sections(
+        "随便聊聊今天的天气",
+        sections=[leaky],
+        current_task_anchor="",
+        budget_chars=1200,
+    )
+    dropped = {item["section"] for item in report["dropped_sections"]}
+    assert "Related Memory" in dropped, "mechanism-leak graph lines must still die"
+    entry = next(i for i in report["dropped_sections"] if i["section"] == "Related Memory")
+    assert "mechanism_leak_detected" in entry["reason_codes"]
+
+
+def test_ck_graph_provenance_requires_nonempty_text_and_not_indexed():
+    """空文本无加分;indexed 刻意不在溯源集合(casual 路由词表不匹配的
+    Indexed 内容不免票 — 既有测试钉住的强度,是否放宽归 owner 裁决)。"""
+    from plugins.memory.memory_os.context_router import (
+        _QUERY_PROVENANCE_SOURCE_CLASSES,
+        _score_section,
+    )
+
+    assert _QUERY_PROVENANCE_SOURCE_CLASSES == frozenset({"graph_layer"})
+
+    empty = ContextSection(section="Related Memory", text="   ", source_class="graph_layer")
+    score, reasons = _score_section(empty, query="随便聊聊", current_task_anchor="")
+    assert "graph_anchor_provenance" not in reasons
+    assert score < 0.30

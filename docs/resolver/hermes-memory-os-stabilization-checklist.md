@@ -3939,6 +3939,15 @@ first_injection_at=2026-08-07 起算 60 天,过密图谱（refines 为主,重归
 `invalidated_never_hit_count` 持续走高 = 探索位轮转覆盖不足（饿死信号）。
 届时另核 09:55Z 失控 disable 行来源（CJ 节,owner 确认是否本人所写）。
 
+**Indexed Recall 的 router 二审问题（CK 登记 → 当日按历史数据裁定:维持
+现状,不修）**：owner 追问「历史数据能否立刻下结论」— 能。全史 1030 条
+披露行实测:Indexed 非空出现 303 次,选入 160(52.8%);丢弃 143 中
+route_excludes 123(旧版路由规则,已不在现行代码)、风险码击杀 53(防
+泄漏正常工作)、**词表 below_threshold 仅 18(6%)**;近期切片(08-01 起,
+E8b 后)选入 14/词表否决 1/风险 0 — 当前流量下几乎不存在。6% 不构成
+放宽 casual 防线的理由。对照:同账本 Related Memory 全史仅出现 1 次
+(CK 的必要性一个数字说明)。若未来 agent 体验反例出现可凭同一账本重查。
+
 **V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
 标准：届时 `v3_seed_evidence_snapshot.activation_evidence_ready=True` 且
 Full Monitor 0 FAIL → 开启 R4（`wandering_enabled=true` 影子观察 14 天再评
@@ -5157,3 +5166,25 @@ first_injection_at=2026-08-07 起算,首波大规模遗忘潮预期落点 **2026
   effective≠expected 判据（首个生产 run 抓到失控 disable 行）、双层白名单
   剥计数修复、归属纪元 v1→v2（完备性宣称被生产证伪）;全量 3267/13,
   终验 102/4/0。
+
+### CK — router 弱谓词二审否决图谱段（2026-08-07 深夜,Hermes agent 亲测反馈）
+
+owner 转达 agent 真实体验:shadow 活跃(23 边/4 关系/带权重)但上下文无
+Related Memory 段。agent 自诊「cry_xxx 触发 mechanism_leak 扣 0.80」——
+**细节不对但结论对**:`_MECHANISM_PATTERNS` 并不匹配 cry_,旧行真正死因
+是纯零分(ASCII 实体不可能与中文 query 相交、固定中文词表匹配不上)
+below_threshold。且 agent 看到的是**旧渲染器**输出:gateway 23:44(CST)
+才重启,其引用的 `_resolve_edge_target_preview` 在 S1 已删除。
+
+**结构性缺陷(新行文法也逃不掉的那部分)**:图谱段相关性由锚点机制在
+上游用真实查询词建立(FTS 命中一跳,含 E8b 中文回退),router 的固定词表
+是更弱的谓词 — 让它重新裁决 = 「FTS 命中、词表盲区、整段否决」,锚点
+机制白干。修复:`_score_section` 给 `source_class=='graph_layer'` 且非空
+文本 +0.35(`graph_anchor_provenance` 独立 reason code)。不豁免三样:
+风险码(-0.80 仍击杀泄漏行,0.35-0.80<0.30 反事实钉住)、路由排除
+(ambiguous_recall/diagnostic 照旧)、预算排序。**刻意不含 indexed**:
+casual 兜底路由下词表不匹配的 Indexed 内容不免票是被
+`test_casual_continuity_report_selects_safe_carryover_without_mechanism_
+working` 钉住的既有强度 — 实现首版含 indexed 被该测试当场拦下,按
+「不放宽既有测试迁就新改动」裁决收窄;indexed 的同族问题(FTS 命中被
+词表二审否决)是否也修,归 owner 单独裁决(待办)。
