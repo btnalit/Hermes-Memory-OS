@@ -3787,7 +3787,33 @@ DEEP_ANALYSIS 第 11–13 节（图谱 E1–E7、Overlay S1–S6、任务表 W0�
 - 证据级别：`deploy_pass` + `live_monitor_pass`（0 FAIL）。
 - 待观察（非阻塞）：下一期 owner digest 应出现 Pending Edge Review
   （top-10 + 批量语法）;branch push/PR 未自动触发 CI 的原因待下次遇到
-  再查（dispatch 路径可用）。
+  再查（dispatch 路径可用，实测为 GitHub Actions 服务端瞬时故障——两次
+  dispatch run 被分配 runner 后零 step 挂 15 分钟被判死取消，重试自愈）。
+
+### CH.2 —— S6 终局：状态层百分之百原样注入（owner 决策，2026-08-06）
+
+部署当晚 owner 追问 S6 触发机制后确认：首版实现（casual 路由整段排除
+Overlay）**砍粗了** —— casual_continuity 是兜底默认路由（无任务/诊断/
+候选/低线索信号的消息全部落入），整段排除让这些消息丢失全部状态层，
+抑制面远大于泄漏面（泄漏面只有前台任务内容一节）。owner 原话两句本为
+一体：「该默认抑制就该抑制」+「关键是看怎么样优化精确的自动选路」，
+首版只执行了前半句。
+
+演进：①整段排除（部署过，存活数小时）→ ②精确化为仅抑制 active_projects
+一节（TDD 完成、未部署）→ ③owner 终局裁定「**状态层百分之百原样注入，
+S6 降为观察项。状态层是整个记忆系统的精髓，活起来最重要的东西**」——
+撤销一切路由抑制。
+
+最终形态：所有路由（含 casual 兜底）下 Overlay 全部节完整注入,Active 为
+W7 live 覆盖后的实时锚点;闲聊上下文携带前台任务内容为已知观察项。
+`suppress_active_projects` helper 随之删除（不留死代码）;
+`_state_overlay_lines` 的 `query` 参数保留为路由感知演进入口。
+反事实守卫：`test_s6_final_overlay_injects_fully_on_every_route` 三路由
+断言全注入——任何人重新引入路由抑制必先红此测试并经 owner 再决策;
+router 级整段排除的撤销由
+`test_w7_s6_casual_continuity_does_not_exclude_overlay_section` 钉住。
+教训：**兜底默认路由上的排除规则,影响面是"全部未识别流量"而非该路由
+字面语义**——在 default 分支上做减法前必须先量化落入 default 的流量占比。
 
 ## 待办
 

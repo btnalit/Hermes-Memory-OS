@@ -854,6 +854,44 @@ class TestW7LiveAnchorOverride:
         joined = "\n".join(lines)
         assert "任务A" in joined
 
+    def test_s6_final_overlay_injects_fully_on_every_route(self, tmp_path):
+        """S6 终局(owner 决策 2026-08-06:「状态层百分之百原样注入,S6 降为
+        观察项。状态层是整个记忆系统的精髓,活起来最重要的东西」)。
+
+        任何路由 — 包括 casual_continuity 兜底 — Overlay 全部节完整注入,
+        Active 为 W7 live 覆盖后的实时锚点。本测试钉死该 owner 决策:
+        未来任何人把路由抑制加回来(整段或按节)都必须先红在这里,
+        经 owner 重新决策才能改。S6 泄漏点(闲聊上下文含前台任务内容)
+        为已知观察项,不做代码抑制。
+        """
+        from plugins.memory.memory_os.prefetch import _state_overlay_lines
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.data.append(
+            OverlayEntry(text="任务A 陈旧缓存里的旧任务", source="task_anchor:current",
+                         source_kind="task_anchor"))
+        overlay.active_projects.status = "ok"
+        overlay.open_threads.data.append(
+            OverlayEntry(text="开放线程内容", source="last_session",
+                         source_kind="last_session"))
+        overlay.open_threads.status = "ok"
+        write_state_overlay(roots, overlay.to_dict())
+
+        for query in ("你觉得最近怎么样", "继续修复图谱治理断链的部署", ""):
+            lines = _state_overlay_lines(
+                store, roots=roots, query=query,
+                current_task_anchor=_LIVE_ANCHOR_B,
+            )
+            joined = "\n".join(lines)
+            assert "任务B" in joined, (
+                f"query={query!r}: live Active 必须注入(百分百原样): {joined}"
+            )
+            assert "开放线程内容" in joined, (
+                f"query={query!r}: 其余节必须注入: {joined}"
+            )
+
     def test_w7_retriever_override_and_revision_neutralized(self, tmp_path):
         """S3 反事实:retriever 同款覆盖,且 task_revision 错配必须中和。
 
