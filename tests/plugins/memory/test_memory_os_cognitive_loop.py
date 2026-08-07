@@ -158,6 +158,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "contradiction_lane",
         "edge_provenance",
         "edge_promotion",
+        "edge_weight_feedback",
         "entity_index",
         "left_brain_pipeline_check",
         "host_capability_probe",

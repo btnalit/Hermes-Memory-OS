@@ -3815,6 +3815,48 @@ router 级整段排除的撤销由
 教训：**兜底默认路由上的排除规则,影响面是"全部未识别流量"而非该路由
 字面语义**——在 default 分支上做减法前必须先量化落入 default 的流量占比。
 
+### CH.3 —— 图谱治理模型重构:全自动生长 + 动态遗忘(owner 决策,2026-08-06)
+
+Owner 追问后裁定:「这个不是自己生成图谱按匹配注入自动逐层展开才对的吗?
+每次要我去审批就不对了。动态图谱应该是动态去更新关系的…不是永远记忆
+不需要人工介入才对」。W3 的审批模型(candidate→owner_eligible→digest
+审批)与动态图谱本性相悖 — 边是派生投影(advisory),不触碰任何
+OwnerGate 永久边界,错误的边应由使用信号淘汰而非人工把关。澄清:注入侧
+本就是匹配分层有界的(锚点驱动一跳展开、8 条/220 字符/去重,depth=2
+机制已备),无上下文爆炸问题;要改的只是治理模型。
+
+四个落地件(全部 TDD,先红后绿):
+
+- **R1 全类型 auto-active**:三个 proposer + provenance 产出直接 active;
+  llm 的 `_REVIEW_REQUIRED_TYPES` 清空(取代旧 §6/G4/T2.3.2 需审契约 —
+  contradicts 的下游消费 crystallization_gate 只产 owner 可见标记,自动
+  生效不执行任何动作)。词表+源码级守卫防回退。
+- **R2 晋升通道 → 自动激活通道**:`PROMOTION_TARGET_STATE` 改 `active`,
+  source 扩为 (candidate, owner_eligible)(清空 legacy 态,不留孤儿),
+  25/轮按权重分批消化存量(约 1300 条,一次性放闸会把旧 refines 毛球
+  灌进注入池),30 天 TTL 清尾。
+- **R3 digest 边审批区段废除**:「Pending Edge Review」整段删除,
+  `EDGE_REVIEW_DIGEST_*` 词表常量删除;`reject_edge`(含批量)保留为
+  owner 纠错工具,永不主动推送。随删的 error_record 发射点由
+  `ERROR_RECORD_EMITTING_COMPONENTS` census 守卫当场抓到并同步注销
+  (双向守卫再立一功)。
+- **R4 权重反馈闭环**(「动态更新关系」的本体,新模块
+  `edge_weight_feedback.py` + 认知循环步骤):注入命中
+  (graph_layer_shadow 真实生产)→ 边 weight +0.05(cap 1.0,新
+  `index.update_edge_weight` 走 W0 同款 canonical-first 持久化,重投影
+  后保持);active 边 60 天无命中 → invalidated(遗忘,每轮上限 50)。
+  两道防误杀:遗忘水位取 max(created_at, last_hit, **闭环首跑时间**)
+  ——"60 天无命中"从开始记录命中之日起算,防上线首日屠杀存量;
+  shadow 账本不存在(注入从未活跃)时不执行遗忘 — 无命中数据 ≠ 边无
+  价值。Durable state:`system/edge_weight_feedback_state.json`
+  (cursor + per-edge last_hit),闭环 outcome 封闭原因码。
+- **R5 注入开启**(部署步骤):`graph_layer_injection_enabled` 置 true
+  无过期(owner 本段话即授权),monitor 的 knob 过期 WARN 随之消失。
+
+词表双向守卫更新为新拓扑:proposer→active(直接)、backlog→自动激活、
+active→注入消费+反馈遗忘、invalidated 终态;digest 不再是任何边状态的
+消费者(census 断言 `EDGE_REVIEW_DIGEST_STATE` 不复存在)。
+
 **CH.2 部署与验证（同日）**：PR #36 → main `1580cc0`,CI dispatch
 success;`/opt` ff `92db7c6 → 1580cc0`,deploy apply+postcheck 全绿
 （`fail=[]`）;Full Monitor **0 FAIL / 6 WARN**。新出现的

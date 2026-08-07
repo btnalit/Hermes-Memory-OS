@@ -260,7 +260,7 @@ def run_vector_proposer(
                     weight=round(sim, 4),
                     source_event_id=None,
                     proposed_by="vector",
-                    state="candidate",
+                    state="active",
                 )
                 if edge.get("skipped_duplicate"):
                     dedup_skipped += 1

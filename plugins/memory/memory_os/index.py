@@ -1533,6 +1533,65 @@ EDGE_STATE_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def update_edge_weight(
+    conn: sqlite3.Connection,
+    edge_id: str,
+    new_weight: float,
+    *,
+    roots: MemoryOSRoots,
+) -> dict[str, Any]:
+    """Update an edge's weight durably (R4 weight-feedback loop).
+
+    Same durability contract as :func:`transition_edge_state` (W0): the
+    canonical ledger is appended FIRST with the full updated row
+    (last-writer-wins per edge_id at projection time), then the projection
+    is updated — a DB-only weight change would be reverted by the next
+    index_sync within 30 minutes.  ``roots`` is required for that reason.
+
+    Returns the updated edge dict, or {} on failure/unknown edge.
+    """
+    try:
+        row = conn.execute(
+            "select * from memory_edges where edge_id = ?", (edge_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if row is None:
+        return {}
+    col_names = [str(c[1]) for c in conn.execute("pragma table_info(memory_edges)").fetchall()]
+    current = dict(zip(col_names, row))
+    bounded = min(1.0, max(0.0, float(new_weight)))
+    if float(current.get("weight") or 0.0) == bounded:
+        return current  # no-op
+    updated_edge = {
+        "edge_id": str(current.get("edge_id", "")),
+        "from_record_type": str(current.get("from_record_type", "")),
+        "from_record_id": str(current.get("from_record_id", "")),
+        "to_record_type": str(current.get("to_record_type", "")),
+        "to_record_id": str(current.get("to_record_id", "")),
+        "relation_type": str(current.get("relation_type", "")),
+        "weight": bounded,
+        "created_at": str(current.get("created_at", "")),
+        "source_event_id": str(current.get("source_event_id") or ""),
+        "state": str(current.get("state", "")),
+        "invalidated_at": current.get("invalidated_at"),
+        "proposed_by": str(current.get("proposed_by", "structural")),
+    }
+    if not _write_edge_canonical(roots, updated_edge):
+        return {}
+    try:
+        conn.execute(
+            "update memory_edges set weight = ? where edge_id = ?",
+            (bounded, edge_id),
+        )
+        conn.commit()
+        current["weight"] = bounded
+        return current
+    except sqlite3.Error:
+        # Canonical row written — the projection catches up on next sync.
+        return {}
+
+
 def transition_edge_state(
     conn: sqlite3.Connection,
     edge_id: str,

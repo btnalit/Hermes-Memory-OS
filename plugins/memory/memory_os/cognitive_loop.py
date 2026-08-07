@@ -263,6 +263,7 @@ class CognitiveLoopRunner:
             ("contradiction_lane", self._contradiction_lane),
             ("edge_provenance", self._edge_provenance),
             ("edge_promotion", self._edge_promotion),
+            ("edge_weight_feedback", self._edge_weight_feedback),
             ("entity_index", self._entity_index),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
@@ -1133,6 +1134,32 @@ class CognitiveLoopRunner:
             "candidate_count": result.get("candidate_count", 0),
             "promoted_count": result.get("promoted_count", 0),
             "ttl_invalidated_count": result.get("ttl_invalidated_count", 0),
+            "failed_count": result.get("failed_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _edge_weight_feedback(self, context: dict[str, Any]) -> dict[str, Any]:
+        """R4: 命中加权 + 长期无命中遗忘(动态图谱的自更新闭环)。"""
+        from .edge_weight_feedback import run_edge_weight_feedback
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index = MemoryOSIndex(store.roots)
+        result = run_edge_weight_feedback(
+            str(store.roots.index_path),
+            index=index,
+            audit_path=str(store.roots.audit_path),
+        )
+        context["edge_weight_feedback_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.edge_weight_feedback.v0",
+            "status": result.get("status", "ok"),
+            "outcome": result.get("outcome", ""),
+            "new_hit_record_count": result.get("new_hit_record_count", 0),
+            "reinforced_count": result.get("reinforced_count", 0),
+            "forgotten_count": result.get("forgotten_count", 0),
+            "unresolved_hit_count": result.get("unresolved_hit_count", 0),
             "failed_count": result.get("failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),

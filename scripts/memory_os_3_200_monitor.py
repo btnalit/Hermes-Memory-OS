@@ -4515,7 +4515,8 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "migration_controller",
     "override_sweep",
     "owner_actions._candidate_aggregation_status_block",
-    "owner_actions._rendered_digest_text",
+    # owner_actions._rendered_digest_text: R3 removed the edge-review digest
+    # section together with its edge_digest_query_failed emitter.
     "prefetch",
     "prefetch._crystallized_lines",
     "prefetch._floor_match_score",
@@ -7166,14 +7167,15 @@ def cognitive_loop_step_evidence():
     # the loop (the E4 lesson: llm skipped for a month, reason swallowed).
     _edge_step_keys = (
       "structural_edge_proposer", "llm_edge_proposer", "vector_edge_proposer",
-      "edge_provenance", "edge_promotion",
+      "edge_provenance", "edge_promotion", "edge_weight_feedback",
     )
     _edge_fields = (
       "status", "reason", "code", "outcome", "record_count", "pair_count",
       "proposed_count", "auto_active_count", "dedup_skipped",
       "write_failed_count", "candidate_count", "promoted_count",
       "ttl_invalidated_count", "failed_count", "scanned_ref_count",
-      "duration_ms", "error",
+      "new_hit_record_count", "reinforced_count", "forgotten_count",
+      "unresolved_hit_count", "duration_ms", "error",
     )
     edge_step_results = {}
     for step in steps:

@@ -1,9 +1,10 @@
 """Deterministic structural edge proposer for crystallized↔crystallized relationships.
 
 Runs as a cognitive-loop step. Reads active crystallized records from the
-index, applies deterministic heuristics, and writes candidate edges
-(state=candidate, proposed_by=structural) to the memory_edges table for
-subsequent owner review and promotion.
+index, applies deterministic heuristics, and writes LIVE edges
+(state=active, proposed_by=structural) — R1 (owner 决策 2026-08-06):动态
+图谱全自动,边是派生投影,错误的边由权重反馈闭环动态淘汰,不占用
+owner 审批带宽。
 
 Relation vocabulary (W1/E2): structural similarity can prove that two
 records are RELATED, never HOW they relate semantically — so this proposer
@@ -128,7 +129,7 @@ def _detect_relation(
             "weight": 1.0,
             "source_event_id": shared_event,
             "proposed_by": "structural",
-            "state": "candidate",
+            "state": "active",
         })
 
     # ── depends_on: one body explicitly references the other's ID ──
@@ -144,7 +145,7 @@ def _detect_relation(
             "weight": 1.0,
             "source_event_id": None,
             "proposed_by": "structural",
-            "state": "candidate",
+            "state": "active",
         })
 
     # ── Body similarity → co_occurs (W1/E2: token overlap proves
@@ -169,7 +170,7 @@ def _detect_relation(
                 "weight": 1.0,
                 "source_event_id": None,
                 "proposed_by": "structural",
-                "state": "candidate",
+                "state": "active",
             })
 
     # ── Temporal proximity → co_occurs ──
@@ -187,7 +188,7 @@ def _detect_relation(
                 "weight": 1.0,
                 "source_event_id": None,
                 "proposed_by": "structural",
-                "state": "candidate",
+                "state": "active",
             })
 
     return edges
