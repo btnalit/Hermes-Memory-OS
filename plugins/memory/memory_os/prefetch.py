@@ -2111,9 +2111,21 @@ def _graph_layer_injection_lines(
         if not to_id:
             continue
 
-        # Cross-section dedup
+        # Cross-section dedup — E8c: a target already shown by another
+        # section is NOT silently dropped.  "These two already-shown
+        # memories are RELATED" is information only the graph carries; in
+        # the small-graph phase the retrieval hit set and the one-hop
+        # neighborhood overlap heavily, so silent dedup kept the Related
+        # Memory section permanently empty (production 2026-08-07: edges
+        # found + shadow written, zero lines).  Emit a short relation stub
+        # (↺ = already shown above) instead of the full body.
         if seen is not None and to_type and to_id:
             if (to_type, to_id) in seen:
+                stub_ref = _clip(to_id, 40)
+                weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")
+                lines.append(f"- [{relation}·{weight_str}] ↺ {stub_ref}")
+                if source_ids is not None:
+                    source_ids.append(f"{to_type}:{to_id}")
                 continue
 
         # Resolve target body preview

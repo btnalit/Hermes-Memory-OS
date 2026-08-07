@@ -2025,6 +2025,38 @@ def test_e8_crystallized_hits_prioritized_into_anchor_pool():
     assert len(anchors) <= 5
 
 
+def test_e8c_dedup_hit_emits_relation_stub_line(tmp_path):
+    """E8c counterfactual:目标已被其他段展示时,注入不得静默吞行 —— 产短关系行。
+
+    生产实锤(2026-08-07 06:30Z):锚点命中、查到 2 条边、shadow 落账,但
+    两个目标恰好已被 Indexed/Crystallized 段展示 → 跨段去重把行全吃掉 →
+    Related Memory 恒空。小图谱阶段检索命中集与一跳邻居集高度重叠,
+    该设计让图谱贡献永远隐形。「已展示的两条记忆彼此相关」是图谱独有
+    信息 — 去重命中降级为短关系行(↺ 标记,不重复正文),而非消失。
+    """
+    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="graph-stub-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    edges = [{
+        "relation_type": "evidence_for",
+        "weight": 1.0,
+        "from_record_type": "event",
+        "from_record_id": "evt_src_1",
+        "to_record_type": "crystallized_record",
+        "to_record_id": "cry_already_shown",
+        "state": "active",
+    }]
+    seen = {("crystallized_record", "cry_already_shown")}
+    lines = _graph_layer_injection_lines(store, edges, seen=seen)
+    assert len(lines) == 1, f"dedup hit must yield a relation stub, not silence: {lines}"
+    assert "evidence_for" in lines[0]
+    assert "↺" in lines[0], f"stub must be marked as already-shown: {lines[0]}"
+    assert len(lines[0]) <= 160, f"stub must stay short: {lines[0]!r}"
+
+
 def test_e8_fallback_terms_also_query_crystallized_segment():
     """E8b counterfactual(生产复验补钉):逐词回退同样必须带结晶限定段。
 
