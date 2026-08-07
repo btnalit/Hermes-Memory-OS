@@ -3815,6 +3815,18 @@ router 级整段排除的撤销由
 教训：**兜底默认路由上的排除规则,影响面是"全部未识别流量"而非该路由
 字面语义**——在 default 分支上做减法前必须先量化落入 default 的流量占比。
 
+**CH.2 部署与验证（同日）**：PR #36 → main `1580cc0`,CI dispatch
+success;`/opt` ff `92db7c6 → 1580cc0`,deploy apply+postcheck 全绿
+（`fail=[]`）;Full Monitor **0 FAIL / 6 WARN**。新出现的
+`casual_context_needs_review` WARN **不是回归**：它是既有 RH26 casual
+上下文契约探针——SAFE 集合外的段落 WARN、FORBIDDEN 四段
+（Current Foreground Task/Diagnostic/Runtime Facts/Candidates）才 FAIL。
+S6 撤销后 Overlay 段出现在 casual 探针输出 → WARN,**这正是"S6 降为
+观察项"的机械载体**（monitor 每期替 owner 盯着,硬泄漏 FAIL 防线仍在）。
+owner 若日后决定静音：把 "Memory State Overlay" 加进
+`SAFE_CASUAL_HEADINGS` 即可。其余 5 WARN 与 CH 部署时相同
+（knob 过期预期告警 + 4 既有家族）。全量 3234 passed / 13 skipped。
+
 ## 待办
 
 **V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
