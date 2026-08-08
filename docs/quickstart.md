@@ -28,7 +28,7 @@ the portable runtime, heartbeat, the current cognitive loop harness, and the
 active-closure Hermes cron operational set. Owner-facing cron jobs use Hermes
 `channel_directory.json` autodiscovery, so Telegram is selected only when it is
 the configured owner channel. The default active-closure cron set is **8 Hermes
-cron jobs** covering 19 governed lanes: four grouped "tick" jobs that run their
+cron jobs** covering 22 governed lanes: four grouped "tick" jobs that run their
 member lanes on each lane's own cadence, plus four owner-facing jobs that each
 render a distinct owner message. Runtime heartbeat and the cognitive-loop timer
 own the main sensing/projection/advisor loop.
@@ -178,7 +178,7 @@ Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 ### Cron Profile
 
 The default cron profile is `active-closure`: **8 Hermes cron jobs** scheduling
-**19 governed lanes**.
+**22 governed lanes**.
 
 Scheduling and governance are deliberately separate. A *lane* is the unit of
 governance — it opens its own ExecutionGate permit, carries its own
@@ -189,9 +189,9 @@ cron surface without collapsing any governance boundary.
 | Job | Schedule | Lanes it runs |
 | --- | --- | --- |
 | `memory-os-tick-derived` | `2,17,32,47 * * * *` | event stats refresh, index sync, state overlay refresh, entity index refresh |
-| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate |
-| `memory-os-tick-evidence` | `12 * * * *` | hindsight health probe, fact judge, candidate aggregation, L3 probe verification, V3 wandering |
-| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working cleanup, hindsight advisory digest |
+| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate, clearance cycle |
+| `memory-os-tick-evidence` | `12 * * * *` | hindsight health probe, fact judge, candidate aggregation, L3 probe verification, V3 wandering, session fact extraction |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working cleanup, state-source mirror, hindsight advisory digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | sends approval items and real alerts through the owner channel |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | requests owner feedback on memory source recall quality |
 | `memory-os-expression-feedback-request` | `0 5 * * 0` | requests owner feedback on right-brain expressions |
