@@ -11,7 +11,7 @@
 <p align="center">
   A complete, file-first memory and cognition runtime for long-running
   <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> profiles —
-  with a governed right-brain module.
+  with a self-tending memory graph and a governed right-brain module.
 </p>
 
 <p align="center">
@@ -39,6 +39,8 @@ Memory-OS also asks:
 - What evidence supports it, and what contradicts it?
 - Is it provisional, contested, superseded, or permanent?
 - Can the owner inspect, reject, or correct it through the normal agent channel?
+- Which memories belong together — and can those relationships strengthen with
+  use and fade when never used?
 - Can the system forget without turning forgetting into a failure?
 - Can an agent have thoughts that are not tasks, reports, or alerts?
 
@@ -56,9 +58,9 @@ operational control plane.
 | System layer | What it includes |
 | --- | --- |
 | **Memory kernel** | Canonical file store, working memory, provisional memory, crystallized memory, permanent promotion, retention, cleanup, audit, migration, and append-only lifecycle receipts. |
-| **Recall engine** | FTS5, vector recall, entity graph, temporal recall, state-overlay recall, optional Hindsight recall, low-clue routing, unified recall facade, and source attribution. |
+| **Recall engine** | FTS5, vector recall, dynamic memory graph, entity graph, temporal recall, state-overlay recall, optional Hindsight recall, low-clue routing, unified recall facade, and source attribution. |
 | **Evidence & truth** | Source gating, provenance and taint checks, evidence scoring, fact judge, confabulation detection, contradiction lanes, contested-pair projections, clearance receipts, and crystallized-memory revalidation. |
-| **Context intelligence** | Bounded prefetch, context routing, memory projection, state overlay, session/cron/state mirrors, abstraction distillation, digest consolidation, household digest, and symbolic offloading. |
+| **Context intelligence** | Bounded prefetch, context routing, memory projection, state overlay, session/cron/state mirrors, session fact extraction, abstraction distillation, digest consolidation, household digest, and symbolic offloading. |
 | **Cognition system** | Inner Drive, Deep Reflection, Imagination Loop, Wandering Mind, cognitive-loop orchestration, cadence control, and bounded module coordination. |
 | **Governance & evolution** | Candidate aggregation and review, confidence routing, provisional lifecycle, proposal queue, OpsGate, live guards, reversible knob overrides, A/B evaluation, migration control, feedback bridge, and Self-Evolution Governor. |
 | **Expression system** | Expression drafts, grounded-expression judge, Speak Gate, rolling rate limits, right-brain sharing, outcome capture, deduplication, and owner feedback. |
@@ -86,11 +88,37 @@ stronger mode.
 
 - SQLite FTS5 full-text search.
 - Optional local vector similarity through `sentence-transformers`.
-- Optional graph traversal from retrieved anchors.
+- Bounded one-hop expansion through the dynamic memory graph (next section).
 - Reciprocal Rank Fusion across enabled lanes.
 - Unicode-boundary and permanent-memory fallbacks when richer lanes return no
   result.
 - Every optional lane is knob-gated and can degrade safely to pure FTS5.
+
+### A memory graph that grows, reinforces, and forgets on its own
+
+Memory-OS maintains a dynamic relationship graph over canonical memory. Edges
+are advisory derived projections — they never cross owner-gated boundaries, so
+the graph governs itself end-to-end without adding review burden:
+
+- **Automatic growth.** Structural analysis, provenance links, and a bounded
+  LLM proposer create edges that become active immediately; wrong edges are
+  eliminated by usage signals, not human review.
+- **Evidence-tiered birth weights.** An explicit reference (0.70) outweighs a
+  shared source event (0.55), lexical similarity (0.45), and mere temporal
+  proximity (0.35); LLM-proposed edges scale with stated confidence. No edge
+  is born saturated.
+- **Anchor-driven injection.** Retrieval anchors — crystallized memory
+  prioritized over event noise, with CJK-aware query fallbacks and
+  task-anchor supplementation — expand one bounded hop into a
+  "Related Memory" context section: top edges by weight plus deterministic
+  exploration slots, so young edges still get a chance to prove themselves.
+- **Reinforcement with an honest ledger.** Every edge encounter is recorded
+  with a closed outcome set; only an edge that was actually shown to the
+  agent is reinforced (multiplicative and asymptotic, so no edge pins itself
+  at a hard cap).
+- **Designed forgetting.** Active edges unused for 60 days are invalidated —
+  bounded per round and guarded against mass die-off. A shrinking graph is
+  expected maintenance, not an incident.
 
 ### Owner governance through Hermes
 
@@ -177,7 +205,7 @@ HERMES_HOME=/root/.hermes \
 - the `memory-os-agent-os` shell plugin;
 - heartbeat and cognitive-loop runtime integration;
 - portable cognition, governance, and expression modules;
-- the 8-job `active-closure` Hermes cron profile (19 governed lanes grouped into 4 tick jobs plus 4 owner-facing jobs);
+- the 8-job `active-closure` Hermes cron profile (22 governed lanes grouped into 4 tick jobs plus 4 owner-facing jobs);
 - owner-channel discovery from `channel_directory.json`;
 - post-install verification that fails loudly when core components are missing.
 
@@ -247,7 +275,7 @@ observation only, or `--llm-judge-preset none` to disable it.
 ## Automation Profiles
 
 The default `active-closure` profile contains **8 Hermes cron jobs** scheduling
-**19 governed lanes**.
+**22 governed lanes**.
 
 Scheduling and governance are separate concerns. A *lane* is the unit of
 governance: it opens its own ExecutionGate permit, carries its own risk class,
@@ -258,9 +286,9 @@ small without merging any governance boundary.
 | Job | Schedule | Lanes |
 | --- | --- | --- |
 | `memory-os-tick-derived` | `2,17,32,47 * * * *` | index sync, event stats refresh, state overlay refresh, entity index refresh |
-| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate |
-| `memory-os-tick-evidence` | `12 * * * *` | fact judge, candidate aggregation, L3 probe verification, Hindsight health probe, V3 wandering |
-| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working-memory cleanup, Hindsight advisory digest |
+| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate, clearance cycle |
+| `memory-os-tick-evidence` | `12 * * * *` | fact judge, candidate aggregation, session fact extraction, L3 probe verification, Hindsight health probe, V3 wandering |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working-memory cleanup, state-source mirror, Hindsight advisory digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | owner review digest |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory-source feedback |
 | `memory-os-expression-feedback-request` | `0 5 * * 0` | expression feedback |
@@ -370,7 +398,7 @@ flowchart TD
     H["Hermes Agent<br/>conversation · tools · cron · delivery"]
     I["Ingress & Source Gate<br/>events · mirrors · external evidence"]
     K["Memory Kernel<br/>working · provisional · crystallized · permanent"]
-    R["Recall Engine<br/>FTS5 · vector · entity graph · temporal · overlays"]
+    R["Recall Engine<br/>FTS5 · vector · memory graph · entity graph · temporal · overlays"]
     X["Context Intelligence<br/>routing · projection · distillation · digests"]
     C["Cognition System<br/>Inner Drive · Deep Reflection · Imagination"]
     RB["Right-Brain Module<br/>Wandering Mind · journal · synthesis · sharing"]
@@ -408,6 +436,9 @@ flowchart TD
 - No raw-turn Hindsight retain by default.
 - No proposal apply without a bounded target and rollback contract.
 - Sensitive mixed-scope candidate clusters fail closed.
+- A lane that produces no output records why, from a closed set of reason
+  codes — "no eligible input" and "processing failed" are never
+  indistinguishable.
 - Canonical files remain authoritative; derived indexes and substrates are
   rebuildable or retractable.
 - Optional lanes are disabled, report-only, shadowed, or knob-gated until their
