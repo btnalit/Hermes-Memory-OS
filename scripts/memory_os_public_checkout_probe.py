@@ -21,6 +21,7 @@ PUBLIC_DOCS = {
     "README.md",
     "LEGACY_RIGHT_BRAIN_RETIREMENT.md",
     "V3_INNER_LIFE_RUNBOOK.md",
+    "architecture.md",
     "configuration.md",
     "quickstart.md",
 }

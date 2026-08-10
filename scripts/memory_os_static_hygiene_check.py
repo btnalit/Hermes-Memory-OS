@@ -236,6 +236,9 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
             "scripts/memory_os_public_checkout_probe.py",
             "--repo-root",
             ".",
+            "--source",
+            "working-tree",
+            "--strict",
         ],
         "write_surface_check": [
             sys.executable,

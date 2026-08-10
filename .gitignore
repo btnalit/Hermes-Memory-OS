@@ -13,6 +13,8 @@ build/
 docs/*.md
 !docs/README.md
 !docs/LEGACY_RIGHT_BRAIN_RETIREMENT.md
+!docs/V3_INNER_LIFE_RUNBOOK.md
+!docs/architecture.md
 !docs/configuration.md
 !docs/quickstart.md
 docs/memory-os/

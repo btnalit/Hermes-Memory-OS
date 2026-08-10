@@ -29,6 +29,13 @@ def test_static_hygiene_reports_repo_native_pass_without_ruff(tmp_path):
     compile_argv = next(argv for argv, _cwd in calls if "compileall" in argv)
     assert "-X" in compile_argv
     assert any(part.startswith("pycache_prefix=") for part in compile_argv)
+    probe_argv = next(
+        argv
+        for argv, _cwd in calls
+        if any("memory_os_public_checkout_probe.py" in part for part in argv)
+    )
+    assert "--strict" in probe_argv
+    assert "working-tree" in probe_argv
 
 
 def test_static_hygiene_fails_when_any_repo_native_check_fails(tmp_path):

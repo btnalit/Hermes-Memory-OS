@@ -5247,3 +5247,90 @@ grep×3 确认。三条原败例端到端起死回生 — `动态图谱现在活
   处理(①采纳换根治实现②不采纳并说明③采纳);sannai 判明为采集层
   诚实空(owner 指示搁置);三原败例生产起死回生,验证集自此必含
   设计边界外输入;全量 3274/13。
+
+### CM — 文档对齐 + 架构定性文档(2026-08-10,docs-only)
+
+触发:owner 与外部模型(gpt-5.6)的架构评审对话。对其全部具体结论逐条
+源码核实(强化系数 0.12、6+2 探索位、出生先验分层、60 天÷每轮 50 遗忘、
+出生状态、反馈桥——全部命中,无一虚构),但补两处定性修正:①图谱回路
+生产上未满一整圈(强化刚进入自然积累,遗忘潮从未发生);②governance
+是横穿三个数据面的控制面,不是五环之一。
+
+**出入修复(每条均 grep 实证)**:
+
+- CLAUDE.md:85 引用不存在的 `graph_layer.py` — 实为特性/source-class 名:
+  边出生=6 个认知循环步骤,生命周期=`edge_weights`/`edge_weight_feedback`,
+  注入=prefetch `_graph_layer_shadow_lines` + shadow 账本。重写为准确清单,
+  含出生状态事实(structural/llm/vector/provenance 生即 active——owner
+  决策 2026-08-06;矛盾 lane 生即 candidate,由 edge_promotion 积压通道
+  按权重自动激活——初稿误写"过 owner 审",审核修正,见下)。
+- README「Automatic growth」漏 vector proposer 与矛盾 lane 例外 — 补齐
+  (四路提议信号+矛盾例外;矛盾边激活路径初稿误写 owner 批准,审核
+  修正为积压自动激活,见下)。
+- docs/README.md 引用五个仓库根目录状态文档(`V1_CURRENT_BASELINE.md`
+  等)全部不存在于任何检出 — 死引用清除,换 architecture.md 条目。
+
+**新增 `docs/architecture.md`(公开文档)**:Governed Living Memory
+Architecture 定性 — 治理脊柱(四 Gate+证据审计)为控制面横穿
+Memory/Cognition/Graph 三个数据面;六回路清单(Loop #0 观察元回路+
+记忆/认知/图谱/自进化/表达)各附契约位置与生产闭环状态表(图谱
+partial:出生/检索/注入/命中账本已实证,强化自然积累刚起步,首个
+自然遗忘潮预期 2026-10,遗忘后再繁殖 by construction 从未运行);
+三条一级原则(Execution is not Evidence / Repetition is not
+Convergence / 反馈在生产改变未来行为才算闭环);LoopSpec 明确
+docs-only 并给出分布式契约映射表(cron lane/ExecutionGate/last_run/
+feedback bridge——禁止 runtime 注册表);Deferred by design 四项
+(Edge Explanation View 只做既有账本投影、能投影的状态不许持久化、
+时间性边字段推迟到有消费者、图谱里程碑只观察不干预)。
+roadmap 增 §16 同步收录后续架构优化规划。
+
+**新公开文档的三处登记联动(险些漏掉——探针对 `docs/*.md` 做集合精确
+相等)**:`.gitignore` 白名单 `!docs/architecture.md`(docs/*.md 默认
+ignore,漏了则 working-tree 探针经 `git ls-files --exclude-standard`
+根本看不到新文件)+ `memory_os_public_checkout_probe.py::PUBLIC_DOCS`
++ 探针测试的硬编码期望清单。此外 head-source 探针测试用工作树脚本对照
+HEAD 归档,故**必须一次提交后再跑全量**,否则该测试必然红——这属于
+"加公开文档触多处登记"模式,同 cron lane 六处登记一族。
+
+除上述登记外无行为代码变更;反事实测试不适用(docs-only),替代验证=
+每条文档声明以 grep/源码通读证实(W 规则 2 的文档版);全量套件提交后
+跑通确认基线不动。
+
+**CM 审核修正(同日,PR #54 合并前 code-review,11 项发现)**:
+
+初稿三条治理声明与代码相反,全部逐条源码复核后修正——教训:**"文档版
+W 规则 2"必须覆盖治理声明本身,不只覆盖模块名与数字**;声明一个 gate
+存在,要 grep 到那个 gate 的实施代码才算实证:
+
+- **矛盾 lane 并无 owner 审批门**(初稿在 CLAUDE.md/README/architecture.md
+  三处写"须 owner 批准才 active")。`edge_promotion.py` 文档字符串明载
+  2026-08-06 owner 裁定废除逐边审核;candidate/owner_eligible 按权重自动
+  激活(25/run),30 天 TTL 转 invalidated;错误边由权重反馈降权,
+  `reject_edge` 仅为 owner 纠错工具。三处均改为"积压通道有界、按权重、
+  非即时激活"。
+- **vector 边可生而饱和**:`weight=round(sim,4)` 无上限钳制
+  (edge_weights.py 自载"vector 例外")。"No edge is born saturated"
+  改为明示 vector 例外。
+- **edge_promotion 不是出生步骤**:从不建边,只做状态迁移。CLAUDE.md
+  "六步出生"改为"五个 proposer 出生 + edge_promotion 积压激活通道"。
+
+architecture.md 另修四处:≠ 链补 Authority≠Execution 解释句;Loop 2
+生产闭环注明认知循环 runner 为 opt-in installer wrapper 非默认 cron
+lane;loop-contract 表 last_run 覆盖注明是逐 lane retrofit(当前约 6/23,
+是新 lane 的契约而非既有全覆盖);矛盾段落同步。
+
+登记面收口:`.gitignore` 补 `!docs/V3_INNER_LIFE_RUNBOOK.md`(PUBLIC_DOCS
+六成员中唯一无负项者,靠 tracked 豁免存活,一旦 untracked 即静默丢失);
+`static_hygiene_check` 的探针调用补 `--source working-tree --strict`
+(原先探针 main 非 strict 恒返 0,该子检查结构上不可能失败)+ argv
+反事实断言;探针测试改 `sorted(PUBLIC_DOCS)` 消除第三份手工清单
+(登记从三处降为两处)。缓解发现:常量三处复写无同步守卫 → roadmap
+§16.6(触发条件驱动)。
+
+- `b20491e..(PR#54 CM)`:文档对齐+架构定性 — `graph_layer.py` 死引用与
+  docs/README 死链清除,README 图谱段补全信号清单;新增
+  docs/architecture.md(治理控制面定性+六回路生产闭环状态+docs-only
+  优化路线),roadmap §16;新公开文档登记联动(gitignore 白名单/
+  probe PUBLIC_DOCS/测试)。审核修正:矛盾边实为积压自动激活非 owner
+  审批、vector 例外、edge_promotion 非出生步骤;static_hygiene 探针
+  调用补 strict。基线 3274/13 不动。
