@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.memory_os_public_checkout_probe import run_probe
+from scripts.memory_os_public_checkout_probe import PUBLIC_DOCS, run_probe
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,14 +22,7 @@ def test_working_tree_public_checkout_candidate_is_complete_and_public_safe():
 
     assert report["schema_version"] == "memory-os.public_checkout_probe.v1"
     assert report["classification"]["status"] == "PASS"
-    assert report["public_docs"] == [
-        "LEGACY_RIGHT_BRAIN_RETIREMENT.md",
-        "README.md",
-        "V3_INNER_LIFE_RUNBOOK.md",
-        "architecture.md",
-        "configuration.md",
-        "quickstart.md",
-    ]
+    assert report["public_docs"] == sorted(PUBLIC_DOCS)
     assert report["internal_docs_visible"] is False
     assert report["private_docs_present"] == []
     assert report["required_public_files"]["eval/memory_os/adapters/retrieval_shadow.py"] is True

@@ -105,11 +105,14 @@ the graph governs itself end-to-end without adding review burden:
   and their edges become active immediately; wrong edges are eliminated by
   usage signals, not human review. The one exception is the dedicated
   contradiction lane: when it claims two memories conflict, that edge is
-  born as a review candidate and activates only through owner approval.
+  born as a `candidate` and enters the active graph only through a bounded,
+  weight-ordered auto-activation channel — never instantly, and demotable
+  by the same usage signals as every other edge.
 - **Evidence-tiered birth weights.** An explicit reference (0.70) outweighs a
   shared source event (0.55), lexical similarity (0.45), and mere temporal
-  proximity (0.35); LLM-proposed edges scale with stated confidence. No edge
-  is born saturated.
+  proximity (0.35); LLM-proposed edges scale with stated confidence. Vector
+  edges are the documented exception, carrying raw cosine similarity as
+  their birth weight.
 - **Anchor-driven injection.** Retrieval anchors — crystallized memory
   prioritized over event noise, with CJK-aware query fallbacks and
   task-anchor supplementation — expand one bounded hop into a

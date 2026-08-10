@@ -60,7 +60,9 @@ Thought ≠ Memory ≠ Truth ≠ Authority ≠ Execution ≠ Success ≠ Evidenc
 ```
 
 A thought does not automatically become a memory; a memory does not
-automatically become truth; truth does not confer authority to act; an
+automatically become truth; truth does not confer authority to act;
+authority does not execute anything by itself — owner approval moves work
+into governed follow-up, it does not run it; an
 execution is not proof of success; success once is not evidence of health;
 and evidence today is not maturity. Each `≠` is a gate, a ledger, or an owner
 decision.
@@ -117,8 +119,13 @@ edge proposal (structural / llm / vector / provenance / contradiction)
 
 The edge lifecycle is automatic, but edges never acquire the power to cross
 owner boundaries: they are advisory derived projections. A contradiction
-claim — the heaviest thing an edge can assert — is born as a review candidate
-and activates only through owner approval.
+claim — the heaviest thing an edge can assert — is the one kind not born
+active: it enters as a `candidate` and activates only through the bounded,
+weight-ordered backlog channel (`edge_promotion`, capped per run), or is
+TTL-invalidated if it never earns a slot. Per-edge owner review was
+deliberately abolished (owner decision, 2026-08-06): wrong edges are demoted
+by the usage-feedback loop, and `reject_edge` remains as the owner's
+correction tool.
 
 ### Loop 4 — Self-evolution
 
@@ -167,7 +174,7 @@ Honest status as of 2026-08:
 |---|---|---|
 | #0 Observation | closed | closed — drives real owner decisions daily |
 | 1 Memory lifecycle | closed | closed — full path exercised on production |
-| 2 Cognition | closed | closed — steps run under envelopes with reason-coded outcomes |
+| 2 Cognition | closed | closed on the production host — the cognitive-loop runner is an opt-in installer wrapper, not a default-profile cron lane; where enabled, steps run under envelopes with reason-coded outcomes |
 | 3 Graph | closed | **partial** — birth, retrieval, injection, and hit-ledger observed; reinforcement is in early natural accumulation; the first natural forgetting wave is expected around 2026-10 (60 days after first real injection) and the repopulation-after-forgetting half of the cycle has, by construction, never yet run |
 | 4 Self-evolution | closed | partial — propose/observe closed; apply is rare by design |
 | 5 Expression | closed | partial — draft/judge/gate ledgers active; feedback runs at weekly cadence, so closure evidence accrues slowly |
@@ -187,7 +194,7 @@ every one of those fields; they live in the mechanisms that enforce them:
 | cadence | `due_interval_minutes` / `due_policy` per lane |
 | risk / scope / boundary | ExecutionGate permit envelope |
 | postcheck | ExecutionGate completion record |
-| evidence / outcome | per-lane `last_run` blocks, ledgers, monitor sections |
+| evidence / outcome | reason-coded `last_run` blocks (a lane-by-lane retrofit — partial coverage today, the contract for every new lane), ledgers, monitor sections |
 | feedback | governance feedback bridge → memory events |
 
 The contract is **distributed on purpose**. Reifying it into a central
