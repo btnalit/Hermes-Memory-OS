@@ -100,9 +100,12 @@ Memory-OS maintains a dynamic relationship graph over canonical memory. Edges
 are advisory derived projections — they never cross owner-gated boundaries, so
 the graph governs itself end-to-end without adding review burden:
 
-- **Automatic growth.** Structural analysis, provenance links, and a bounded
-  LLM proposer create edges that become active immediately; wrong edges are
-  eliminated by usage signals, not human review.
+- **Automatic growth.** Four independent signals propose edges — structural
+  analysis, provenance links, vector similarity, and a bounded LLM lane —
+  and their edges become active immediately; wrong edges are eliminated by
+  usage signals, not human review. The one exception is the dedicated
+  contradiction lane: when it claims two memories conflict, that edge is
+  born as a review candidate and activates only through owner approval.
 - **Evidence-tiered birth weights.** An explicit reference (0.70) outweighs a
   shared source event (0.55), lexical similarity (0.45), and mere temporal
   proximity (0.35); LLM-proposed edges scale with stated confidence. No edge
@@ -467,9 +470,11 @@ docs/                          Public operator documentation
 ```
 
 Start with [Quickstart](docs/quickstart.md) and
-[Configuration](docs/configuration.md). Internal plans, audit notes, resolver
-work, and validation history are intentionally excluded from the public
-repository.
+[Configuration](docs/configuration.md). For how the pieces fit together —
+the governance control plane, the loop inventory, and what is deliberately
+*not* automated — see [Architecture](docs/architecture.md). Internal plans,
+audit notes, resolver work, and validation history are intentionally excluded
+from the public repository.
 
 ## Development
 

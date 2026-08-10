@@ -26,6 +26,7 @@ def test_working_tree_public_checkout_candidate_is_complete_and_public_safe():
         "LEGACY_RIGHT_BRAIN_RETIREMENT.md",
         "README.md",
         "V3_INNER_LIFE_RUNBOOK.md",
+        "architecture.md",
         "configuration.md",
         "quickstart.md",
     ]

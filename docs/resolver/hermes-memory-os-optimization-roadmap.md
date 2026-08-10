@@ -486,3 +486,40 @@ observation_days >= configured_gate
 - V2/V3 毕业由自然证据和 Owner 决策驱动；
 - 系统可以主动，也能长期安静；
 - 所有生产变更可审计、可回滚，并绑定源码、runtime 和行为证据。
+
+---
+
+## 16. 架构定性与后续架构优化规划（2026-08-10，docs-only）
+
+**定性**：Hermes-Memory-OS 是 **Governed Living Memory Architecture** ——
+治理脊柱（ExecutionGate / StructuralWriteGate / OwnerGate / ResolverGate +
+证据审计）是横穿 Memory / Cognition / Graph 三个数据面的**控制面**，不是
+与它们平级的第五个环。六条回路（Loop #0 观察元回路 + 记忆生命周期 / 认知 /
+图谱 / 自进化 / 表达）的清单、契约位置与生产闭环状态表见公开文档
+`docs/architecture.md`（本节新增当日落地）。
+
+三条一级原则（提炼自实测事故，非理论）：
+
+- **Execution is not Evidence** —— 干净 envelope 只证明 lane 跑了；
+- **Repetition is not Convergence** —— lane 可以跑几百次而 backlog 在涨；
+- **回路只有当其反馈在生产上改变了未来行为，才算闭合。**
+
+**后续架构优化——全部 docs-only / 触发条件驱动**（触发条件出现前动工即属
+scope creep，违反 stabilization 冻结）：
+
+1. **LoopSpec 只做文档命名，禁止 runtime 注册表**。回路契约已由分布式机制
+   承载（id/cadence=cron_registry lane，risk/scope/boundary/postcheck=
+   ExecutionGate envelope，evidence=last_run 块与账本，feedback=governance
+   feedback bridge）。中心化注册表=同一事实的第二定义=漂移源。
+2. **Edge Explanation View 只做投影**。"为什么这条边 0.76"所需证据
+   （出生证据类+先验、proposer、confidence、注入结局、命中史、矛盾状态）
+   全部已存在于既有账本；出现真实 owner-review/调试需求时做只读投影，
+   **不得新增存储**。
+3. **不新增持久化边状态**。emerging/weakening/contested/superseded 均可由
+   weight + last_hit 距今 + 矛盾边 + invalidated 投影得出——**能投影的状态
+   不许持久化**，否则状态机膨胀且为 gate 词表漂移开新面。
+4. **时间性边字段（valid_from/valid_until/last_confirmed_at）推迟**到出现
+   会因此改变决策的消费者；纪元标记与账本时间戳覆盖当前需要。
+5. **图谱成熟度里程碑只观察不干预**：强化自然积累（进行中）→ 首个自然
+   遗忘潮（预期 2026-10，属预期维护非事故）→ 遗忘后再繁殖。三者是要
+   **让其发生**的观测，不是工作项。
