@@ -21,6 +21,30 @@ try:
 except ModuleNotFoundError:
     from scripts.memory_os_execution_report import write_helper_execution_report
 
+_HERMES_HOME_DEFAULT = str(Path.home() / ".hermes")
+_repo_root = Path(__file__).absolute().parents[1]
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    _runtime_root = Path(os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT) / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
+
+try:
+    from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
+    def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
+        sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
+        return False
+
+_LANE_ID = "owner_review_digest_render"
+
+
+def _record_last_run(status: str, reason: str) -> None:
+    hermes_home = os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT
+    record_lane_last_run(hermes_home, _LANE_ID, status=status, reason=reason)
+
 
 def main() -> int:
     owner = os.environ.get("MEMORY_OS_OWNER_REVIEW_OWNER", "owner")
@@ -28,35 +52,46 @@ def main() -> int:
     digest_mode = os.environ.get("MEMORY_OS_OWNER_REVIEW_DIGEST_MODE", "agenda").strip() or "agenda"
     limits = _limit_args()
 
-    if not channel:
-        channel = _resolve_channel()
+    # Empty stdout is a designed outcome (no agenda today), so each exit
+    # records WHY on disk — a crashed render and a quiet day must not leave
+    # identical evidence.
+    try:
+        if not channel:
+            channel = _resolve_channel()
 
-    delivery_ref = "cron_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    render = _run_json(
-        [
-            "hermes",
-            "memory-os-agent-os",
-            "review",
-            "render-delivery-digest",
-            "--owner",
-            owner,
-            "--channel",
-            channel,
-            "--delivery-ref",
-            delivery_ref,
-            "--format",
-            "json",
-            "--mode",
-            digest_mode,
-            *limits,
-        ]
-    )
+        delivery_ref = "cron_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        render = _run_json(
+            [
+                "hermes",
+                "memory-os-agent-os",
+                "review",
+                "render-delivery-digest",
+                "--owner",
+                owner,
+                "--channel",
+                channel,
+                "--delivery-ref",
+                delivery_ref,
+                "--format",
+                "json",
+                "--mode",
+                digest_mode,
+                *limits,
+            ]
+        )
+    except SystemExit:
+        _record_last_run("error", "hermes_cli_failed")
+        raise
     if not _has_meaningful_content(render, digest_mode=digest_mode):
+        _record_last_run("skipped", "no_meaningful_content")
         return 0
     text = str(render.get("text") or "").strip()
     if text:
         print(text)
         sys.stdout.flush()
+        _record_last_run("ok", "digest_rendered")
+    else:
+        _record_last_run("skipped", "digest_text_empty")
     return 0
 
 

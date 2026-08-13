@@ -1414,6 +1414,30 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 },
             })
 
+    raw_lane_last_run = snapshot.get("lane_last_run")
+    lane_last_run: dict[str, Any] = raw_lane_last_run if isinstance(raw_lane_last_run, dict) else {}
+    if lane_last_run:
+        # Deliberately ungraded (INFO): a failed run already fails
+        # helper-completion grading, so grading here would double-alarm.
+        # This entry carries the WHY behind lanes that produced nothing
+        # ("Completion Is Not Output"); error_lanes names any lane whose
+        # last recorded run failed so an operator can jump straight to
+        # system/lane_last_run/<lane_id>.json. Directory absence is normal
+        # until the reason-code deployment reaches the host.
+        lanes_map = lane_last_run.get("lanes") if isinstance(lane_last_run.get("lanes"), dict) else {}
+        info.append({
+            "code": "lane_last_run_state",
+            "value": {
+                "lane_count": int(lane_last_run.get("lane_count") or 0),
+                "status_counts": lane_last_run.get("status_counts") or {},
+                "error_lanes": sorted(
+                    lane_id
+                    for lane_id, entry in lanes_map.items()
+                    if isinstance(entry, dict) and entry.get("status") == "error"
+                ),
+            },
+        })
+
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
 
@@ -6174,6 +6198,45 @@ def continuity_freshness_summary():
         "raw_body_included": False,
     }
 
+def lane_last_run_summary():
+    # Standard per-lane last-run evidence (lane_last_run.py). Report-only:
+    # a failed run already fails helper-completion grading, so this section
+    # exists to explain WHY lanes produced nothing ("Completion Is Not
+    # Output"), not to re-alarm. Directory absence is normal until the
+    # reason-code deployment reaches this host.
+    directory = os.path.join(_hermes_home, "memory-os/system/lane_last_run")
+    lanes = {}
+    status_counts = {"ok": 0, "skipped": 0, "error": 0, "malformed": 0}
+    if os.path.isdir(directory):
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".json"):
+                continue
+            lane_key = name[:-5]
+            try:
+                with open(os.path.join(directory, name), "r", encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except (OSError, ValueError):
+                record = None
+            if not isinstance(record, dict):
+                status_counts["malformed"] += 1
+                lanes[lane_key] = {"status": "malformed", "reason": "", "recorded_at": ""}
+                continue
+            status = str(record.get("status") or "")
+            lanes[str(record.get("lane_id") or lane_key)] = {
+                "status": status,
+                "reason": str(record.get("reason") or ""),
+                "recorded_at": str(record.get("recorded_at") or ""),
+            }
+            status_counts[status if status in status_counts else "malformed"] += 1
+    return {
+        "schema_version": "memory-os.lane_last_run_monitor.v0",
+        "directory_exists": os.path.isdir(directory),
+        "lane_count": len(lanes),
+        "status_counts": status_counts,
+        "lanes": lanes,
+        "raw_body_included": False,
+    }
+
 def rh26_probe():
     code = r"""
 import json, re
@@ -9114,6 +9177,7 @@ print(json.dumps({
   "session_activity": session_activity_stats(),
   "compaction": compaction_stats(),
   "continuity_freshness": continuity_freshness_summary(),
+  "lane_last_run": lane_last_run_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))

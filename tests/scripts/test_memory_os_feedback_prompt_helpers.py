@@ -4,9 +4,20 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 
+import pytest
+
+from plugins.memory.memory_os.lane_last_run import read_lane_last_run
 from scripts import memory_os_expression_feedback_prompt as expression_prompt
 from scripts import memory_os_memory_sources_feedback_prompt as memory_sources_prompt
 from scripts import memory_os_proposal_followups_ops_gate as proposal_followups
+
+
+@pytest.fixture(autouse=True)
+def hermes_home(tmp_path, monkeypatch):
+    # The prompt helpers now persist lane_last_run evidence under
+    # HERMES_HOME; isolate it so tests never touch the real home.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    return tmp_path
 
 
 def _capture(func) -> str:
@@ -32,6 +43,53 @@ def test_expression_feedback_prompt_skips_silent_outcome(monkeypatch):
     )
 
     assert _capture(expression_prompt.main) == ""
+
+
+def test_expression_feedback_prompt_persists_skip_reason(monkeypatch, hermes_home):
+    # Weekly cron renders nothing for a silent outcome; the WHY must land on
+    # disk (this file did not exist before the lane_last_run wiring).
+    monkeypatch.setattr(
+        expression_prompt,
+        "_run_json",
+        lambda _command: {
+            "status": "ok",
+            "existing_feedback": {"count": 0},
+            "latest_outcome": {
+                "outcome_silent": True,
+                "expression_preview": "[SILENT]",
+                "action_tokens": {"like_expression": "oa_like"},
+            },
+        },
+    )
+
+    assert _capture(expression_prompt.main) == ""
+
+    record = read_lane_last_run(hermes_home, "expression_feedback_request")
+    assert record is not None
+    assert record["status"] == "skipped"
+    assert record["reason"] == "outcome_silent"
+
+
+def test_expression_feedback_prompt_persists_rendered_outcome(monkeypatch, hermes_home):
+    monkeypatch.setattr(
+        expression_prompt,
+        "_run_json",
+        lambda _command: {
+            "status": "ok",
+            "existing_feedback": {"count": 0},
+            "latest_outcome": {
+                "outcome_silent": False,
+                "expression_preview": "quiet presence",
+                "action_tokens": {"like_expression": "oa_like"},
+            },
+        },
+    )
+
+    assert "memory feedback oa_like like_expression" in _capture(expression_prompt.main)
+
+    record = read_lane_last_run(hermes_home, "expression_feedback_request")
+    assert record["status"] == "ok"
+    assert record["reason"] == "prompt_rendered"
 
 
 def test_expression_feedback_prompt_skips_already_rated_outcome(monkeypatch):
@@ -86,6 +144,53 @@ def test_memory_sources_feedback_prompt_skips_already_rated_source(monkeypatch):
     )
 
     assert _capture(memory_sources_prompt.main) == ""
+
+
+def test_memory_sources_feedback_prompt_persists_skip_reason_on_cron_path(monkeypatch, hermes_home):
+    # The skip_reason enum used to exist only behind --status-json, which
+    # cron never passes; the cron path must persist the same code.
+    monkeypatch.setattr(
+        memory_sources_prompt,
+        "_run_json",
+        lambda _command: {
+            "status": "ok",
+            "existing_feedback": {"count": 1},
+            "latest_memory_source": {
+                "action_tokens": {"mark_feedback": "oa_feedback"},
+            },
+        },
+    )
+
+    assert _capture(memory_sources_prompt.main) == ""
+
+    record = read_lane_last_run(hermes_home, "memory_sources_feedback_request")
+    assert record is not None
+    assert record["status"] == "skipped"
+    assert record["reason"] == "already_feedback_for_latest_source"
+
+
+def test_memory_sources_feedback_prompt_persists_rendered_prompt(monkeypatch, hermes_home):
+    monkeypatch.setattr(
+        memory_sources_prompt,
+        "_run_json",
+        lambda _command: {
+            "status": "ok",
+            "existing_feedback": {"count": 0},
+            "latest_memory_source": {
+                "action_tokens": {"mark_feedback": "oa_feedback"},
+                "source_classes": ["event"],
+                "route": "casual_continuity",
+                "selected_count": 1,
+                "selected_chars_total": 100,
+            },
+        },
+    )
+
+    assert _capture(memory_sources_prompt.main).startswith("OWNER_MESSAGE_BEGIN")
+
+    record = read_lane_last_run(hermes_home, "memory_sources_feedback_request")
+    assert record["status"] == "ok"
+    assert record["reason"] == "prompt_rendered"
 
 
 def test_memory_sources_feedback_prompt_help_does_not_require_hermes(monkeypatch):

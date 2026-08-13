@@ -14,6 +14,33 @@ each query and scores the results.
 
 Golden set files live under ``<memory_os_root>/recall_golden/`` and are
 named ``<profile>.golden.json``.
+
+Case categories and production-case collection
+==============================================
+Complex retrieval's biggest risk is that a fix for one query class quietly
+hurts three others (the CJK production incident is the canonical example),
+so every golden query should carry a ``category`` from
+``RECOMMENDED_CASE_CATEGORIES`` and the report breaks results down
+per-category.  The metric semantics ride on category conventions rather
+than new mechanics:
+
+* wrong-memory injection — ``must_hit=False`` expectations; any match is an
+  injection (``false_positive``), reported as
+  ``metrics.wrong_memory_injection_*``.
+* stale-memory injection — a ``superseded``-category query whose OLD fact
+  is a ``must_hit=False`` expectation.
+* authority violation — ``authority_class``/``source_ref`` expectations;
+  verified mismatches classify ``source_authority_issue``.
+* no-answer honesty — a ``no_answer``-category query whose expectations are
+  all ``must_hit=False``: the pipeline must not fabricate a recall.
+
+Collection procedure (target: ~50 real production cases, then 100–200):
+take real owner queries from production sessions — misses the owner
+reported (待办 8 instances), plus sampled routine queries — and write one
+``GoldenQuery`` each, with the expected fact's canonical ``source_ref``
+where known.  Never hand-write the memory fixtures the case recalls
+against: build them through the real producers, or the counterfactual is
+vacuous.
 """
 
 from __future__ import annotations
@@ -29,6 +56,26 @@ from .recall_types import RecallType
 from .store import MemoryOSStore
 
 GOLDEN_SET_SCHEMA_VERSION = "memory-os.recall_golden_set.v1"
+
+# Category vocabulary for golden queries (advisory, not enforced: a category
+# outside this tuple still evaluates, it just fragments the per-category
+# report).  Mirrors the query classes production has actually hurt on.
+RECOMMENDED_CASE_CATEGORIES: tuple[str, ...] = (
+    "chinese_natural",       # 中文自然句
+    "mixed_language",        # 中英混合
+    "entity",                # 实体/专名
+    "paraphrase",            # 同义改写
+    "task_continuation",     # 任务延续
+    "old_vs_current_fact",   # 新旧事实并存
+    "superseded",            # 已被取代的事实（旧值为负例 → 陈旧注入）
+    "contested",             # 有争议/矛盾中
+    "revoked",               # 已撤销（必须不出现）
+    "graph_needed",          # 需要图谱扩展才能命中
+    "graph_not_needed",      # 图谱不应插手
+    "no_answer",             # 诚实无答案（全负例）
+    "weak_clue",             # 低线索
+    "adversarial",           # 污染/对抗输入
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +107,8 @@ class GoldenQuery:
     query: str
     expected: list[GoldenResult] = field(default_factory=list)
     description: str = ""
+    # See RECOMMENDED_CASE_CATEGORIES; empty reports as "uncategorized".
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +138,7 @@ class RecallEvaluationItem:
     matched_authority: str = ""
     score: float = 0.0
     error: str = ""
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -131,6 +181,7 @@ def load_golden_set(path: Path) -> GoldenSet:
                 query=q_raw.get("query", ""),
                 expected=expected,
                 description=q_raw.get("description", ""),
+                category=str(q_raw.get("category", "") or ""),
             )
         )
     return GoldenSet(
@@ -153,6 +204,7 @@ def save_golden_set(path: Path, gs: GoldenSet) -> None:
                 "query": q.query,
                 "expected": [asdict(e) for e in q.expected],
                 "description": q.description,
+                "category": q.category,
             }
             for q in gs.queries
         ],
@@ -218,6 +270,7 @@ def evaluate_recall(
                 must_hit=True,
                 matched=False,
                 error=str(exc),
+                category=gq.category,
             ))
             continue
 
@@ -277,6 +330,7 @@ def evaluate_recall(
                 matched_source_ref=matched_source_ref,
                 matched_authority=matched_authority,
                 score=1.0 if matched else 0.0,
+                category=gq.category,
             )
             items.append(item)
 
@@ -354,28 +408,54 @@ def run_golden_set_report(
     golden_set = load_golden_set(path)
     evaluation = evaluate_recall(store, golden_set, profile=profile)
     score = score_from_evaluation(evaluation)
+    item_rows = [
+        {
+            "query": item.query,
+            "recall_type": item.recall_type,
+            "content_pattern": item.content_pattern,
+            "expected_source_ref": item.expected_source_ref,
+            "expected_authority": item.expected_authority,
+            "must_hit": item.must_hit,
+            "matched": item.matched,
+            "matched_source_ref": item.matched_source_ref,
+            "matched_authority": item.matched_authority,
+            "classification": classify_evaluation_item(item),
+            "error": item.error,
+            "category": item.category or "uncategorized",
+        }
+        for item in evaluation.items
+    ]
+    # Per-category breakdown: a fix that helps one query class while quietly
+    # hurting three others is exactly what the flat recall_rate hides.
+    by_category: dict[str, dict[str, int]] = {}
+    classification_counts: dict[str, int] = {}
+    for row in item_rows:
+        classification = str(row["classification"])
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        bucket = by_category.setdefault(str(row["category"]), {})
+        bucket[classification] = bucket.get(classification, 0) + 1
+    negative_checks = sum(1 for row in item_rows if not row["must_hit"])
+    wrong_injections = classification_counts.get("false_positive", 0)
+    metrics = {
+        # Every must_hit=False expectation is an injection tripwire; a match
+        # means the pipeline surfaced memory it must not (wrong / stale /
+        # revoked — the category tells which).
+        "negative_checks": negative_checks,
+        "wrong_memory_injection_count": wrong_injections,
+        "wrong_memory_injection_rate": (wrong_injections / negative_checks) if negative_checks else 0.0,
+        "authority_violation_count": classification_counts.get("source_authority_issue", 0),
+        "context_insufficient_count": classification_counts.get("context_insufficient", 0),
+    }
     return {
         "schema_version": GOLDEN_SET_SCHEMA_VERSION,
         "golden_path": str(path),
         "profile": profile,
         "query_count": len(golden_set.queries),
         "score": score,
-        "items": [
-            {
-                "query": item.query,
-                "recall_type": item.recall_type,
-                "content_pattern": item.content_pattern,
-                "expected_source_ref": item.expected_source_ref,
-                "expected_authority": item.expected_authority,
-                "must_hit": item.must_hit,
-                "matched": item.matched,
-                "matched_source_ref": item.matched_source_ref,
-                "matched_authority": item.matched_authority,
-                "classification": classify_evaluation_item(item),
-                "error": item.error,
-            }
-            for item in evaluation.items
-        ],
+        "metrics": metrics,
+        "by_category": by_category,
+        "by_classification": classification_counts,
+        "items": item_rows,
         "executed_at": evaluation.executed_at,
     }
 

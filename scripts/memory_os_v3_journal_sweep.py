@@ -29,7 +29,8 @@ else:
         sys.path.insert(0, str(_RUNTIME_ROOT))
 
 from plugins.memory.memory_os.config import load_config
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.v3_retention import sweep_pending_expired
 
@@ -37,27 +38,42 @@ from plugins.memory.memory_os.v3_retention import sweep_pending_expired
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "default"))
+    parser.add_argument("--profile", default="")
     parser.add_argument("--execution-gate-envelope-id", default=os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", ""))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    roots = MemoryOSRoots.from_hermes_home(Path(args.hermes_home), profile=str(args.profile))
+    roots = MemoryOSRoots.from_hermes_home(Path(args.hermes_home), profile=resolve_profile_name(args.hermes_home, str(args.profile)))
     store = MemoryOSStore(roots)
     store.initialize()
     config = load_config(Path(args.hermes_home)).get("v3_inner_life", {})
     ttl_days = config.get("journal_ttl_days") if isinstance(config, dict) else None
     if type(ttl_days) is not int or ttl_days <= 0:
+        # This config-disabled skip used to be stdout-only, invisible on disk.
+        record_lane_last_run(args.hermes_home, "v3_journal_sweep", status="skipped", reason="journal_ttl_unset")
         print('{"cycle_status":"skipped"}')
         return 0
     envelope_id = str(args.execution_gate_envelope_id or "").strip()
     try:
         report = sweep_pending_expired(store, execution_gate_envelope_id=envelope_id)
-    except Exception:
+    except Exception as exc:
+        record_lane_last_run(
+            args.hermes_home, "v3_journal_sweep", status="error", reason="sweep_failed", error=str(exc)
+        )
         print('{"cycle_status":"error"}')
         return 2
+    record_lane_last_run(
+        args.hermes_home,
+        "v3_journal_sweep",
+        status="ok",
+        reason="swept",
+        counters={
+            key: value for key, value in (report.items() if isinstance(report, dict) else ())
+            if isinstance(value, int)
+        },
+    )
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
     return 0
 

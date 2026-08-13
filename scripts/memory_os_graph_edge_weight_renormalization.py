@@ -76,7 +76,7 @@ from plugins.memory.memory_os.index import (  # noqa: E402
     _initialize_schema,
     update_edge_weight,
 )
-from plugins.memory.memory_os.roots import MemoryOSRoots  # noqa: E402
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name  # noqa: E402
 
 MAPPING_VERSION = "v1"
 # weight==1.0 判定阈值:乘性强化 + update_edge_weight 的 0.005 最小增量
@@ -226,11 +226,11 @@ def renormalize_edge_weights(roots: MemoryOSRoots, *, apply: bool) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=_HERMES_HOME)
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "default"))
+    parser.add_argument("--profile", default="")
     parser.add_argument("--apply", action="store_true", help="execute (default: dry-run)")
     args = parser.parse_args(argv)
 
-    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=resolve_profile_name(args.hermes_home, args.profile))
     if not roots.index_path.exists():
         # No index yet — build the projection so weight updates can resolve.
         from plugins.memory.memory_os.store import MemoryOSStore

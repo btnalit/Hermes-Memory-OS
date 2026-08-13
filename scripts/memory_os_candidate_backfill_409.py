@@ -52,7 +52,7 @@ from plugins.memory.memory_os.crystallized import (
     read_candidate_queue,
     read_candidate_triage,
 )
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.candidate_aggregation import (
     _is_fleeting_candidate,
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--hermes-home", default=os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes"),
     )
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE") or "default")
+    parser.add_argument("--profile", default="")
     parser.add_argument(
         "--execution-gate-envelope-id",
         default=os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", ""),
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     hermes_home = str(args.hermes_home)
-    profile = str(args.profile)
+    profile = resolve_profile_name(hermes_home, str(args.profile))
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)

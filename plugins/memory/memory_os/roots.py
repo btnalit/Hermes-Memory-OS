@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,48 @@ def _validate_profile(profile: str | None) -> str:
     if _contains_traversal(profile) or "/" in profile or "\\" in profile:
         raise RootValidationError(f"profile contains path traversal: {profile}")
     return profile
+
+
+def _derive_profile_from_home(home: Path) -> str:
+    """Return the profile name a profiles/<name>-shaped home implies, else ''."""
+    if home.name and home.parent.name == "profiles":
+        return home.name
+    return ""
+
+
+def resolve_profile_name(
+    hermes_home: str | Path,
+    explicit: str | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Resolve the profile attribution for records written against hermes_home.
+
+    Priority: ``explicit`` (a --profile flag) > ``HERMES_PROFILE`` >
+    profiles/<name>-shaped hermes_home > ``"default"``.
+
+    Multi-profile hosts routinely export only HERMES_HOME
+    (e.g. ``/root/.hermes/profiles/sannai``) without HERMES_PROFILE; the old
+    ``HERMES_PROFILE or "default"`` fallback then stamped that profile's
+    records as ``default`` and profile-filtered readers silently dropped
+    them.  Raises RootValidationError when an explicitly requested profile
+    contradicts a profile-shaped home: running would mis-attribute this
+    home's records to another profile, so fail closed instead of guessing.
+
+    The stdlib-only cron wrapper (scripts/memory_os_execution_gate_runner.py
+    ``_resolve_profile``) is a deliberate local twin of this logic; a guard
+    test pins both to the same behavior table.
+    """
+    env = environ if environ is not None else os.environ
+    home = Path(hermes_home).expanduser().resolve()
+    derived = _derive_profile_from_home(home)
+    requested = _validate_profile((explicit or "").strip() or str(env.get("HERMES_PROFILE") or "").strip())
+    if requested and derived and requested != derived:
+        raise RootValidationError(
+            f"requested profile {requested!r} contradicts profile-shaped hermes_home {home} "
+            f"(implies {derived!r}); refusing to mis-attribute records"
+        )
+    return requested or derived or "default"
 
 
 def _validate_external_root(path: str | Path) -> Path:
@@ -86,8 +129,12 @@ class MemoryOSRoots:
         profile: str | None = None,
         external_state_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
     ) -> "MemoryOSRoots":
-        resolved_profile = _validate_profile(profile)
         home = Path(hermes_home).expanduser().resolve()
+        # An explicitly passed profile always wins (Hermes' agent identity may
+        # legitimately differ from the home directory name).  Only when the
+        # caller passed nothing do we read the profiles/<name> home shape, so
+        # a sannai-style profile home no longer collapses to "" / "default".
+        resolved_profile = _validate_profile(profile) or _derive_profile_from_home(home)
         memory_os_root = home / "memory-os"
         external_roots = tuple(_validate_external_root(root) for root in (external_state_roots or ()))
 

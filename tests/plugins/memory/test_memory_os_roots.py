@@ -58,3 +58,54 @@ def test_roots_reject_external_state_root_path_traversal(tmp_path):
 
     with pytest.raises(RootValidationError, match="external_state_roots"):
         MemoryOSRoots.from_hermes_home(tmp_path, external_state_roots=[traversal])
+
+
+def test_from_hermes_home_derives_profile_from_profile_shaped_home(tmp_path):
+    # Counterfactual for the sannai mis-attribution: without derivation this
+    # returned "" and every `roots.profile or "default"` consumer stamped the
+    # sannai home's records as "default".
+    hermes_home = tmp_path / ".hermes" / "profiles" / "sannai"
+    hermes_home.mkdir(parents=True)
+
+    roots = MemoryOSRoots.from_hermes_home(hermes_home)
+
+    assert roots.profile == "sannai"
+
+
+def test_from_hermes_home_keeps_empty_profile_for_plain_home(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path / ".hermes")
+
+    assert roots.profile == ""
+
+
+def test_from_hermes_home_explicit_profile_outranks_home_shape(tmp_path):
+    # Hermes' agent identity may legitimately differ from the home directory
+    # name, so an explicitly passed profile wins without raising here; the
+    # fail-closed conflict semantics live in resolve_profile_name (the
+    # script/cron surface, where "explicit" is env contamination instead).
+    hermes_home = tmp_path / ".hermes" / "profiles" / "sannai"
+    hermes_home.mkdir(parents=True)
+
+    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile="identity-name")
+
+    assert roots.profile == "identity-name"
+
+
+def test_resolve_profile_name_priority_and_conflict(tmp_path):
+    from plugins.memory.memory_os.roots import resolve_profile_name
+
+    plain_home = tmp_path / "home"
+    sannai_home = tmp_path / "profiles" / "sannai"
+
+    assert resolve_profile_name(plain_home, environ={}) == "default"
+    assert resolve_profile_name(sannai_home, environ={}) == "sannai"
+    assert resolve_profile_name(plain_home, environ={"HERMES_PROFILE": "sannai"}) == "sannai"
+    assert resolve_profile_name(sannai_home, environ={"HERMES_PROFILE": "sannai"}) == "sannai"
+    assert resolve_profile_name(plain_home, "explicit-x", environ={"HERMES_PROFILE": "env-y"}) == "explicit-x"
+
+    with pytest.raises(RootValidationError, match="contradicts"):
+        resolve_profile_name(sannai_home, environ={"HERMES_PROFILE": "default"})
+    with pytest.raises(RootValidationError, match="contradicts"):
+        resolve_profile_name(sannai_home, "other", environ={})
+    with pytest.raises(RootValidationError, match="traversal"):
+        resolve_profile_name(plain_home, "../escape", environ={})

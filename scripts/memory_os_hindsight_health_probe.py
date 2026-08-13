@@ -53,6 +53,7 @@ else:
     if _runtime_root.exists() and str(_runtime_root) not in sys.path:
         sys.path.insert(0, str(_runtime_root))
 
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
 from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfig
 
 
@@ -177,6 +178,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     report = probe_hindsight_health(args.hermes_home, timeout_seconds=args.timeout)
+    # The probe's taxonomy used to be stdout-only, leaving a broken substrate
+    # indistinguishable from an idle one on disk.  Persist the closed outcome
+    # set so readers never have to re-run the probe.
+    outcome = str(report.get("status") or "unknown")
+    record_lane_last_run(
+        args.hermes_home,
+        "hindsight_health_probe",
+        status="ok",
+        reason=outcome,
+        counters={"latency_ms": int(report.get("latency_ms") or 0)},
+        error=str(report.get("reason") or "") if outcome in ("timeout", "unreachable", "unhealthy") else "",
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

@@ -368,3 +368,57 @@ def test_build_lane_disable_state_round_trips(tmp_path):
     records = read_lane_disable_records(home)
     assert records["expression_feedback_request"]["reason"] == "retired with右脑表达 lanes"
     assert read_disabled_lane_keys(home) == frozenset({"expression_feedback_request"})
+
+
+# ── Lane last-run evidence census ("Completion Is Not Output") ──────────────
+#
+# Both directions are pinned, like the exposure vocabulary guard: every
+# registered lane must be triaged, and no census entry may name a lane that
+# does not exist.  A new lane therefore cannot ship without declaring how a
+# reader distinguishes "no eligible input" from "processing failed".
+
+
+def test_every_cron_lane_declares_last_run_evidence():
+    from plugins.memory.memory_os.cron_registry import (
+        LANE_LAST_RUN_EVIDENCE,
+        LANE_LAST_RUN_EVIDENCE_KINDS,
+        MEMORY_OS_CRON_LANES,
+    )
+
+    lane_ids = {lane.lane_id for lane in MEMORY_OS_CRON_LANES}
+
+    missing = sorted(lane_ids - set(LANE_LAST_RUN_EVIDENCE))
+    assert not missing, f"lanes registered without last-run evidence triage: {missing}"
+
+    orphaned = sorted(set(LANE_LAST_RUN_EVIDENCE) - lane_ids)
+    assert not orphaned, f"census names lanes that are not registered: {orphaned}"
+
+    unknown_kinds = {
+        lane_id: kind
+        for lane_id, kind in LANE_LAST_RUN_EVIDENCE.items()
+        if kind not in LANE_LAST_RUN_EVIDENCE_KINDS
+    }
+    assert not unknown_kinds, f"census uses undefined evidence kinds: {unknown_kinds}"
+
+
+def test_lane_last_run_declarations_are_actually_wired():
+    """Source-scan guard: a lane declared 'lane_last_run' must really call
+    record_lane_last_run with its own lane_id — a census that nothing
+    satisfies would be green-by-vocabulary, the exact drift this table
+    exists to prevent."""
+    from pathlib import Path
+
+    from plugins.memory.memory_os.cron_registry import (
+        LANE_LAST_RUN_EVIDENCE,
+        MEMORY_OS_CRON_LANES,
+    )
+
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    unwired: list[str] = []
+    for lane in MEMORY_OS_CRON_LANES:
+        if LANE_LAST_RUN_EVIDENCE.get(lane.lane_id) != "lane_last_run":
+            continue
+        source = (scripts_dir / lane.raw_script).read_text(encoding="utf-8")
+        if "record_lane_last_run" not in source or f'"{lane.lane_id}"' not in source:
+            unwired.append(lane.lane_id)
+    assert not unwired, f"lanes declared lane_last_run but not wired: {unwired}"

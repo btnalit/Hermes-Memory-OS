@@ -59,6 +59,7 @@ else:
     if _runtime_root.exists() and str(_runtime_root) not in sys.path:
         sys.path.insert(0, str(_runtime_root))
 
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
 from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfig
 
 # Reuse shared config reader from health probe (code-review fix: dedup)
@@ -272,6 +273,27 @@ def main(argv: list[str] | None = None) -> int:
         timeout=args.timeout,
         query=args.query,
         budget=args.budget,
+    )
+    # The full "why nothing happened" taxonomy used to be stdout-only and the
+    # advisory file was written only on success, so every skip/failure case
+    # was invisible on disk.  Persist the outcome for every path.
+    status_code = str(report.get("status") or "unknown")
+    if status_code == "ok":
+        run_status, reason = "ok", "advisory_emitted"
+    elif status_code in ("disabled", "unconfigured"):
+        run_status, reason = "skipped", str(report.get("reason") or status_code)
+    else:
+        run_status, reason = "error", status_code
+    record_lane_last_run(
+        args.hermes_home,
+        "hindsight_advisory_digest",
+        status=run_status,
+        reason=reason,
+        counters={
+            "latency_ms": int(report.get("latency_ms") or 0),
+            "advisory_emitted": int(bool(report.get("advisory_emitted"))),
+        },
+        error=str(report.get("reason") or "") if run_status == "error" else "",
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     # Advisory digest is optional/fail-open.  Non-ok statuses are reported in

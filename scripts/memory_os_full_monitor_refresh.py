@@ -31,6 +31,7 @@ _IMPORT_ROOT = (
 if _IMPORT_ROOT.exists() and str(_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_IMPORT_ROOT))
 
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
 from plugins.memory.memory_os.operational_truth import build_full_monitor_envelope
 
 
@@ -234,8 +235,24 @@ def main(argv: list[str] | None = None) -> int:
             monitor_profile=args.monitor_profile,
         )
     except Exception as exc:
+        # The finally-block deletes the temp artifact on failure, so without
+        # this record a crashed refresh leaves the previous snapshot silently
+        # going stale with no on-disk explanation.
+        record_lane_last_run(
+            hermes_home,
+            "full_monitor_refresh",
+            status="error",
+            reason="refresh_failed",
+            error=str(exc),
+        )
         print(f"Full monitor refresh failed: {exc}", file=sys.stderr)
         return 2
+    record_lane_last_run(
+        hermes_home,
+        "full_monitor_refresh",
+        status="ok",
+        reason="artifact_published",
+    )
     return 0
 
 

@@ -65,7 +65,7 @@ from plugins.memory.memory_os.clearance_receipts import (
     clearance_snapshot_freshness,
     rebuild_clearance_receipt_snapshot,
 )
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
-        default=os.environ.get("HERMES_PROFILE", "default"),
+        default="",
         help="Memory-OS profile name",
     )
     parser.add_argument(
@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         default="json",
     )
     args = parser.parse_args(argv)
+    profile = resolve_profile_name(args.hermes_home, args.profile)
 
     t0 = time.monotonic()
     run_status = "ok"
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     freshness: dict = {}
 
     try:
-        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=profile)
         store = MemoryOSStore(roots)
         store.initialize()
 
@@ -117,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": error_msg,
             "freshness": freshness,
             "duration_ms": duration_ms,
-            "profile": args.profile,
+            "profile": profile,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }, ensure_ascii=False))
 

@@ -29,20 +29,20 @@ else:
         sys.path.insert(0, str(runtime_root))
 
 from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=_HERMES_HOME)
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "default"))
+    parser.add_argument("--profile", default="")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=resolve_profile_name(args.hermes_home, args.profile))
     store = MemoryOSStore(roots)
     store.initialize()
     result = run_exposure_rollup_cycle(

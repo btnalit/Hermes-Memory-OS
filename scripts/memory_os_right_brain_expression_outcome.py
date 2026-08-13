@@ -36,6 +36,8 @@ INTERNAL_MARKERS = (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    # Legacy paused per-lane surface: keeps its host-calibrated "main" default
+    # on purpose (see memory_os_right_brain_expression.py).
     parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "main"))
     parser.add_argument("--job-name", default=os.environ.get("MEMORY_OS_RIGHT_BRAIN_JOB_NAME", DEFAULT_JOB_NAME))
     parser.add_argument("--max-preview-chars", type=int, default=int(os.environ.get("MEMORY_OS_RIGHT_BRAIN_OUTCOME_MAX_CHARS", "360")))

@@ -50,7 +50,8 @@ else:
         sys.path.insert(0, str(_runtime_root))
 
 from plugins.memory.memory_os.clearance_cycle import run_clearance_cycle
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -60,10 +61,7 @@ def main() -> int:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)
@@ -90,6 +88,31 @@ def main() -> int:
             "actual_unapproved_crystallized_approval": False,
         },
     }
+    # Persist a closed outcome so an empty queue is distinguishable from a
+    # cycle whose judge produced nothing (or was unavailable).
+    judged = int(report.get("judged") or 0)
+    queue_depth = int(report.get("queue_depth") or 0)
+    if report.get("status") != "ok":
+        run_status = "error"
+        reason = str(report.get("failure_reason") or "cycle_failed")
+    elif queue_depth == 0 and judged == 0:
+        run_status, reason = "ok", "queue_empty"
+    elif judged == 0:
+        run_status, reason = "ok", "nothing_judged"
+    else:
+        run_status, reason = "ok", "judged"
+    record_lane_last_run(
+        hermes_home,
+        "clearance_cycle",
+        status=run_status,
+        reason=reason,
+        counters={
+            "judged": judged,
+            "invalidated": int(report.get("invalidated") or 0),
+            "queue_depth": queue_depth,
+            "budget_used": int(report.get("budget_used") or 0),
+        },
+    )
     print(json.dumps(helper_report, ensure_ascii=False, indent=2))
     return 0 if report.get("status") == "ok" else 1
 

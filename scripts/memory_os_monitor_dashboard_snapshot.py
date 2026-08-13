@@ -48,7 +48,7 @@ from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_fresh
 from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
 from plugins.memory.memory_os.owner_actions import owner_review_queue_report
 from plugins.memory.memory_os.operational_truth import read_operational_truth_snapshot
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.legacy_right_brain_retirement import (
     LEGACY_CRON_NAMES,
@@ -121,7 +121,7 @@ BOUNDARY_ROWS = (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", DEFAULT_PROFILE))
+    parser.add_argument("--profile", default="")
     parser.add_argument("--output", type=Path, help="Write snapshot to this path. Defaults to stdout.")
     parser.add_argument("--format", choices=("js", "json"), default="js")
     parser.add_argument(
@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     hermes_home = Path("__memory_os_dashboard_sample__") if args.sample else Path(args.hermes_home)
     snapshot = build_dashboard_snapshot(
         hermes_home=hermes_home.expanduser().resolve(),
-        profile=str(args.profile or DEFAULT_PROFILE),
+        profile=resolve_profile_name(hermes_home, args.profile),
     )
     output_text = render_snapshot(snapshot, output_format=args.format)
     if args.output:

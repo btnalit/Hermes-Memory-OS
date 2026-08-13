@@ -51,7 +51,8 @@ else:
 
 from plugins.memory.memory_os.audit import read_audit_records
 from plugins.memory.memory_os.index import MemoryOSIndex, _markdown_records
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.crystallized import is_active_crystallized_frontmatter, read_candidate_queue
 
@@ -136,10 +137,7 @@ def main() -> int:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)
@@ -189,6 +187,19 @@ def main() -> int:
         "drift": drifts,
         "drift_ok": drift_ok,
     }
+    # stdout used to be this lane's only evidence; persist the outcome so a
+    # failed or drifting sync is visible from disk without re-running.
+    if status == "ok":
+        reason = "synced" if drift_ok else "synced_with_drift"
+    else:
+        reason = "sync_failed"
+    record_lane_last_run(
+        hermes_home,
+        "index_sync",
+        status="ok" if status == "ok" else "error",
+        reason=reason,
+        counters={"drift_count": len(drifts), **(counts if isinstance(counts, dict) else {})},
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if status == "ok" else 1
 

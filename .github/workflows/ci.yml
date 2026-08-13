@@ -24,6 +24,10 @@ jobs:
           python-version: '3.11'
           cache: pip
 
+      - name: Enforce release tag / pyproject version single source
+        if: github.ref_type == 'tag'
+        run: python scripts/memory_os_version_consistency_check.py --repo-root . --tag "${{ github.ref_name }}"
+
       - name: Install test dependencies
         run: python -m pip install -e '.[dev]'
 

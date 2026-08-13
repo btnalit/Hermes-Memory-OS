@@ -18,7 +18,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -137,13 +136,27 @@ def _has_all_markers(path: Path, markers: list[str]) -> bool:
 
 REPO_ROOT = _resolve_repo_root()
 PROBE_SCRIPT = REPO_ROOT / "scripts" / "probe_l3_prefetch_behavior.py"
-LAST_RUN_FILE = Path(tempfile.gettempdir()) / "l3_probe_last_result.json"
+_HERMES_HOME = os.environ.get("HERMES_HOME", "") or str(Path.home() / ".hermes")
+# Diagnostics used to land in the OS temp dir, which reboots clear and the
+# monitor never reads; keep them durable under the profile home instead.
+LAST_RUN_FILE = Path(_HERMES_HOME) / "memory-os" / "system" / "l3_probe_last_result.json"
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+try:
+    from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
+    def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
+        sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
+        return False
 
 SCHEMA_VERSION = "memory-os.l3_probe_result.v0"
+_LANE_ID = "l3_probe_verification"
 
 
 def main(smoke: bool = False) -> int:
     if not PROBE_SCRIPT.exists():
+        record_lane_last_run(_HERMES_HOME, _LANE_ID, status="error", reason="probe_script_missing")
         print(json.dumps({
             "schema_version": SCHEMA_VERSION,
             "status": "error",
@@ -186,6 +199,21 @@ def main(smoke: bool = False) -> int:
         result.returncode == 0
         and "GOVERNANCE PATH" in stdout
         and "PARTIAL FAILURE" not in stdout
+    )
+    if "NONCE NOT FOUND" in stdout:
+        failure_reason = "nonce_not_found"
+    elif "NEGATIVE NONCE FOUND" in stdout:
+        failure_reason = "negative_nonce_found"
+    elif result.returncode != 0:
+        failure_reason = "probe_crashed"
+    else:
+        failure_reason = "partial_failure"
+    record_lane_last_run(
+        _HERMES_HOME,
+        _LANE_ID,
+        status="ok" if all_pass else "error",
+        reason="probe_pass" if all_pass else failure_reason,
+        counters={"returncode": int(result.returncode)},
     )
     if all_pass:
         return 0  # silent — nothing delivered to user

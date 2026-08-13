@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry-key", required=True)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
     parser.add_argument("--smoke-mode", choices=("normal", "safe", "render-only", "natural"), default="normal")
+    parser.add_argument(
+        "--profile",
+        default="",
+        help="Profile attribution for permit/completion records. Falls back to HERMES_PROFILE, then a profiles/<name>-shaped --hermes-home, then 'default'.",
+    )
     return parser
 
 
@@ -68,16 +73,48 @@ def main(argv: list[str] | None = None) -> int:
         str(args.registry_key),
         hermes_home=Path(args.hermes_home).expanduser(),
         smoke_mode=str(args.smoke_mode),
+        profile=str(args.profile),
     )
 
 
-def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = "normal") -> int:
+def _resolve_profile(hermes_home: Path, explicit: str = "") -> tuple[str, dict[str, str] | None]:
+    """Resolve the profile attribution for gate records against hermes_home.
+
+    Priority: explicit --profile > HERMES_PROFILE > profile-shaped
+    hermes_home (``.../profiles/<name>``) > ``"default"``.
+
+    Returns ``(profile, conflict)``.  ``conflict`` is None when the sources
+    agree; when an explicitly requested profile contradicts a profile-shaped
+    home it carries {"requested", "derived_from_home"} and the caller must
+    fail closed — stamping records with the wrong profile is exactly the
+    mis-attribution this resolver exists to prevent.
+
+    NOTE: this runner is deliberately stdlib-only, so this is a local twin of
+    plugins.memory.memory_os.roots.resolve_profile_name.  A guard test pins
+    both implementations to the same behavior table.
+    """
+    home = Path(hermes_home).expanduser().resolve()
+    derived = home.name if home.name and home.parent.name == "profiles" else ""
+    requested = (explicit or "").strip() or str(os.environ.get("HERMES_PROFILE") or "").strip()
+    if requested and derived and requested != derived:
+        return derived, {"requested": requested, "derived_from_home": derived}
+    if requested:
+        return requested, None
+    if derived:
+        return derived, None
+    return "default", None
+
+
+def run_registry_key(
+    registry_key: str, *, hermes_home: Path, smoke_mode: str = "normal", profile: str = ""
+) -> int:
     """Run one lane behind an ExecutionGate permit. Returns its exit code."""
     return int(
         run_registry_key_detailed(
             registry_key,
             hermes_home=hermes_home,
             smoke_mode=smoke_mode,
+            profile=profile,
         ).get("returncode")
         or 0
     )
@@ -89,6 +126,7 @@ def run_registry_key_detailed(
     hermes_home: Path,
     smoke_mode: str = "normal",
     timeout_seconds: int | None = None,
+    profile: str = "",
 ) -> dict[str, Any]:
     """Run one lane and report the outcome structurally.
 
@@ -102,6 +140,7 @@ def run_registry_key_detailed(
     if not spec:
         sys.stderr.write(f"unknown Memory-OS cron registry key: {registry_key}\n")
         return {"status": "unknown_registry_key", "error_code": "unknown_registry_key", "returncode": 2}
+    resolved_profile, profile_conflict = _resolve_profile(hermes_home, profile)
     effective_timeout = int(timeout_seconds or 0) or int(spec.get("timeout_seconds") or 0) or DEFAULT_HELPER_TIMEOUT_SECONDS
     scripts_dir = Path(__file__).resolve().parent
     helper = scripts_dir / spec["raw_script"]
@@ -121,6 +160,8 @@ def run_registry_key_detailed(
             helper_present=helper.is_file(),
             smoke_mode=smoke_mode,
             boundary=boundary,
+            profile=resolved_profile,
+            profile_conflict=profile_conflict,
         )
     except ExecutionGateInfrastructureError as exc:
         sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
@@ -144,6 +185,7 @@ def run_registry_key_detailed(
                 smoke_mode=smoke_mode,
                 boundary=boundary,
                 helper_report={},
+                profile=resolved_profile,
                 requires_boundary_report=spec.get("requires_boundary_report", True),
             )
         except ExecutionGateInfrastructureError as exc:
@@ -165,6 +207,11 @@ def run_registry_key_detailed(
     env = {
         **os.environ,
         "HERMES_HOME": str(hermes_home),
+        # Hand the helper the profile this run resolved to, so every lane
+        # script stamps its own records with the same attribution as the
+        # permit/completion envelope instead of re-deriving (and possibly
+        # mis-deriving) it from an incomplete environment.
+        "HERMES_PROFILE": resolved_profile,
         "MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID": envelope_id,
         "MEMORY_OS_EXECUTION_REPORT_PATH": str(report_path),
         "MEMORY_OS_EXECUTION_SMOKE_MODE": smoke_mode,
@@ -204,6 +251,7 @@ def run_registry_key_detailed(
             smoke_mode=smoke_mode,
             boundary=observed_boundary,
             helper_report=helper_report,
+            profile=resolved_profile,
             # A timed-out helper never got to write its boundary report, so
             # requiring one would mislabel the timeout as a boundary gap.
             requires_boundary_report=False if timed_out else spec.get("requires_boundary_report", True),
@@ -295,18 +343,31 @@ def _append_permit(
     helper_present: bool,
     smoke_mode: str,
     boundary: dict[str, Any],
+    profile: str,
+    profile_conflict: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     material = f"{registry_key}|{lane_id}|{now.isoformat()}"
     envelope_id = f"xgate_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{hashlib.sha256(material.encode('utf-8')).hexdigest()[:10]}"
     boundary_true = _any_boundary_true(boundary)
+    if boundary_true:
+        permit_decision, permit_reason = "blocked", "boundary_true"
+    elif profile_conflict:
+        # A profile explicitly requested via --profile/HERMES_PROFILE
+        # contradicts the profiles/<name>-shaped hermes_home.  Running would
+        # stamp this home's records with another profile's identity, so fail
+        # closed — but leave this blocked permit as durable evidence rather
+        # than exiting silently.
+        permit_decision, permit_reason = "blocked", "profile_home_conflict"
+    else:
+        permit_decision, permit_reason = "allowed", "boundary_false"
     record = {
         "schema_version": SCHEMA_VERSION,
         "stage": "permit",
         "execution_gate_envelope_id": envelope_id,
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(seconds=_expiry_seconds(lane_id, risk_class))).isoformat().replace("+00:00", "Z"),
-        "profile": os.environ.get("HERMES_PROFILE") or "default",
+        "profile": profile,
         "lane_id": lane_id,
         "trigger_surface": "hermes_cron",
         "risk_class": risk_class,
@@ -321,9 +382,11 @@ def _append_permit(
         "boundary": boundary,
         "boundary_true": boundary_true,
         "precheck": {"helper_present": helper_present},
-        "permit_decision": "blocked" if boundary_true else "allowed",
-        "permit_reason": "boundary_true" if boundary_true else "boundary_false",
+        "permit_decision": permit_decision,
+        "permit_reason": permit_reason,
     }
+    if profile_conflict:
+        record["profile_conflict"] = dict(profile_conflict)
     _append_jsonl(_records_path(hermes_home), record)
     _update_sidecar_index(hermes_home, envelope_id, "permit", record)
     return record
@@ -339,6 +402,7 @@ def _append_completion(
     smoke_mode: str,
     boundary: dict[str, Any],
     helper_report: dict[str, Any],
+    profile: str,
     requires_boundary_report: bool = True,
 ) -> None:
     now = datetime.now(timezone.utc)
@@ -357,7 +421,7 @@ def _append_completion(
         "stage": "completion",
         "execution_gate_envelope_id": envelope_id,
         "created_at": now.isoformat().replace("+00:00", "Z"),
-        "profile": os.environ.get("HERMES_PROFILE") or "default",
+        "profile": profile,
         "lane_id": lane_id,
         "execution_status": execution_status,
         "postcheck": {
