@@ -80,6 +80,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/owner_actions.py::_append_jsonl::path.open_a::path": "owner_actions_private_writer",
     "plugins/memory/memory_os/owner_actions.py::_rendered_digest_text::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
     "plugins/memory/memory_os/owner_actions.py::_candidate_aggregation_status_block::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
+    "plugins/memory/memory_os/owner_actions.py::_exclude_from_recall_now::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_action_error_record",
     "plugins/memory/memory_os/prefetch.py::_record_substrate_shadow_recall::path.open_a::path": "report_only_shadow_recall",
     "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::path.open_a::path": "report_only_graph_layer_shadow",
     # Continuity freshness disclosure. Classified here rather than routed

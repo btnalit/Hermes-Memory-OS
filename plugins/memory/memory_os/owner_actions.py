@@ -20,6 +20,7 @@ from .config import load_config
 from .crystallized import (
     CrystallizedCandidate,
     CrystallizedMemoryService,
+    add_candidate_recall_exclusion,
     is_active_crystallized_frontmatter,
     read_candidate_queue,
     read_effective_candidates,
@@ -3618,6 +3619,42 @@ def _empty_rendered_digest(store: MemoryOSStore, *, owner_id: str) -> dict[str, 
     }
 
 
+def _exclude_from_recall_now(store: MemoryOSStore, candidate_ids: Any) -> int:
+    """Stop rejected candidates from surfacing in recall immediately.
+
+    Owner ruling 2026-08-14 admits candidates to recall at candidate authority
+    without approval, which makes the owner's reject the correction half of the
+    bargain — so it has to bite now, not on the next lane tick. The authority
+    path (read_effective_candidates -> candidate_aggregation republish) still
+    covers the same ids within one lane cycle; this only removes the wait.
+
+    Fail-open by design: an owner decision must never fail because a derived
+    projection file could not be written. Losing the incremental write costs
+    latency (back to the <=6h authority path), not correctness.
+    """
+    written = 0
+    for candidate_id in candidate_ids or []:
+        try:
+            if add_candidate_recall_exclusion(store, str(candidate_id or "")):
+                written += 1
+        except Exception as exc:  # noqa: BLE001 - derived projection, never blocks the owner
+            try:
+                _append_jsonl(
+                    store.roots.memory_os_root / "system" / "error_records.jsonl",
+                    build_error_record(
+                        component="owner_actions._exclude_from_recall_now",
+                        operation="add_candidate_recall_exclusion",
+                        error_code="candidate_recall_exclusion_incremental_failed",
+                        severity="warning",
+                        recoverable=True,
+                        details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - error recording must not raise either
+                pass
+    return written
+
+
 def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, note: str, rating: str) -> dict[str, Any]:
     action_type = str(record["action_type"])
     target_id = str(record["target_id"])
@@ -3671,6 +3708,7 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         record["owner_effect"]["owner_approved_crystallized_write"] = True
         return {"crystallized_path": str(path), "candidate_id": target_id}
     if action_type == "reject_candidate":
+        _exclude_from_recall_now(store, [target_id])
         return {"candidate_id": target_id, "state": "owner_rejected"}
     if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
         cluster, scope, status = find_candidate_cluster_by_target(store, target_id)
@@ -3712,6 +3750,10 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
                 "state": "owner_approved_cluster",
             }
         state = "owner_rejected_cluster" if action_type == "reject_candidate_cluster" else "owner_deferred_cluster"
+        if action_type == "reject_candidate_cluster":
+            # Bulk reject is the verb an owner facing a large queue actually
+            # reaches for, so it must bite exactly like the single reject.
+            _exclude_from_recall_now(store, scope["member_candidate_ids"])
         return {
             "cluster_id": scope["cluster_id"],
             "cluster_scope_hash": scope["scope_hash"],

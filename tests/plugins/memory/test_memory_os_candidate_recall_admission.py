@@ -168,3 +168,178 @@ def test_terminal_vocabulary_has_one_public_source():
     assert crystallized._TERMINAL_CANDIDATE_STATES is TERMINAL_CANDIDATE_STATES
     for state in ("owner_rejected", "discarded", "demoted", "crystallized"):
         assert state in TERMINAL_CANDIDATE_STATES
+
+
+# ── owner reject must actually bite (correction half of 降级准入) ────────────
+#
+# Admitting candidates to recall without approval is only defensible because
+# the owner keeps a reject. These are the counterfactuals for the two ways
+# that reject silently did nothing:
+#
+#   * add_candidate_recall_exclusion existed, was docstring-labelled "immediate
+#     (owner reject path)", and had ZERO call sites — a single reject only took
+#     effect when candidate_aggregation next republished the projection, i.e.
+#     up to 6h later (due_interval_minutes=360).
+#   * reject_candidate_cluster — the verb an owner facing a large queue
+#     actually reaches for — never reached the exclusion set AT ALL: it writes
+#     one action whose target_type is "candidate_cluster" (not "candidate")
+#     and whose member ids live in result_ref, so both the immediate path and
+#     the authority path in read_effective_candidates structurally missed it.
+
+
+def _owner_eligible_candidate(store: MemoryOSStore, candidate_id: str, body: str, event_id: str):
+    candidate = CrystallizedCandidate(
+        candidate_id=candidate_id,
+        kind="preference",
+        body=body,
+        source_event_ids=[event_id],
+        sensitivity="private",
+        tags=["test"],
+        bridge_state="owner_eligible",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    append_candidate_queue(store, candidate)
+    return candidate
+
+
+def _recall_text(store: MemoryOSStore, query: str) -> str:
+    return "\n".join(_candidate_lines(store, query=query, seen=set(), source_ids=[]))
+
+
+def _cluster_review_item(store: MemoryOSStore) -> dict:
+    from plugins.memory.memory_os.owner_actions import owner_review_queue_report
+
+    for entry in owner_review_queue_report(store, limit=20).get("items") or []:
+        if entry.get("target_type") == "candidate_cluster":
+            return entry
+    raise AssertionError("no candidate_cluster review item was produced")
+
+
+def _republish_projection_like_the_lane(store: MemoryOSStore) -> set[str]:
+    """Recompute the exclusion set exactly as candidate_aggregation does.
+
+    The lane publishes the FULL set every run, so anything the immediate path
+    writes but the authority cannot re-derive is erased within one cycle. That
+    is why the authority hop is mandatory, not a nicety.
+    """
+    from plugins.memory.memory_os.crystallized import read_effective_candidates
+
+    effective = read_effective_candidates(store)
+    excluded = {item.candidate.candidate_id for item in effective if item.terminal}
+    write_candidate_recall_exclusions(store, excluded)
+    return excluded
+
+
+def test_owner_reject_stops_recall_immediately_without_waiting_for_the_lane(tmp_path):
+    from plugins.memory.memory_os.owner_actions import apply_owner_action
+
+    store = _store(tmp_path)
+    _owner_eligible_candidate(
+        store, "cand-reject-now", "Owner 交代了 Cloudflare 部署密钥的存放位置", "evt-r1"
+    )
+    query = "cloudflare 密钥 部署"
+    assert "cand-reject-now" in _recall_text(store, query)
+
+    result = apply_owner_action(
+        store,
+        action_type="reject_candidate",
+        target="candidate:cand-reject-now",
+        owner_id="owner-test",
+        channel="test",
+        apply=True,
+    )
+
+    assert result["status"] == "ok"
+    # No lane run in between — that is the whole point of the immediate path.
+    assert "cand-reject-now" in read_candidate_recall_exclusions(store.roots)
+    assert "cand-reject-now" not in _recall_text(store, query)
+
+
+def test_dry_run_reject_previews_without_touching_recall(tmp_path):
+    """A preview must stay a preview: apply=False may not exclude anything."""
+    from plugins.memory.memory_os.owner_actions import apply_owner_action
+
+    store = _store(tmp_path)
+    _owner_eligible_candidate(
+        store, "cand-preview", "Owner 交代了 Cloudflare 部署密钥的存放位置", "evt-p1"
+    )
+    query = "cloudflare 密钥 部署"
+
+    apply_owner_action(
+        store,
+        action_type="reject_candidate",
+        target="candidate:cand-preview",
+        owner_id="owner-test",
+        channel="test",
+        apply=False,
+    )
+
+    assert "cand-preview" not in read_candidate_recall_exclusions(store.roots)
+    assert "cand-preview" in _recall_text(store, query)
+
+
+def test_cluster_reject_stops_recall_for_every_member_immediately(tmp_path):
+    from plugins.memory.memory_os.owner_actions import apply_owner_action
+
+    store = _store(tmp_path)
+    body = "Owner 交代了 Cloudflare 部署密钥的存放位置与注入方式"
+    _owner_eligible_candidate(store, "cand-clu-a", body, "evt-c1")
+    _owner_eligible_candidate(store, "cand-clu-b", body + "，另外补充了一句", "evt-c2")
+    query = "cloudflare 密钥 部署"
+    surfaced = _recall_text(store, query)
+    assert "cand-clu-a" in surfaced and "cand-clu-b" in surfaced
+
+    item = _cluster_review_item(store)
+    assert {"cand-clu-a", "cand-clu-b"} <= set(item["cluster_scope"]["member_candidate_ids"])
+
+    result = apply_owner_action(
+        store,
+        action_type="reject_candidate_cluster",
+        target=f"candidate_cluster:{item['target_id']}",
+        owner_id="owner-test",
+        channel="test",
+        apply=True,
+    )
+
+    assert result["status"] == "ok"
+    assert {"cand-clu-a", "cand-clu-b"} <= read_candidate_recall_exclusions(store.roots)
+    after = _recall_text(store, query)
+    assert "cand-clu-a" not in after and "cand-clu-b" not in after
+
+
+def test_cluster_reject_survives_the_lane_full_republish(tmp_path):
+    """The authority hop, isolated.
+
+    Without read_effective_candidates learning to read cluster member ids out
+    of result_ref, the lane's next full republish drops both members back into
+    recall — an owner decision quietly expiring after <=6h, which is worse
+    than a reject that never appeared to work at all.
+    """
+    from plugins.memory.memory_os.crystallized import read_effective_candidates
+    from plugins.memory.memory_os.owner_actions import apply_owner_action
+
+    store = _store(tmp_path)
+    body = "Owner 交代了 GitHub 部署密钥由主机统一注入，不要写进仓库配置"
+    _owner_eligible_candidate(store, "cand-sur-a", body, "evt-s1")
+    _owner_eligible_candidate(store, "cand-sur-b", body + "，并说明了轮换周期", "evt-s2")
+    item = _cluster_review_item(store)
+    apply_owner_action(
+        store,
+        action_type="reject_candidate_cluster",
+        target=f"candidate_cluster:{item['target_id']}",
+        owner_id="owner-test",
+        channel="test",
+        apply=True,
+    )
+
+    terminal_ids = {
+        entry.candidate.candidate_id
+        for entry in read_effective_candidates(store)
+        if entry.terminal
+    }
+    assert {"cand-sur-a", "cand-sur-b"} <= terminal_ids
+
+    republished = _republish_projection_like_the_lane(store)
+    assert {"cand-sur-a", "cand-sur-b"} <= republished
+    after = _recall_text(store, "github 密钥 部署")
+    assert "cand-sur-a" not in after and "cand-sur-b" not in after

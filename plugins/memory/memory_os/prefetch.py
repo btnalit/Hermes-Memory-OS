@@ -1840,6 +1840,22 @@ def _candidate_lines(
     # lane (read_effective_candidates costs ~61ms, far too much per turn) and
     # is fail-open when absent, which degrades to the pre-ruling behavior of
     # surfacing unfiltered queue rows rather than silencing candidate recall.
+    #
+    # Measured hot-path cost of the path actually taken (Windows dev box,
+    # production-shaped 258-row queue built through append_candidate_queue):
+    # median 6.1ms / p95 12.0ms for a topical query, of which read_candidate_queue
+    # is ~3ms and this exclusion read is 0.06ms; a query with no usable tokens
+    # short-circuits above at 0.007ms without touching the filesystem. Linux
+    # production is faster. The queue is not unbounded — candidate_aggregation
+    # (due_interval_minutes=360) runs compact_candidate_queue with a 7-day
+    # retention that archives demoted/fleeting/absorbed immediately, so depth
+    # settles at ~7 days of churn plus the owner-review backlog; 258 rows is
+    # near steady state, not an early point on a growth curve. The one
+    # unbounded dimension is owner_eligible rows, retained regardless of age
+    # by design: cost grows linearly with that backlog (~17ms at 1000 rows),
+    # so the backlog is the thing to watch, not the queue as such.
+    # Same-lane publication also bounds the correction latency: an owner reject
+    # stops surfacing within one candidate_aggregation cycle (<=6h).
     excluded_ids = read_candidate_recall_exclusions(store.roots)
     scored: list[tuple[int, Any]] = []
     for candidate in read_candidate_queue(store.roots):

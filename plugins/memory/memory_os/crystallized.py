@@ -1558,6 +1558,23 @@ CANDIDATE_RECALL_EXCLUSION_SCHEMA_VERSION = "memory-os.candidate_recall_exclusio
 _TERMINAL_CANDIDATE_ACTIONS = frozenset(
     {"approve_candidate", "reject_candidate", "approve_external_evidence"}
 )
+# Cluster verbs close their *members*, and they do it differently: the owner
+# action's target is the cluster (target_type is not "candidate") and the
+# member ids live in result_ref, because a cluster decision writes one action
+# rather than one per member. So the per-candidate branch below structurally
+# cannot see them and they need their own hop. ``approve_candidate_cluster``
+# is deliberately absent — approving writes crystallized records carrying
+# candidate_id, so those members are already closed via canonical_candidate_ids.
+# ``defer_candidate_cluster`` is absent because deferring is not terminal: a
+# deferred candidate must keep surfacing.
+#
+# NOT a duplicate of owner_actions.TERMINAL_ACTIONS_BY_TARGET_TYPE, which lists
+# defer_candidate_cluster too. That table answers "does this action close the
+# owner's review item"; this one answers "does this action close the candidate
+# for recall". Deferring closes the former and must not close the latter, so
+# unifying the two would silently bury every deferred candidate. Same names,
+# different predicates — keep them apart.
+_TERMINAL_CANDIDATE_CLUSTER_ACTIONS = frozenset({"reject_candidate_cluster"})
 
 
 def candidate_recall_exclusion_path(roots_or_store: Any) -> Path:
@@ -1664,11 +1681,20 @@ def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:
                 continue
             if not isinstance(action, dict):
                 continue
+            if str(action.get("result") or "") not in {"applied", "duplicate_ignored"}:
+                continue
+            action_type = str(action.get("action_type") or "")
+            if action_type in _TERMINAL_CANDIDATE_CLUSTER_ACTIONS:
+                result_ref = action.get("result_ref")
+                if isinstance(result_ref, dict):
+                    for member in result_ref.get("member_candidate_ids") or []:
+                        member_id = str(member or "").strip()
+                        if member_id:
+                            owner_closed_ids.add(member_id)
+                continue
             if str(action.get("target_type") or "") != "candidate":
                 continue
-            if str(action.get("action_type") or "") not in _TERMINAL_CANDIDATE_ACTIONS:
-                continue
-            if str(action.get("result") or "") not in {"applied", "duplicate_ignored"}:
+            if action_type not in _TERMINAL_CANDIDATE_ACTIONS:
                 continue
             candidate_id = str(action.get("target_id") or "")
             if candidate_id:

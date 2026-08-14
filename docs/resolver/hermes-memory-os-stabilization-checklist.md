@@ -5617,3 +5617,188 @@ policy／外发)？是 → owner 门控；否 → **不得产生 owner 决策**�
 具体会话，系统却把那条会话的平台当成整条 lane 的范围、且只认最新一笔——
 于是 08-10 批的那条恰是 subagent，lane 范围变成 `["subagent"]`，本机零匹配，
 1510 条待办全跳过。**把 owner 的单条批准读成全局范围，会让 owner 越批越窄。**
+
+### CQ — 开源上手泳道 + 候选降级准入 + session_mirror 范围退休（2026-08-14，PR #58）
+
+三股改动一批：①开源可上手性（空白机泳道／console 入口／脚本索引／版本门）；
+②**待办 8**（凭证与部署事实召回不回来）按 owner 降级准入裁定成环；
+③session_mirror 平台范围语义退休。①与②③相互独立，合在一批是因为都在
+"给 owner 减负、给外部使用者降门槛"这条线上。
+
+#### 待办 8 的根因：三个真缺陷 + 一个被误当成缺陷的设计事实
+
+owner 的原话是"我明明给了 GitHub 密匙或者交代 cloudflare 密匙或者具体部署
+事实，老是记不起具体细节或者不会去召回记录然后核对现状"。3.200 实测做了
+A/B 分离——**事实确实在库里**（events 与 candidates 都有），是召回侧三处独立
+缺陷叠加把它们挡在外面：
+
+1. **无纠正环**：prefetch 直接读 `candidates.jsonl` 原始行，绕过终态投影——
+   owner 否决过的候选照样浮现。这正是"可逆闭环四要件"第 3 条的反面：
+   **纠正动词存在，但纠正不生效，就不配引用降级准入先例**。
+2. **队首偏置**：旧实现 `[:5]` 只对**队首五行**打分。生产队列 258 行，一条
+   完全相关但到得晚的候选**永远不可达**——与 session_mirror 那条
+   "stuck head starves the tail" 同形。改为全量打分后按分排序取前 5
+   （`sorted` 稳定，同分保持队列序）。
+3. **同义词不匹配**：owner 说"密钥"、记录里写"秘钥／凭证／token／api key"，
+   分词后零交集。新增 `_expand_query_tokens` 覆盖六组
+   （密钥类／部署类／主机类／账号类／配置类／域名类）。
+
+**第四项不是缺陷，是设计事实**：事件是 `summary_only` 的，密钥**值从未入库**
+（这是对的，不该改）。所以召回能给的只有 `safe_ref` 指针 + 摘要。为此
+`_event_lines` 对命中生存状态话题的行追加
+`[以现状为准:此为当时摘要,使用前请核对当前状态; 原始会话 <session_id>]`——
+把 owner 那句"**以现状为准**"写进召回文本本身，而不是指望模型自己想起来核对。
+
+#### 降级准入的两半：准入放开，纠正必须真的咬得住
+
+owner 裁定走**更激进的降级准入**：候选以 candidate 权威直接进召回（行首明写
+`candidate only / review candidate; not approved crystallized memory:`），
+结晶层仍 owner 门控。相应地 reject 必须真的生效，否则就是四要件第 3 条的
+反面教材。实现：`candidate_aggregation` 在 lane 末尾发布
+`candidate_recall_exclusion` 排除快照，prefetch 每轮读它（**缺失时 fail-open**
+退回裁定前行为，即照出未过滤队列行，而不是把候选召回整个静音）。
+
+**纠正延迟**：排除快照与 `compact_candidate_queue` 由**同一条** lane 发布
+（`candidate_aggregation`，`due_interval_minutes=360`），所以权威路径的上界是
+**≤6h**；owner 的 reject 另走即时增量写，**当场生效**（见下节，这一条是复审
+时才补实的）。
+
+#### 复审补修：两个"纠正动词其实没咬住"的洞（本 PR 自身缺陷）
+
+合并前追链发现，我在 PR 描述里写的"owner reject 即时写入不等 tick"**是假的**。
+两个洞，第二个更糟：
+
+1. **`add_candidate_recall_exclusion` 是死代码**。函数写好了、docstring 明标
+   "immediate (owner reject path)"、**零调用点**。单条 reject 之所以还能生效，
+   靠的是 `read_effective_candidates` 内部对 `owner_actions.jsonl` 的第二次
+   独立读取（`reject_candidate` → `owner_closed` → terminal），即 ≤6h 的权威
+   路径。**能用，但不是我声称的即时。**
+2. **`reject_candidate_cluster` 根本到不了排除集——不是延迟，是永远不生效**。
+   簇拒绝只写**一条** owner action：`target_type` 是 `candidate_cluster`（不是
+   `candidate`），成员 id 在 `result_ref.member_candidate_ids` 里，而
+   `_TERMINAL_CANDIDATE_ACTIONS` 只有三个单条动词。所以即时路径和权威路径
+   **两条都结构性地看不见它**。反事实实测坐实：修复前
+   `read_effective_candidates` 的 terminal 集合对簇拒绝是**空集**。
+
+**为什么必须现在修**：降级准入之前候选只在魔法词下浮现，这个洞基本不可见；
+**是我这次改动把它变成了会咬人的洞**。而且面对 258 条队列，owner 最可能伸手
+去按的恰恰是**批量拒绝**——最省力的那个动词，正好是唯一不生效的那个。
+
+**三处修复**：①`read_effective_candidates` 增加簇动词一跳（从 `result_ref`
+取成员 id）；②`reject_candidate` 调 `_exclude_from_recall_now` 即时写；
+③`reject_candidate_cluster` 对全部成员即时写。
+
+**权威跳必须先有，不是锦上添花**：lane 每次发布的是**完整集合**，凡权威推不
+出来的 id 都会在下一轮被覆盖抹掉。只做②③而不做①的话，owner 的簇拒绝会
+**先生效、然后在 ≤6h 后悄悄失效**——比"一开始就没生效"更坏，因为它会先骗过
+验证。第三个反事实测试专门钉这一条。
+
+**即时写是 fail-open 的**：`_exclude_from_recall_now` 吞异常并记 error_record，
+因为 owner 的决定绝不能因为一个派生投影文件写不进去而失败；丢了增量只是退回
+≤6h 权威路径，是延迟损失不是正确性损失。
+
+**生产实测影响为 0**：双 profile 的 `owner_actions.jsonl` 里至今**没有任何一条
+簇动作**，所以这是潜伏洞不是正在发生的故障——按上次 `_TERMINAL_STATES` 的教训，
+先量再说，不夸大。
+
+**相关性下限用实测定的，不是拍的**：`RELEVANCE_FLOOR_MIN_SCORE = 2`。
+`_extract_query_tokens` 的 CJK 侧发的是重叠 bigram 且无停用词表，单个共享
+bigram 常是纯语法噪声——实测查询「我们什么时候开会？」仅靠共享的「什么」
+就对一条无关候选打到 1 分；真正的话题重叠可靠地 ≥2（共享「日本旅行」打 4）。
+同理没有改用 `_tokenize_for_floor_match`：它在标点边界发单字符 token
+（"what's" → "s"），对**硬**门是灾难——实测「What's the weather forecast for
+tomorrow?」靠一个游离的 "s" 就能匹配。
+
+#### 顾问完整复审：一项阻塞 + 两项须处置，全部以证据关闭
+
+owner 要求"CI 通过后调用顾问对全部改动做完整审查，审查通过才可合并"。
+
+- **阻塞项：新准入平台（telegram＝私人对话）的脱敏覆盖**。查证结论是
+  **不成立**——`test_session_mirror_apply_is_bounded_by_platform_and_redacts_secrets`
+  真的把 `api_key=sk-sessionmirror-UNIQUE-…` 喂进完整 apply 路径，再把**写出
+  的事件**读回来断言 `"sk-sessionmirror-UNIQUE" not in serialized` 且
+  `"[REDACTED]" in serialized`——是对产物的**缺席断言**，不是对
+  `secret_redaction_applied` 标志位的自证。
+  但顾问这一问本身指出了我的一个思维错误，记下来：
+  **我把"可逆"当成了风险上限，而信息流风险不是可逆性问题**——事件写进去了，
+  脱敏漏了就是漏了，append-only 不能把泄露还原回去。四要件适用于**决策**
+  可逆性，不适用于**信息流**。
+- **范围哈希跨部署边界**：无暴露面。签发点（`session_mirror.py:312`）与
+  校验点（`:1234`）读的是**同一个 policy 字典**，同一次
+  `auto_apply_graduated_session_mirror` 调用内完成，同进程同代码版本；permit
+  `require_fresh=True, require_unused=True` 单次使用。不存在"旧代码签发、新
+  代码校验"的在途信封；进程中途被杀只会让 permit 过期未消费。
+- **`_candidate_lines` 热路径成本**：实测见下。不能只对别处要求测量而对自己
+  的改动免测。
+
+#### 热路径实测（生产形状，真产出器造夹具）
+
+258 行队列（生产 main 实际深度，用 `append_candidate_queue` 真产出器构造）：
+
+| 查询形状 | 中位 | p95 |
+|---|---|---|
+| 魔法词（旧代码也读队列，成本未变） | 5.4ms | 8.6ms |
+| 中文话题查询（**新增成本**） | 6.1ms | 12.0ms |
+| 英文话题查询（新增成本） | 5.1ms | 10.8ms |
+| 无可用 token（须短路） | 0.007ms | 0.011ms |
+
+其中 `read_candidate_queue` 约 3ms、排除快照读 0.06ms。**基线要说清**：旧实现
+对非魔法词查询**直接返回、一次文件都不读**，所以这 6ms 是真新增，不是搬运。
+无 token 时在读盘前短路，未退化。Windows 开发机数据，Linux 生产更快。
+
+**队列不是无界的**（这一条查证后才敢写）：`candidate_aggregation` 每 ≤6h 跑
+`compact_candidate_queue`，7 天保留窗 + demoted/fleeting/absorbed **立即归档**，
+所以深度稳定在"7 天流量 + owner 待审积压"。生产实测 258 行中仅 **29 行**早于
+7 天窗——258 已接近稳态，不是增长曲线的早期点。**唯一无界维度是
+`owner_eligible` 行**（按设计不论多老都保留），成本随该积压线性增长
+（1000 行实测 17ms）。**要盯的是积压，不是队列本身**。
+
+#### session_mirror：范围退休 + 容量算术
+
+退休"逐次批准即 lane 范围、且只认最新一笔"的旧语义，改为默认导入 +
+owner 排除名单（`platform_denylist`，config 严格白名单里注册过才不会被静默
+丢弃——这一条踩过）。knob `session_mirror_admit_all_platforms` 经 owner
+2026-08-14 确认**直接默认 True**；注册表元数据默认与 `resolve_knob` 调用点
+活默认**必须同时翻转**，有守卫测试钉住两处不漂移（注册表的 `default` 只是
+元数据，真正生效的是调用点传的值——这是本项目已知的陷阱形状）。
+
+**容量算术（owner 该知道明天的量）**：1510 条积压一次性变为合格，但速率上限
+是 `min(配置, 批准)` = **每轮 1 条**，心跳约 5 分钟一轮 → **约 288 条/天**，
+积压约 **5 天**排空。不是洪峰，是稳定细流；但事件摄入会有一个 288/天的台阶。
+
+#### 一处已登记的潜在分歧（本轮不改，实测影响为 0）
+
+`candidate_aggregation._TERMINAL_STATES` 只有 3 个状态，权威表
+`TERMINAL_CANDIDATE_STATES` 有 10 个——是本项目"词表漂移"形状的又一份拷贝。
+**但生产实测受影响行数为 0**，且它与 `compact_candidate_queue` 的归档规则
+（同样是那 3 个终态立即归档）是一致的，不是笔误。故登记为潜在分歧而非缺陷，
+不在本轮扩大改动面。我此前一度把它说成"被否决的候选会被推回给你"——
+**那是我说过头了，实测把它纠正掉了**，记在此处以免下次又凭形状下结论。
+
+#### 测试与门
+
+**3365 passed** / 13 skipped，本轮新增 **23 个测试函数**（候选降级准入 9、
+开源上手契约 6、session_mirror 4、复审补修的纠正环 4）。四静态门全绿。
+
+**门在这一轮抓了我三次，三次都是真失败**，记下来是因为它们证明这些门不是
+装饰：①`write_surface_check` `unclassified_count 0→1`——排除快照写面未登记；
+②同一个门第二次 `0→1`——`_exclude_from_recall_now` 的 error_record 追加是**新
+写面**，我加完修复没登记；③`ERROR_RECORD_EMITTING_COMPONENTS` 守卫测试——新
+增的 error_record 发射组件未在 monitor 侧分类（CLAUDE.md"加 lane 要动六处"
+里的第⑤处，这次是加纠正环也踩到）。**第②③两次都是定向测试全绿、全量套件
+才抓到的**，再次印证"只跑自己改的测试"不够。
+
+三处纠正环修复各有反事实：还原到修复前，
+`test_owner_reject_stops_recall_immediately_without_waiting_for_the_lane`、
+`test_cluster_reject_stops_recall_for_every_member_immediately`、
+`test_cluster_reject_survives_the_lane_full_republish` 全部 FAIL（其中簇拒绝
+那两条的 terminal 集合是**空集**，坐实"结构性看不见"而非"延迟"），恢复后
+全部 PASS。另加一条 `test_dry_run_reject_previews_without_touching_recall`
+钉住 `apply=False` 预览不得改召回。
+
+- `f553204..(PR#58 CQ)`：开源上手三件套（空白机泳道／`memory-os` console
+  入口／95 脚本八组索引）、待办 8 三缺陷成环（纠正环＋按分排序＋同义词，
+  外加"以现状为准"现状核对标记）、session_mirror 范围语义退休并按 owner
+  确认直接启用；顾问完整复审三项以证据关闭；热路径实测 6.1ms/12.0ms p95
+  并证明队列有界；**合并前追链又补修 owner reject 的两个空转洞**（死代码的
+  即时路径 + 簇拒绝永不生效），全量 3365/13。
