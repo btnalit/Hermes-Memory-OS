@@ -6101,3 +6101,14 @@ revert→3 FAIL（KeyError 证明旧代码无此通路）→restore→PASS。
 正确归档（好结局），钉"年轻不被清扫"的测试原断言"仍在队列"因此环境依赖；
 改钉真不变量（无 stale 降级 triage 行）。测量教训第 6 例：**断言要钉不变量
 本身，不钉环境合成的下游状态**。
+
+#### CU/CU.1 部署与生产终验（2026-08-15，`7ae31c6`，双 home）
+
+- 双 home apply 全绿（本轮 sannai 全绿含 llm_judge；main 已知 ambiguous 类
+  warn）。手动跑 lane 一轮（治理通道）：`pending 24→111`（活性过滤解除
+  挡刀）、`demoted_count=3`（3 条驱逐残影被 stale 清扫，含 PAT 对）、
+  `compacted_count=39`（终态视图归档）。
+- **终验：8 条前八月不朽候选 → 0**；活队列 147→108；召回排除 36→39；
+  3 条 stale-demote triage 行与预测的 3 条驱逐残影一一对应。
+- 85 条八月 meta 候选按 14 天 stale TTL 自然到期清扫（排水期新镜像出的
+  同理），无需 owner 手动批量拒绝——自动闭环按 owner 的可逆范式恢复运转。
