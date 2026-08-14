@@ -103,3 +103,43 @@ def test_dashboard_service_rejects_invalid_options(tmp_path: Path) -> None:
         except SystemExit:
             continue
         raise AssertionError(f"invalid installer options were accepted: {case}")
+
+
+def test_default_service_name_is_profile_suffixed_for_profile_shaped_home(tmp_path):
+    # Same last-deploy-wins class as the heartbeat/cognitive-loop units: with
+    # the fixed default name, installing a second profile's dashboard would
+    # silently overwrite the first profile's unit.
+    from scripts.install_memory_os_monitor_dashboard_service import (
+        DEFAULT_SERVICE_NAME,
+        _default_service_name,
+    )
+
+    assert _default_service_name(tmp_path / "home") == DEFAULT_SERVICE_NAME
+    assert (
+        _default_service_name(tmp_path / ".hermes" / "profiles" / "sannai")
+        == "hermes-memory-os-monitor-dashboard-sannai.service"
+    )
+
+
+def test_main_resolves_suffixed_default_but_explicit_name_wins(tmp_path, capsys):
+    import json as _json
+
+    from scripts.install_memory_os_monitor_dashboard_service import main
+
+    home = tmp_path / ".hermes" / "profiles" / "sannai"
+    assert main([
+        "--hermes-home", str(home),
+        "--systemd-dir", str(tmp_path / "systemd"),
+        "--dry-run",
+    ]) == 0
+    report = _json.loads(capsys.readouterr().out)
+    assert report["service_name"] == "hermes-memory-os-monitor-dashboard-sannai.service"
+
+    assert main([
+        "--hermes-home", str(home),
+        "--systemd-dir", str(tmp_path / "systemd"),
+        "--service-name", "custom.service",
+        "--dry-run",
+    ]) == 0
+    report = _json.loads(capsys.readouterr().out)
+    assert report["service_name"] == "custom.service"

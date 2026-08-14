@@ -114,11 +114,11 @@ def test_exposure_stats_separate_legacy_debt_from_schema_era_health_and_freeze_g
     assert stats["schema_era_attribution_gap_count"] == 0
     assert stats["schema_era_health"] == "PASS"
     assert stats["initial_natural_cycle_count"] == 2
-    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["selection_pressure_streak_days"] == 0
     assert stats["v2c_unfreeze_ready"] is False
     assert "initial_natural_cycles:2/3" in stats["freeze_reasons"]
     assert any(reason.startswith("production_observation_days:") for reason in stats["freeze_reasons"])
-    assert "budget_pressure_streak:0/7" in stats["freeze_reasons"]
+    assert "selection_pressure_streak:0/7" in stats["freeze_reasons"]
     assert stats["conservation_total_passes"] is True
 
 
@@ -154,7 +154,7 @@ def test_v1_era_gapped_rows_are_debt_not_permanent_gate_fail(tmp_path):
     assert "attribution_era_no_sample" in stats["freeze_reasons"]
 
 
-def test_budget_pressure_streak_requires_consecutive_calendar_days(tmp_path):
+def test_selection_pressure_streak_requires_consecutive_calendar_days(tmp_path):
     store = _store(tmp_path)
     append_memory_source_record(store.roots, {
         "record_id": "natural-anchor",
@@ -186,12 +186,12 @@ def test_budget_pressure_streak_requires_consecutive_calendar_days(tmp_path):
     stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, tzinfo=timezone.utc))
 
     assert stats["initial_natural_cycle_count"] == 7
-    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["selection_pressure_streak_days"] == 0
     assert stats["v2c_unfreeze_ready"] is False
-    assert "budget_pressure_streak:0/7" in stats["freeze_reasons"]
+    assert "selection_pressure_streak:0/7" in stats["freeze_reasons"]
 
 
-def test_budget_pressure_streak_accepts_seven_recent_completed_calendar_days(tmp_path):
+def test_selection_pressure_streak_accepts_seven_recent_completed_calendar_days(tmp_path):
     store = _store(tmp_path)
     append_memory_source_record(store.roots, {
         "record_id": "natural-anchor",
@@ -222,9 +222,89 @@ def test_budget_pressure_streak_accepts_seven_recent_completed_calendar_days(tmp
 
     stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
 
-    assert stats["budget_pressure_streak_days"] == 7
+    assert stats["selection_pressure_streak_days"] == 7
     assert stats["v2c_unfreeze_ready"] is True
     assert stats["freeze_reasons"] == []
+
+
+def test_rank_only_pressure_counts_toward_the_streak(tmp_path):
+    """Owner ruling 2026-08-14: the streak counts real SELECTION pressure
+    (budget OR rank), not byte pressure alone.
+
+    Counterfactual: every row here has dropped_by_budget == 0, which is
+    exactly the production shape — that counter has never once been
+    non-zero, while rank drops accumulate freely. Under the old
+    budget-only predicate this streak is 0/7 and V2C stays frozen forever;
+    under the ruling it counts. The per-class day counts must still show
+    that byte pressure never occurred, so widening the gate does not erase
+    the evidence that motivated it."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor",
+        "created_at": "2026-07-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    _write_rollups(store, [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": 1,
+            "conservation_passes": True,
+        }
+        for day in range(8, 15)
+    ])
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+
+    assert stats["selection_pressure_streak_days"] == 7
+    assert stats["v2c_unfreeze_ready"] is True
+    assert stats["budget_pressure_day_count"] == 0
+    assert stats["rank_pressure_day_count"] == 7
+
+
+def test_a_day_without_any_drop_still_breaks_the_streak(tmp_path):
+    """The widened predicate must not become always-true: a day that
+    selected everything (no drops of either class) is not evidence of
+    scarcity and must still break the streak."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor",
+        "created_at": "2026-07-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    _write_rollups(store, [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            # 08-13 is the most recent completed day and has zero pressure.
+            "selected": 1 if day == 13 else 0,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": 0 if day == 13 else 1,
+            "conservation_passes": True,
+        }
+        for day in range(7, 14)
+    ])
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 14, 12, tzinfo=timezone.utc))
+
+    assert stats["selection_pressure_streak_days"] == 0
+    assert "selection_pressure_streak:0/7" in stats["freeze_reasons"]
 
 
 def test_candidate_cluster_defer_is_a_cooldown_not_permanent_closure():
@@ -347,10 +427,10 @@ def test_manual_trigger_rollups_do_not_count_toward_natural_cycle_gate(tmp_path)
     stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
 
     # Same 7-consecutive-day shape as
-    # test_budget_pressure_streak_accepts_seven_recent_completed_calendar_days,
+    # test_selection_pressure_streak_accepts_seven_recent_completed_calendar_days,
     # but every row is a manual run — none of it may count as natural cadence.
     assert stats["initial_natural_cycle_count"] == 0
-    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["selection_pressure_streak_days"] == 0
     assert stats["v2c_unfreeze_ready"] is False
     assert "initial_natural_cycles:0/3" in stats["freeze_reasons"]
     assert stats["legacy_unmarked_rollup_count"] == 0
@@ -400,7 +480,7 @@ def test_legacy_unmarked_rollups_counted_separately_and_excluded_from_natural_ga
 
     assert stats["legacy_unmarked_rollup_count"] == 7
     assert stats["initial_natural_cycle_count"] == 0
-    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["selection_pressure_streak_days"] == 0
     assert stats["v2c_unfreeze_ready"] is False
 def test_rolling_attribution_window_is_era_scoped_and_has_a_reader(tmp_path):
     """Item 17: rolling_7d_attribution_gap_count was computed and read by nothing.
@@ -501,7 +581,12 @@ def test_exposure_monitor_stats_key_census_every_key_has_a_disposition(tmp_path)
         "telemetry_degraded_count": "internal",
         "initial_natural_cycle_count": "internal",
         "production_observation_days": "internal",
-        "budget_pressure_streak_days": "internal",
+        # Owner ruling 2026-08-14: budget_pressure_streak_days was RETIRED
+        # (not redefined) when the gate widened to selection pressure, and
+        # the two day-counts keep the byte-pressure evidence visible.
+        "selection_pressure_streak_days": "internal",  # drives freeze_reasons
+        "budget_pressure_day_count": "info",           # v2_exposure_rollup_ledger_state
+        "rank_pressure_day_count": "info",             # v2_exposure_rollup_ledger_state
         "v2c_unfreeze_ready": "graded",
         "downstream_clearance_closure_frozen": "graded",
         "freeze_reasons": "graded",

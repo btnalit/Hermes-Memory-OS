@@ -363,3 +363,22 @@ def _healthy_command_results():
         }
         for name, raw in _healthy_outputs().items()
     }
+
+
+def test_cognitive_loop_timer_probe_follows_profile_shaped_home(tmp_path):
+    # The static COMMANDS tuple used to probe the fixed legacy unit name, so
+    # on a profiles/<name>-shaped home the (informational) timer check showed
+    # the DEFAULT profile's unit state instead of the target profile's.
+    from scripts.memory_os_upgrade_compat_check import COMMANDS, _commands_for
+
+    root_home_specs = _commands_for(str(tmp_path / "home"))
+    assert root_home_specs is COMMANDS
+
+    profile_specs = _commands_for(str(tmp_path / ".hermes" / "profiles" / "sannai"))
+    by_name = {spec.name: spec for spec in profile_specs}
+    assert "hermes-memory-os-cognitive-loop-sannai.timer" in by_name["cognitive_loop_timer"].argv
+    assert by_name["cognitive_loop_timer"].required is False
+    # Every other spec is untouched.
+    for spec in profile_specs:
+        if spec.name != "cognitive_loop_timer":
+            assert spec in COMMANDS

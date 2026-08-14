@@ -39,7 +39,24 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 # self-cleaning: after a successful revoke the probe compacts it,
 # removing all inactive records, and deletes it when empty.
 NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "_system_probe.md"
-LOG_FILE = Path(tempfile.gettempdir()) / f"l3_probe_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
+
+def _probe_log_slug(hermes_home: Path) -> str:
+    """Per-home slug for the shared-tempdir probe log.
+
+    Both profiles' evidence ticks fire on the same minute, and the filename
+    is only second-granular, so two co-tenant probes could overwrite each
+    other's diagnostics in the shared temp directory (the same shared-name
+    collision class as the systemd units and the l3 last-result file, which
+    now lives under HERMES_HOME). Root homes keep the legacy bare name.
+    """
+    home = Path(hermes_home).expanduser().resolve()
+    return f"_{home.name}" if home.name and home.parent.name == "profiles" else ""
+
+
+LOG_FILE = (
+    Path(tempfile.gettempdir())
+    / f"l3_probe{_probe_log_slug(HERMES_HOME)}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
+)
 
 def _resolve_probe_budget(hermes_home: Path) -> int:
     """Read prefetch_char_budget from Memory-OS config, with 20000 fallback.

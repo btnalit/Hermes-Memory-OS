@@ -632,10 +632,32 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         if timestamp is None or int(record.get("records_processed") or 0) <= 0:
             continue
         date_key = timestamp.date().isoformat()
-        bucket = daily.setdefault(date_key, {"budget": 0, "valid": True})
+        bucket = daily.setdefault(date_key, {"budget": 0, "rank": 0, "valid": True})
         bucket["budget"] = int(bucket["budget"]) + int(record.get("dropped_by_budget") or 0)
+        bucket["rank"] = int(bucket["rank"]) + int(record.get("dropped_by_rank") or 0)
         bucket["valid"] = bool(bucket["valid"]) and record.get("conservation_passes") is True
     valid_natural_days = sum(1 for bucket in daily.values() if bucket["valid"] is True)
+    # Owner ruling 2026-08-14 — "selection pressure", not "budget pressure".
+    #
+    # The streak gate used to require dropped_by_budget > 0. Production
+    # evidence: across ALL natural rollup rows that counter has never once
+    # been non-zero, while dropped_by_rank accumulated freely — at the
+    # deployed prefetch_char_budget the per-section rank caps always bind
+    # first, so the byte budget is never the constraint. The gate was
+    # therefore waiting on a signal this configuration structurally cannot
+    # emit: not "not yet", but "never", which is a gate nothing can satisfy
+    # (the same shape as the pre-era-boundary attribution FAIL).
+    #
+    # The owner chose to widen the predicate to any real selection pressure
+    # (budget OR rank) rather than lower the production budget to
+    # manufacture the old signal — changing production behavior to move a
+    # metric is what the roadmap's "do not buy green" rule forbids.
+    #
+    # This DOES change what the gate proves: "behaves correctly while
+    # discarding candidates under scarcity" instead of the narrower "…under
+    # BYTE scarcity". The budget-only evidence is not erased — the
+    # per-class day counts below keep it visible, so a later reader can
+    # still see that byte pressure never occurred.
     pressure_streak = 0
     latest_completed_date = current.date() - timedelta(days=1)
     ordered_dates = sorted(
@@ -647,7 +669,8 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         if expected_date is None or observed_date != expected_date:
             break
         date_key = observed_date.isoformat()
-        if int(daily[date_key]["budget"]) <= 0 or daily[date_key]["valid"] is not True:
+        day_pressure = int(daily[date_key]["budget"]) + int(daily[date_key]["rank"])
+        if day_pressure <= 0 or daily[date_key]["valid"] is not True:
             break
         pressure_streak += 1
         expected_date = observed_date - timedelta(days=1)
@@ -661,7 +684,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     if observation_days < 30:
         freeze_reasons.append(f"production_observation_days:{observation_days:.1f}/30")
     if pressure_streak < 7:
-        freeze_reasons.append(f"budget_pressure_streak:{pressure_streak}/7")
+        freeze_reasons.append(f"selection_pressure_streak:{pressure_streak}/7")
     if schema_gap or conservation_failures or telemetry_degraded_count:
         freeze_reasons.append("schema_era_health_not_pass")
     if natural_records and not attribution_era_records:
@@ -728,7 +751,14 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         "telemetry_degraded_count": telemetry_degraded_count,
         "initial_natural_cycle_count": valid_natural_days,
         "production_observation_days": round(observation_days, 1),
-        "budget_pressure_streak_days": pressure_streak,
+        # Renamed from budget_pressure_streak_days with the 2026-08-14 owner
+        # ruling: a key whose meaning silently widens is exactly the drift
+        # this project keeps paying for, so the old name is retired rather
+        # than redefined. The two day-counts below preserve the pre-ruling
+        # evidence (byte pressure has never occurred on this deployment).
+        "selection_pressure_streak_days": pressure_streak,
+        "budget_pressure_day_count": sum(1 for bucket in daily.values() if int(bucket["budget"]) > 0),
+        "rank_pressure_day_count": sum(1 for bucket in daily.values() if int(bucket["rank"]) > 0),
         "v2c_unfreeze_ready": not freeze_reasons,
         "downstream_clearance_closure_frozen": bool(freeze_reasons),
         "freeze_reasons": freeze_reasons,
