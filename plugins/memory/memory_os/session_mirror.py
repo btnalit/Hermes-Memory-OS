@@ -12,6 +12,7 @@ from typing import Any
 
 from .audit import append_audit
 from .config import load_config
+from .knob_overrides import resolve_knob
 from .execution_gate import (
     complete_execution_gate_envelope,
     execution_gate_scope_hash,
@@ -130,11 +131,55 @@ def session_mirror_graduation_policy(store: MemoryOSStore) -> dict[str, Any]:
             continue
         if any(bool(result_ref.get(key)) for key in _BOUNDARY_KEYS):
             continue
-        platforms = [
+        # Platform scope: allowlist (legacy) vs denylist (owner ruling
+        # 2026-08-14).
+        #
+        # The legacy semantics take the platform of whichever digest item the
+        # owner last approved and apply it as the scope of the WHOLE lane —
+        # and only the latest approval counts. Measured consequence on
+        # production: ten approvals over three months (cli, telegram, acp,
+        # subagent…), the last one happened to be a subagent session, so the
+        # lane's scope became ["subagent"], no session on the host carries
+        # that platform, and all 1510 pending sessions were skipped. The
+        # owner was approving individual items; the system read those as
+        # ever-narrowing lane scope.
+        #
+        # Under the owner's principle — only permanent crystallization needs
+        # owner approval — a summary-only, append-only, reversible import
+        # lane must not carry a per-approval scope at all. This mirrors the
+        # 2026-08-06 graph ruling (proposers emit active directly; wrong
+        # edges are corrected afterwards, with reject kept as an owner verb).
+        # The correction half already exists here: rejected session
+        # fingerprints are durable and never re-imported.
+        #
+        # Default ON (owner confirmed 2026-08-14): the lane admits every
+        # platform except an owner-writable denylist
+        # (`session_mirror.platform_denylist`) — a floor the owner sets once,
+        # not a gate they re-approve. The knob remains as the rollback path
+        # to the legacy allowlist, never as the thing that enables normal
+        # operation. NOTE: the registry default below is metadata only —
+        # resolve_knob uses the value passed HERE, so the two must be
+        # flipped together (changing only the registry is a runtime no-op).
+        admit_all = bool(
+            resolve_knob(
+                "session_mirror_admit_all_platforms",
+                default=True,
+                roots=store.roots,
+            )
+        )
+        if admit_all:
+            platforms = []
+        else:
+            platforms = [
+                str(item).lower().replace("-", "_")
+                for item in (result_ref.get("platform_allowlist") if isinstance(result_ref.get("platform_allowlist"), list) else [])
+                if str(item or "").strip()
+            ][:10]
+        platform_denylist = [
             str(item).lower().replace("-", "_")
-            for item in (result_ref.get("platform_allowlist") if isinstance(result_ref.get("platform_allowlist"), list) else [])
+            for item in (session_config.get("platform_denylist") or [])
             if str(item or "").strip()
-        ][:10]
+        ][:20]
         configured_max = max(int(session_config.get("auto_apply_max_sessions_per_run") or 1), 1)
         approved_max = max(int(result_ref.get("auto_apply_max_sessions_per_run") or result_ref.get("max_sessions") or 1), 1)
         max_sessions = min(configured_max, approved_max)
@@ -149,6 +194,8 @@ def session_mirror_graduation_policy(store: MemoryOSStore) -> dict[str, Any]:
             "approved_max_sessions": approved_max,
             "max_sessions_per_run": max_sessions,
             "platform_allowlist": platforms,
+            "platform_denylist": platform_denylist,
+            "platform_scope_mode": "admit_all_except_denylist" if admit_all else "approval_allowlist",
             "boundary_contract_version": str(result_ref.get("boundary_contract_version") or ""),
             "actual_send": False,
             "actual_execute": False,
@@ -237,6 +284,7 @@ def auto_apply_graduated_session_mirror(
         dry_run=True,
         max_sessions=int(policy.get("max_sessions_per_run") or 1),
         platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+        platform_denylist=policy.get("platform_denylist") if isinstance(policy.get("platform_denylist"), list) else [],
     )
     if int(dry_run.get("selected_session_count") or 0) <= 0:
         last_run_error = _record_auto_apply_last_run(
@@ -266,6 +314,7 @@ def auto_apply_graduated_session_mirror(
         stable_scope_id=str(policy.get("stable_scope_id") or ""),
         max_sessions_per_run=int(policy.get("max_sessions_per_run") or 1),
         platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+        platform_denylist=policy.get("platform_denylist") if isinstance(policy.get("platform_denylist"), list) else [],
         selected_session_fingerprints=selected_fingerprints,
     )
     gate = start_execution_gate_envelope(
@@ -329,6 +378,7 @@ def auto_apply_graduated_session_mirror(
         dry_run=False,
         max_sessions=int(policy.get("max_sessions_per_run") or 1),
         platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+        platform_denylist=policy.get("platform_denylist") if isinstance(policy.get("platform_denylist"), list) else [],
         apply_governance=apply_governance,
     )
     result["schema_version"] = "memory-os.session_mirror_auto_apply.v0"
@@ -481,6 +531,7 @@ class SessionMirror:
         dry_run: bool = True,
         max_sessions: int = 0,
         platform_allowlist: list[str] | tuple[str, ...] | None = None,
+        platform_denylist: list[str] | tuple[str, ...] | None = None,
         apply_governance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not dry_run:
@@ -509,8 +560,16 @@ class SessionMirror:
         ]
         skipped_by_owner_rejection_count = len(pending_sessions) - len(new_sessions)
         platforms = _normalize_platform_allowlist(platform_allowlist)
+        denied = _normalize_platform_allowlist(platform_denylist)
         platform_filtered = [
-            session for session in new_sessions if not platforms or str(session.get("platform") or "").lower() in platforms
+            session
+            for session in new_sessions
+            if (not platforms or str(session.get("platform") or "").lower() in platforms)
+            # The owner's floor under admit-all: an explicit denylist entry
+            # excludes a platform permanently, without them re-approving a
+            # scope. Applied in BOTH modes so a denial can never be widened
+            # back open by an approval.
+            and str(session.get("platform") or "").lower().replace("-", "_") not in denied
         ]
         # Backlog 13: never-imported-first ordering. dedup_key embeds the
         # content hash, so an active session re-enters the pending queue on
@@ -1177,6 +1236,9 @@ def _validate_lane_graduated_governance(
             stable_scope_id=str(policy.get("stable_scope_id") or ""),
             max_sessions_per_run=int(requested_max_sessions or 0),
             platform_allowlist=requested_platforms,
+            # Must mirror the issuing side exactly (scope hash), so it reads
+            # the same policy field the permit was minted from.
+            platform_denylist=policy.get("platform_denylist") if isinstance(policy.get("platform_denylist"), list) else [],
             selected_session_fingerprints=selected_session_fingerprints,
         )
         resolution = resolve_execution_gate_permit(
@@ -1210,6 +1272,7 @@ def _session_mirror_auto_apply_scope(
     stable_scope_id: str,
     max_sessions_per_run: int,
     platform_allowlist: set[str] | list[str] | tuple[str, ...],
+    platform_denylist: set[str] | list[str] | tuple[str, ...] = (),
     selected_session_fingerprints: list[str] | tuple[str, ...],
 ) -> dict[str, Any]:
     return {
@@ -1217,6 +1280,10 @@ def _session_mirror_auto_apply_scope(
         "stable_scope_id": str(stable_scope_id or ""),
         "max_sessions_per_run": int(max_sessions_per_run or 0),
         "platform_allowlist": sorted(_normalize_platform_allowlist(list(platform_allowlist or []))),
+        # Recorded in the apply scope so an audit reader can tell an empty
+        # allowlist that means "admit all" from one that means "nothing was
+        # approved", and can see the owner's floor at the time of the run.
+        "platform_denylist": sorted(_normalize_platform_allowlist(list(platform_denylist or []))),
         "selected_session_fingerprints": [str(item) for item in selected_session_fingerprints],
     }
 

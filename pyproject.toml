@@ -10,6 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+# Console entry point so a plain `pip install` yields a runnable command.
+# Without it the 35-subcommand CLI was only reachable through the Hermes
+# host (`hermes memory-os-agent-os ...`) or `python -m`, which means a
+# newcomer — or an AI agent following the README — had nothing to type
+# after installing. Points at the same module entry `python -m` uses.
+memory-os = "plugins.memory.memory_os.__main__:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8",

@@ -23,6 +23,12 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/cleanup.py::_archive_event_action::path.open_a::archive_path": "retention_archive",
     "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._append_report::path.open_a::self.reports_path": "cycle_report",
     "plugins/memory/memory_os/crystallized.py::append_candidate_queue::path.open_a::path": "candidate_queue_existing_surface",
+    # Derived hot-path projection of "which candidates must not surface in
+    # recall" (owner ruling 2026-08-14, 降级准入). Rebuildable from the
+    # authoritative triage/owner-action ledgers by the candidate_aggregation
+    # lane, exactly like the exposure rollup snapshot — never a source of
+    # truth, so a lost or stale file costs one lane tick, not memory.
+    "plugins/memory/memory_os/crystallized.py::write_candidate_recall_exclusions::atomic_json_replace_call::path": "candidate_recall_exclusion_projection",
     "plugins/memory/memory_os/jsonl_io.py::append_jsonl::path.open_a::target": "shared_jsonl_io_contract",
     # Governed IO primitives — classification follows caller (structural_write_gate or owner action)
     "plugins/memory/memory_os/jsonl_io.py::append_jsonl_locked::path.open_a::target": "governed_io_primitive",
@@ -74,6 +80,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/owner_actions.py::_append_jsonl::path.open_a::path": "owner_actions_private_writer",
     "plugins/memory/memory_os/owner_actions.py::_rendered_digest_text::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
     "plugins/memory/memory_os/owner_actions.py::_candidate_aggregation_status_block::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
+    "plugins/memory/memory_os/owner_actions.py::_exclude_from_recall_now::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_action_error_record",
     "plugins/memory/memory_os/prefetch.py::_record_substrate_shadow_recall::path.open_a::path": "report_only_shadow_recall",
     "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::path.open_a::path": "report_only_graph_layer_shadow",
     # Continuity freshness disclosure. Classified here rather than routed

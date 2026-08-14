@@ -160,6 +160,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "production_apply_owner_ref_required": True,
         "auto_apply_after_owner_home_graduation": True,
         "auto_apply_max_sessions_per_run": 1,
+        # Owner-writable floor for the admit-all platform mode (owner ruling
+        # 2026-08-14). A denylist is the inverse of the retired per-approval
+        # allowlist: the owner sets it once to exclude a platform forever,
+        # instead of re-approving a scope they never meant to narrow.
+        "platform_denylist": [],
     },
     "l4": {
         "kill_switch_enabled": False,
@@ -568,6 +573,10 @@ def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
     merged["test_host_apply_allowed"] = bool(merged.get("test_host_apply_allowed"))
     merged["test_host_marker"] = str(merged.get("test_host_marker") or "")
     merged["production_apply_owner_ref_required"] = bool(merged.get("production_apply_owner_ref_required"))
+    raw_denylist = merged.get("platform_denylist")
+    merged["platform_denylist"] = [
+        str(item) for item in raw_denylist if str(item or "").strip()
+    ] if isinstance(raw_denylist, list) else []
     return merged
 
 

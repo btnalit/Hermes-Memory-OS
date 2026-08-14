@@ -52,6 +52,8 @@ from plugins.memory.memory_os.crystallized import (
     CrystallizedMemoryService,
     _RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
     append_candidate_triage,
+    read_effective_candidates,
+    write_candidate_recall_exclusions,
     read_candidate_queue,
     read_candidate_triage,
     resolve_candidate_effective_state,
@@ -447,10 +449,46 @@ def run_candidate_aggregation_lane(
         retention_days=7,
     )
 
+    # Publish the hot-path recall exclusion projection (owner ruling
+    # 2026-08-14: candidates are admitted to recall at candidate authority
+    # without approval, so the owner's reject must actually take effect).
+    # read_effective_candidates is the authority but costs ~61ms on
+    # production — affordable here in an offline lane, never on the per-turn
+    # prefetch path, which reads the small file this publishes instead.
+    # Fail-open by contract: a failure here leaves the previous snapshot (or
+    # none), which degrades to the pre-ruling behavior rather than blanking
+    # candidate recall.
+    recall_exclusion_count = -1
+    try:
+        effective = read_effective_candidates(store)
+        excluded = {item.candidate.candidate_id for item in effective if item.terminal}
+        write_candidate_recall_exclusions(
+            store,
+            excluded,
+            now=_now,
+            source_counts={
+                "effective_candidates": len(effective),
+                "terminal": len(excluded),
+            },
+        )
+        recall_exclusion_count = len(excluded)
+    except Exception as exc:  # noqa: BLE001 - projection must not break the lane
+        candidate_error_records.append(
+            build_error_record(
+                component="candidate_aggregation",
+                operation="write_candidate_recall_exclusions",
+                error_code="candidate_recall_exclusion_publish_failed",
+                severity="warning",
+                recoverable=True,
+                details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
+        )
+
     result = {
         "candidates_read": len(candidates),
         "pending": len(pending),
         "already_triaged": len(already_triaged),
+        "recall_exclusion_count": recall_exclusion_count,
         "promoted_count": promote_results["promoted_count"],
         "promoted_clusters": promote_results["clusters"],
         "rejected_demoted_count": rejected_results["rejected_demoted_count"],

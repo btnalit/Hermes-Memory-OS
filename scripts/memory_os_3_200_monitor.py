@@ -4563,6 +4563,10 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "migration_controller",
     "override_sweep",
     "owner_actions._candidate_aggregation_status_block",
+    # CQ: the owner reject's immediate recall-exclusion write is fail-open, so
+    # a failure there is only visible as this error record — the reject still
+    # lands via the <=6h authority path, but silently later than promised.
+    "owner_actions._exclude_from_recall_now",
     # owner_actions._rendered_digest_text: R3 removed the edge-review digest
     # section together with its edge_digest_query_failed emitter.
     "prefetch",
