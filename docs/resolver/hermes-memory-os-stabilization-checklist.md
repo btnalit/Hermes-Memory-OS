@@ -5453,3 +5453,64 @@ matrix + `git diff --check` 全绿；import cycle 0；write surface unclassified
   归属三向实测通过(sannai 正标/冲突拒绝/main 不变),心跳核心写入方同步
   生效;暴露迁移期三项先存问题(main 心跳停摆/图谱注入归因缺口/监控超时)
   移交宿主与图谱工作流。
+
+### CO — 三项迁移期遗留修复：per-profile systemd 单元 + 规范 source-id 前缀(纪元 v3) + 探针预算（2026-08-14，PR #56 → `3db959e`，双 home 已部署验证）
+
+**owner 对 ① 的推测完全正确**：定时心跳是单例进程冲突，定时任务需要多
+profile 适配。
+
+**① main 心跳停摆(根因实抓)**：心跳由 systemd **用户级** timer 驱动
+（`hermes-memory-os-heartbeat.timer` 5min → `python3 -m
+plugins.memory.memory_os heartbeat`，父进程 `systemd --user`——系统级
+`list-timers` 查不到,这就是首轮排查扑空的原因）。安装器写**固定名**单元
+→ 多 profile 主机谁最后部署谁赢：08-12 迁移把 ExecStart 指到 sannai,
+main 心跳 05:26 起死亡;CN 部署时 main apply 曾于 01:33 短暂夺回(当日
+孤立心跳的成因),sannai apply 又抢走。**修复**：profiles/<name> 形 home
+生成带后缀单元 + crc32 确定性 OnBootSec 错峰(周期不变);根 home 保留旧
+名。install.sh 探测与 monitor 内嵌单元检查同步后缀感知。**部署实测**：
+四单元并存各指其主,main 心跳恢复 3-5min 节律,`heartbeat_state_fresh`
+转 PASS。
+**② 图谱/索引段归因缺口**：生产者用存储层类型名拼 source_ids
+(`crystallized_record:`/`crystallized_candidate:`),安全白名单与审计分类
+词表只认规范前缀(`crystallized:`/`candidate:`) → ID 写入前被静默滤空
+——CC 记载的"生产者与门词表漂移"第三例;CJ/CL 注入上线首批真实入选段
+全部落成 v2 纪元缺口(10 行)。**修复**：`prefetch._canonical_source_id`
+归一 + 词表守卫测试双向钉死(含 index 写入端 record_type 源扫描);既有
+graph 测试原钉着从未过过滤器的错误格式,已改并加过滤器往返断言;
+`ATTRIBUTION_SCHEMA_VERSION` v2→v3(按 v1→v2 先例,v2 行降为已分类债务,
+空 v3 纪元 healthy_no_sample 不买绿)。**部署实测**：
+`v2_exposure_schema_era_healthy` 转 PASS。
+**③ 监控探针 300s 硬顶**：`collect_snapshot` 调 `_run_probe` 从不传
+timeout → caller 声明 480/600s 也在精确 300.0s 被杀。**修复**：探针预算
+= max(300, caller−30s);`full_monitor_refresh` 声明自身包络(测试伪
+monitor 该参数 required——旧 wrapper 不传即失败,内建反事实)。**部署
+实测**：314.6s / 301.9s 两次完整跑完,probe_script_timeout 消失,余
+`runtime_over_target` WARN(诚实,主机容量项)。
+
+**部署后新观察(非本批引入,已定性)**：①心跳复活消化两日积压 + monitor
+自身 22 条 CLI 探针写 audit 的自致负载,使 `index_not_healthy(_in_
+production)`/`doctor_not_ok` 在监控窗口内振荡出现——sync tick 即自愈
+(lane_last_run 实录 `synced`/drift=0,audit 增速 6 分钟内从 ~百/10min
+降到 +5),已平息;②`shell_alias_no_env_failed` 本轮 2/2 复现——BY.3
+"无实测复现"观察点升级为"sannai 共存负载下可复现",与 runtime_over_
+target 同根(容量),移交 owner 决策(nice/限流/错峰或接受 WARN)。
+仲裁者=次日 02:30 夜间产物(③修复已生效)。
+
+**V2/V3 毕业核查(owner 问"观察期够了吧")**：V2 观察期**已达标**
+(31/30 天、自然周期 15/3),解冻剩两条:纪元健康(本批已修,待 v3 流量
+转真 PASS)+ `budget_pressure_streak 0/7`(要连续 7 天真实预算压力,
+数据驱动等不来即没有);V3 **不够**——30 连续有效日要求下最长 6 天,
+08-11 自然日行缺失(迁移日 00:05 tick 未产出)断档,08-12 重算,最早
+~09-11 达标;09-05 复查日按裁定应记录成因并顺延明确新日期。
+
+**登记未修**：`memory_os_upgrade_compat_check.py` 的 cognitive_loop_timer
+探测是静态固定名(informational,required=False),profile home 下显示的
+是 default 单元状态——后缀感知留待下次触碰该文件时顺手(只减不增)。
+
+**测试计数**：3324 → **3332 passed** / 13 skipped(+8);四静态门全绿;
+四项反事实 revert→FAIL(词表测试 ImportError 级)→restore→PASS 实测。
+
+- `2b70e57..3db959e(PR#56 CO)`:三项迁移遗留一次收口 — systemd 单元
+  per-profile 化(main 心跳复活实测)、source-id 规范前缀归一+纪元 v3
+  (era FAIL 清除)、探针预算接线(314s 完整跑通);V2 观察期达标唯剩
+  压力 streak,V3 需重攒 30 日;全量 3332/13。
