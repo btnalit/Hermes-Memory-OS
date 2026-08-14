@@ -93,6 +93,9 @@ INDEX_CATCHUP_MAX_EVENT_BACKLOG = 1
 FULL_MONITOR_LIVE_TARGET_SECONDS = 180
 FULL_MONITOR_CLEAN_HOST_TARGET_SECONDS = 240
 FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS = 300
+# Reserved for post-probe classification/render when deriving the probe
+# budget from a caller-declared timeout (see collect_snapshot).
+FULL_MONITOR_PROBE_TIMEOUT_MARGIN_SECONDS = 30
 FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS = 120
 MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "hindsight_provider_stats": {
@@ -4964,8 +4967,28 @@ def collect_snapshot(
     python_bin: str = "python3",
     previous: dict[str, Any] | None = None,
     monitor_profile: str = "live",
+    caller_timeout_seconds: int = 0,
 ) -> dict[str, Any]:
-    raw = _run_probe(host, _remote_probe_script(hermes_home), python_bin=python_bin)
+    # The probe subprocess used to be capped at the 300s floor regardless of
+    # the caller's declared budget, so a caller that passed
+    # --caller-timeout-seconds 480/600 still saw the probe killed at exactly
+    # 300.0s (production: nightly refresh runs with a 600s envelope while
+    # sannai co-tenancy pushed the probe past 300s → probe_script_timeout
+    # FAIL every night). Grant the probe the caller's budget minus a bounded
+    # margin for classification/rendering, never below the 300s floor.
+    probe_timeout = FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS
+    declared = max(int(caller_timeout_seconds or 0), 0)
+    if declared > 0:
+        probe_timeout = max(
+            FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS,
+            declared - FULL_MONITOR_PROBE_TIMEOUT_MARGIN_SECONDS,
+        )
+    raw = _run_probe(
+        host,
+        _remote_probe_script(hermes_home),
+        python_bin=python_bin,
+        timeout_seconds=probe_timeout,
+    )
     if raw.get("_probe_timeout"):
         # The whole probe script hung/timed out before producing any JSON.
         # Short-circuit with an explicit FAIL rather than feeding a
@@ -5095,6 +5118,7 @@ def main(argv: list[str] | None = None) -> int:
         python_bin=args.python_bin,
         previous=previous,
         monitor_profile=monitor_profile,
+        caller_timeout_seconds=int(args.caller_timeout_seconds or 0),
     )
     elapsed = time.monotonic() - started
     snapshot.setdefault("host_runtime_profile", host_profile.to_dict())
@@ -9098,7 +9122,14 @@ cfg_path = Path(_hermes_home) / "memory-os" / "config.json"
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", os.path.join(_hermes_home, "memory-os")])["out"]
 du = run(["du", "-sh", os.path.join(_hermes_home, "memory-os")])["out"]
-heartbeat_list = run(["systemctl", "--user", "list-timers", "hermes-memory-os-heartbeat.timer", "--no-pager"])["out"]
+# Per-profile unit suffix: must match install_memory_os_plugin.py::
+# _runtime_unit_suffix — profiles/<name>-shaped homes carry suffixed unit
+# names so multi-profile hosts stop overwriting each other's timers.
+_home_path = Path(_hermes_home).resolve()
+_unit_suffix = f"-{_home_path.name}" if _home_path.name and _home_path.parent.name == "profiles" else ""
+_hb_timer = f"hermes-memory-os-heartbeat{_unit_suffix}.timer"
+_cl_timer = f"hermes-memory-os-cognitive-loop{_unit_suffix}.timer"
+heartbeat_list = run(["systemctl", "--user", "list-timers", _hb_timer, "--no-pager"])["out"]
 
 print(json.dumps({
   "hostname": run(["hostname"])["out"],
@@ -9106,13 +9137,13 @@ print(json.dumps({
   "date_local": run(["date", "+%Y-%m-%d %H:%M:%S %Z"])["out"],
   "gateway": system_show("hermes-gateway.service"),
   "hermes_status": hermes_status_summary(),
-  "heartbeat_timer": system_show("hermes-memory-os-heartbeat.timer"),
-  "heartbeat_service": system_show("hermes-memory-os-heartbeat.service"),
+  "heartbeat_timer": system_show(_hb_timer),
+  "heartbeat_service": system_show(f"hermes-memory-os-heartbeat{_unit_suffix}.service"),
   "heartbeat_state": heartbeat_state(),
-  "heartbeat_listed": "hermes-memory-os-heartbeat.timer" in heartbeat_list,
-  "cognitive_loop_timer": system_show("hermes-memory-os-cognitive-loop.timer"),
-  "cognitive_loop_service": system_show("hermes-memory-os-cognitive-loop.service"),
-  "cognitive_loop_listed": "hermes-memory-os-cognitive-loop.timer" in run(["systemctl", "--user", "list-timers", "hermes-memory-os-cognitive-loop.timer", "--no-pager"])["out"],
+  "heartbeat_listed": _hb_timer in heartbeat_list,
+  "cognitive_loop_timer": system_show(_cl_timer),
+  "cognitive_loop_service": system_show(f"hermes-memory-os-cognitive-loop{_unit_suffix}.service"),
+  "cognitive_loop_listed": _cl_timer in run(["systemctl", "--user", "list-timers", _cl_timer, "--no-pager"])["out"],
   "memory_status": {
     "counts": status.get("counts") if isinstance(status, dict) else None,
     "index_counts": status.get("index_counts") if isinstance(status, dict) else None,

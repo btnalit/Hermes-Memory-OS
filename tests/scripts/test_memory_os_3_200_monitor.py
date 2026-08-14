@@ -116,8 +116,8 @@ def test_collect_snapshot_probe_timeout_short_circuits_to_fail_without_crash(mon
     the near-empty dict through the summarize_*/classify_snapshot chain (an
     unverified assumption) — it short-circuits to an explicit FAIL with a
     named code, and main()'s exit-code contract (0 vs 2) still works."""
-    def fake_run_probe(host, script, python_bin="python3"):
-        return {"_probe_timeout": True, "_probe_timeout_seconds": 300}
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
+        return {"_probe_timeout": True, "_probe_timeout_seconds": timeout_seconds}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
 
@@ -129,6 +129,30 @@ def test_collect_snapshot_probe_timeout_short_circuits_to_fail_without_crash(mon
     assert any(item["code"] == "probe_script_timeout" for item in snapshot["classification"]["fail"])
     # render_chinese_summary must also tolerate the near-empty snapshot.
     assert "监控结果: FAIL" in render_chinese_summary(snapshot)
+
+
+def test_collect_snapshot_grants_probe_the_caller_budget_minus_margin(monkeypatch):
+    """Counterfactual for the nightly probe_script_timeout FAILs: the probe
+    subprocess was hard-capped at the 300s floor no matter what the caller
+    declared, so a 600s nightly envelope still killed the probe at exactly
+    300.0s. The probe budget must follow the declared envelope (minus the
+    render margin), and must never drop below the floor."""
+    captured: list[int] = []
+
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
+        captured.append(timeout_seconds)
+        return {"_probe_timeout": True, "_probe_timeout_seconds": timeout_seconds}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    kwargs = dict(host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live")
+    monitor.collect_snapshot(**kwargs, caller_timeout_seconds=600)
+    monitor.collect_snapshot(**kwargs)  # undeclared → floor
+    monitor.collect_snapshot(**kwargs, caller_timeout_seconds=200)  # below floor → floor
+
+    floor = monitor.FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS
+    margin = monitor.FULL_MONITOR_PROBE_TIMEOUT_MARGIN_SECONDS
+    assert captured == [600 - margin, floor, floor]
 
 
 def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, monkeypatch):
@@ -490,7 +514,7 @@ def test_collect_snapshot_remote_populates_v2_exposure_from_successful_probe(mon
     fake_v2_exposure = {"schema_era_health": "PASS", "conservation_total_passes": True}
     fake_clearance = {"status": "fresh"}
 
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         assert host == "fake-host"
         return {
             "v2_exposure_and_clearance_probe": {
@@ -514,7 +538,7 @@ def test_collect_snapshot_remote_probe_failure_becomes_explicit_unavailable_with
     """Fix 1: SSH/runtime/bad-JSON style remote sub-probe failure never
     silently skips — it becomes an explicit unavailable+error_code shape
     which classify_snapshot turns into a WARN (Fix 2)."""
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {"v2_exposure_and_clearance_probe": {"ok": False, "error_code": "ImportError"}}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
@@ -535,7 +559,7 @@ def test_collect_snapshot_remote_probe_missing_field_is_not_silent(monkeypatch):
     v2_exposure_and_clearance_probe field entirely (e.g. an unexpected/older
     remote payload shape), this must still surface as an explicit failure —
     never silently 'unavailable' with no signal at all."""
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
@@ -564,7 +588,7 @@ def test_collect_snapshot_remote_populates_living_memory_promotion_ledger_from_s
         "stale_open_proposal_count": 3,
     }
 
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {"living_memory_promotion_probe": {"ok": True, "counts": fake_counts}}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
@@ -587,7 +611,7 @@ def test_collect_snapshot_remote_ledger_probe_failure_becomes_explicit_warn(monk
     never silently leaves the ledger counts looking like a verified zero —
     it becomes an explicit unavailable+error_code shape which classify_snapshot
     turns into a WARN (never a silent pass)."""
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {"living_memory_promotion_probe": {"ok": False, "error_code": "ImportError"}}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
@@ -609,7 +633,7 @@ def test_collect_snapshot_remote_ledger_probe_missing_field_is_not_silent(monkey
     """Defensive: even if the remote probe response is missing the
     living_memory_promotion_probe field entirely, this must still surface
     as an explicit failure — never silently 'unavailable' with no signal."""
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {}
 
     monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
@@ -629,7 +653,7 @@ def test_collect_snapshot_remote_probe_field_present_but_not_dict_is_not_silent(
     remote script) must be treated the same as a missing field — explicit
     unavailable+error_code, never a silent pass. Covers the
     _consume_remote_probe branch that a present-but-absent test cannot."""
-    def fake_run_probe(host, script, python_bin="python3"):
+    def fake_run_probe(host, script, python_bin="python3", timeout_seconds=300):
         return {
             "v2_exposure_and_clearance_probe": "not-a-dict",
             "living_memory_promotion_probe": ["also", "not", "a", "dict"],
@@ -5970,7 +5994,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
         encoding="utf-8",
     )
 
-    def fake_collect_snapshot(*, host, hermes_home, python_bin, previous, monitor_profile):
+    def fake_collect_snapshot(*, host, hermes_home, python_bin, previous, monitor_profile, caller_timeout_seconds=0):
         assert host == "fake-host"
         assert monitor_profile == "clean_host"
         assert previous["memory_status"]["counts"]["audit_entries"] == 5

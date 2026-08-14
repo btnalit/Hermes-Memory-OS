@@ -387,6 +387,22 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Per-profile systemd unit-name suffix. MUST match
+# install_memory_os_plugin.py::_runtime_unit_suffix: '' for a root home,
+# '-<name>' for a profiles/<name>-shaped HERMES_HOME. Fixed unit names made
+# every install overwrite the previous profile's units on multi-profile
+# hosts (last deploy won; the loser's heartbeat silently stopped).
+unit_suffix() {
+  local home_base home_parent
+  home_base="$(basename "${HERMES_HOME}")"
+  home_parent="$(basename "$(dirname "${HERMES_HOME}")")"
+  if [[ "${home_parent}" == "profiles" && -n "${home_base}" ]]; then
+    echo "-${home_base}"
+  else
+    echo ""
+  fi
+}
+
 inspect_current_state() {
   echo "Memory-OS install preflight"
   echo "---------------------------"
@@ -396,7 +412,7 @@ inspect_current_state() {
   echo "provider_dir=$([[ -d "${HERMES_HOME}/plugins/memory_os" ]] && echo present || echo missing)"
   echo "shell_dir=$([[ -d "${HERMES_HOME}/plugins/memory-os-agent-os" ]] && echo present || echo missing)"
   echo "runtime_dir=$([[ -d "${HERMES_HOME}/memory-os/runtime/python" ]] && echo present || echo missing)"
-  echo "cognitive_loop_unit=$([[ -f "${HERMES_HOME}/memory-os/systemd/hermes-memory-os-cognitive-loop.timer" ]] && echo present || echo missing)"
+  echo "cognitive_loop_unit=$([[ -f "${HERMES_HOME}/memory-os/systemd/hermes-memory-os-cognitive-loop$(unit_suffix).timer" ]] && echo present || echo missing)"
 
   if command_exists hermes; then
     echo
@@ -412,11 +428,11 @@ inspect_current_state() {
   if command_exists systemctl; then
     echo
     echo "Heartbeat timer state:"
-    systemctl --user show hermes-memory-os-heartbeat.timer \
+    systemctl --user show "hermes-memory-os-heartbeat$(unit_suffix).timer" \
       -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager 2>/dev/null || true
     echo
     echo "Cognitive loop timer state:"
-    systemctl --user show hermes-memory-os-cognitive-loop.timer \
+    systemctl --user show "hermes-memory-os-cognitive-loop$(unit_suffix).timer" \
       -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager 2>/dev/null || true
   fi
   echo
@@ -773,12 +789,12 @@ verify_install() {
   if command_exists systemctl; then
     # ── Heartbeat timer (core #1) ────────────────────────────────
     if [[ "${ENABLE_RUNTIME}" == "1" ]]; then
-      if systemctl --user is-active hermes-memory-os-heartbeat.timer >/dev/null 2>&1; then
+      if systemctl --user is-active "hermes-memory-os-heartbeat$(unit_suffix).timer" >/dev/null 2>&1; then
         echo "  [PASS] heartbeat timer is active"
       else
         verify_failures+=("heartbeat timer is not active (ENABLE_RUNTIME=1)")
       fi
-      if systemctl --user is-enabled hermes-memory-os-heartbeat.timer >/dev/null 2>&1; then
+      if systemctl --user is-enabled "hermes-memory-os-heartbeat$(unit_suffix).timer" >/dev/null 2>&1; then
         echo "  [PASS] heartbeat timer is enabled"
       else
         verify_failures+=("heartbeat timer is not enabled (ENABLE_RUNTIME=1)")
@@ -787,12 +803,12 @@ verify_install() {
 
     # ── Cognitive-loop timer (core #2) ───────────────────────────
     if [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]]; then
-      if systemctl --user is-active hermes-memory-os-cognitive-loop.timer >/dev/null 2>&1; then
+      if systemctl --user is-active "hermes-memory-os-cognitive-loop$(unit_suffix).timer" >/dev/null 2>&1; then
         echo "  [PASS] cognitive-loop timer is active"
       else
         verify_failures+=("cognitive-loop timer is not active (ENABLE_COGNITIVE_LOOP=1)")
       fi
-      if systemctl --user is-enabled hermes-memory-os-cognitive-loop.timer >/dev/null 2>&1; then
+      if systemctl --user is-enabled "hermes-memory-os-cognitive-loop$(unit_suffix).timer" >/dev/null 2>&1; then
         echo "  [PASS] cognitive-loop timer is enabled"
       else
         verify_failures+=("cognitive-loop timer is not enabled (ENABLE_COGNITIVE_LOOP=1)")

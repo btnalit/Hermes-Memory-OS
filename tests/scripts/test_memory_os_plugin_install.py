@@ -379,6 +379,47 @@ def test_installer_can_write_cognitive_loop_artifacts(tmp_path):
     assert "OnUnitActiveSec=6h" in timer.read_text(encoding="utf-8")
 
 
+def test_installer_writes_profile_suffixed_units_for_profile_shaped_home(tmp_path):
+    """Multi-profile hosts: profiles/<name>-shaped homes get per-profile unit
+    names so co-tenant installs stop overwriting each other's timers.
+    Counterfactual (the 3.200 incident): with fixed unit names the sannai
+    install re-pointed hermes-memory-os-heartbeat.service and main's
+    heartbeat silently stopped for ~2 days."""
+    home = tmp_path / ".hermes" / "profiles" / "sannai"
+    report = install_plugin(
+        hermes_home=home,
+        install_runtime=True,
+        install_cognitive_loop=True,
+        cognitive_loop_interval="6h",
+    )
+
+    assert report["runtime_artifacts_installed"] is True
+    systemd_dir = home / "memory-os" / "systemd"
+    hb_service = systemd_dir / "hermes-memory-os-heartbeat-sannai.service"
+    hb_timer = systemd_dir / "hermes-memory-os-heartbeat-sannai.timer"
+    cl_timer = systemd_dir / "hermes-memory-os-cognitive-loop-sannai.timer"
+    assert hb_service.is_file()
+    assert hb_timer.is_file()
+    assert cl_timer.is_file()
+    assert not (systemd_dir / "hermes-memory-os-heartbeat.service").exists()
+    # Deterministic per-profile boot stagger; the recurring period is
+    # untouched so the lane cadence does not change.
+    timer_text = hb_timer.read_text(encoding="utf-8")
+    assert "OnUnitActiveSec=5min" in timer_text
+    assert "OnBootSec=5min" in timer_text  # base interval retained (offset may follow)
+
+
+def test_root_home_keeps_legacy_unsuffixed_unit_names(tmp_path):
+    home = tmp_path / "home"
+    install_plugin(hermes_home=home, install_runtime=True)
+
+    systemd_dir = home / "memory-os" / "systemd"
+    assert (systemd_dir / "hermes-memory-os-heartbeat.service").is_file()
+    assert not list(systemd_dir.glob("hermes-memory-os-heartbeat-*.service"))
+    timer_text = (systemd_dir / "hermes-memory-os-heartbeat.timer").read_text(encoding="utf-8")
+    assert "OnBootSec=5min\n" in timer_text  # no stagger suffix for root homes
+
+
 def test_installer_does_not_write_cognitive_loop_artifacts_by_default(tmp_path):
     report = install_plugin(hermes_home=tmp_path / "home")
 

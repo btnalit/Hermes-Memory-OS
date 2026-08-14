@@ -11,6 +11,7 @@ import stat
 import shutil
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -518,14 +519,15 @@ def install_plugin(
                 dry_run=dry_run,
             )
         unit_dir = (systemd_dir or (Path.home() / ".config" / "systemd" / "user")).expanduser().resolve()
-        service_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-heartbeat.service"
-        timer_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-heartbeat.timer"
+        unit_suffix = _runtime_unit_suffix(hermes_home)
+        service_src = hermes_home / "memory-os" / "systemd" / f"hermes-memory-os-heartbeat{unit_suffix}.service"
+        timer_src = hermes_home / "memory-os" / "systemd" / f"hermes-memory-os-heartbeat{unit_suffix}.timer"
         runtime_enable_command = [
             "systemctl",
             "--user",
             "enable",
             "--now",
-            "hermes-memory-os-heartbeat.timer",
+            f"hermes-memory-os-heartbeat{unit_suffix}.timer",
         ]
         if not dry_run:
             unit_dir.mkdir(parents=True, exist_ok=True)
@@ -559,14 +561,15 @@ def install_plugin(
                 dry_run=dry_run,
             )
         unit_dir = (systemd_dir or (Path.home() / ".config" / "systemd" / "user")).expanduser().resolve()
-        service_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.service"
-        timer_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.timer"
+        unit_suffix = _runtime_unit_suffix(hermes_home)
+        service_src = hermes_home / "memory-os" / "systemd" / f"hermes-memory-os-cognitive-loop{unit_suffix}.service"
+        timer_src = hermes_home / "memory-os" / "systemd" / f"hermes-memory-os-cognitive-loop{unit_suffix}.timer"
         cognitive_loop_enable_command = [
             "systemctl",
             "--user",
             "enable",
             "--now",
-            "hermes-memory-os-cognitive-loop.timer",
+            f"hermes-memory-os-cognitive-loop{unit_suffix}.timer",
         ]
         if not dry_run:
             unit_dir.mkdir(parents=True, exist_ok=True)
@@ -1011,11 +1014,44 @@ def _read_yaml_config(config_path: Path) -> dict[str, Any]:
     return dict(loaded)
 
 
+def _runtime_unit_suffix(hermes_home: Path) -> str:
+    """Per-profile systemd unit-name suffix: '' for a root home, '-<name>'
+    for a profiles/<name>-shaped home.
+
+    The systemd user units used to carry FIXED names, so on a multi-profile
+    host every install overwrote the previous profile's units — last deploy
+    won, and the losing profile's heartbeat/cognitive loop silently stopped
+    (production: main's heartbeat was dead for ~2 days after the sannai
+    migration re-pointed hermes-memory-os-heartbeat.service). Root homes
+    keep the legacy unsuffixed names so single-profile hosts are unaffected.
+    """
+    home = Path(hermes_home).expanduser().resolve()
+    if home.name and home.parent.name == "profiles":
+        return f"-{home.name}"
+    return ""
+
+
+def _timer_boot_stagger(hermes_home: Path, interval: str) -> str:
+    """OnBootSec value with a stable per-profile offset for suffixed homes.
+
+    Deterministic (crc32 of the profile name, no randomness) so co-tenant
+    profiles' timers do not all fire in the same second after boot;
+    OnUnitActiveSec periods stay identical — relative scheduling naturally
+    dephases them afterwards.
+    """
+    suffix = _runtime_unit_suffix(hermes_home)
+    if not suffix:
+        return interval
+    offset = zlib.crc32(suffix.encode("utf-8")) % 120
+    return f"{interval} {offset}s" if offset else interval
+
+
 def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool) -> list[Path]:
     runtime_root = hermes_home / "memory-os"
+    unit_suffix = _runtime_unit_suffix(hermes_home)
     wrapper = runtime_root / "bin" / "memory_os_heartbeat.sh"
-    service = runtime_root / "systemd" / "hermes-memory-os-heartbeat.service"
-    timer = runtime_root / "systemd" / "hermes-memory-os-heartbeat.timer"
+    service = runtime_root / "systemd" / f"hermes-memory-os-heartbeat{unit_suffix}.service"
+    timer = runtime_root / "systemd" / f"hermes-memory-os-heartbeat{unit_suffix}.timer"
     artifacts = [wrapper, service, timer]
     if dry_run:
         return artifacts
@@ -1042,7 +1078,7 @@ def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool)
         "[Unit]\n"
         "Description=Run Hermes Memory-OS heartbeat periodically\n\n"
         "[Timer]\n"
-        f"OnBootSec={interval}\n"
+        f"OnBootSec={_timer_boot_stagger(hermes_home, interval)}\n"
         f"OnUnitActiveSec={interval}\n"
         "AccuracySec=30s\n\n"
         "[Install]\n"
@@ -1054,9 +1090,10 @@ def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool)
 
 def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run: bool) -> list[Path]:
     runtime_root = hermes_home / "memory-os"
+    unit_suffix = _runtime_unit_suffix(hermes_home)
     wrapper = runtime_root / "bin" / "memory_os_cognitive_loop.sh"
-    service = runtime_root / "systemd" / "hermes-memory-os-cognitive-loop.service"
-    timer = runtime_root / "systemd" / "hermes-memory-os-cognitive-loop.timer"
+    service = runtime_root / "systemd" / f"hermes-memory-os-cognitive-loop{unit_suffix}.service"
+    timer = runtime_root / "systemd" / f"hermes-memory-os-cognitive-loop{unit_suffix}.timer"
     artifacts = [wrapper, service, timer]
     if dry_run:
         return artifacts
@@ -1083,7 +1120,7 @@ def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run
         "[Unit]\n"
         "Description=Run Hermes Memory-OS test-host cognitive loop periodically\n\n"
         "[Timer]\n"
-        f"OnBootSec={interval}\n"
+        f"OnBootSec={_timer_boot_stagger(hermes_home, interval)}\n"
         f"OnUnitActiveSec={interval}\n"
         "AccuracySec=30s\n"
         "Persistent=true\n\n"

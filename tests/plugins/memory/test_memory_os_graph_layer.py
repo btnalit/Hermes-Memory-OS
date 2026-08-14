@@ -1794,8 +1794,18 @@ def test_render_formats_direction_normalized_chinese_lines(tmp_path):
     assert len(line) <= 220
     assert ("crystallized_record", rid_b) in seen, "dedup registers the NEIGHBOR"
     assert ("crystallized_record", rid_a) not in seen, "anchor must not be re-registered"
-    assert source_ids == [f"crystallized_record:{rid_b}"], (
+    # Canonical citation prefix, NOT the storage-layer type name: the old
+    # f"crystallized_record:{id}" format was silently dropped by
+    # filter_safe_source_id_values, so every graph disclosure landed as an
+    # attribution gap. This assertion (and the filter round-trip below) pins
+    # the producer to a format the safety allowlist actually accepts.
+    assert source_ids == [f"crystallized:{rid_b}"], (
         f"attribution must follow the displayed neighbor: {source_ids}"
+    )
+    from plugins.memory.memory_os.source_ids import filter_safe_source_id_values
+
+    assert filter_safe_source_id_values(source_ids) == source_ids, (
+        f"graph source_ids must survive the safety allowlist: {source_ids}"
     )
     assert decisions[0]["injected"] is True
     assert decisions[0]["outcome"] == "emitted_full"
@@ -2233,8 +2243,8 @@ def test_exploration_slots_rotate_daily_and_bound_selection(tmp_path):
     not_selected = [d for d in decisions_a if d["outcome"] == "not_selected"]
     assert len(not_selected) == 12 - cap, "the rest must be ledgered as not_selected"
 
-    # top-6 按权重恒在(exploit 位)
-    top6 = {f"crystallized_record:{nid}" for nid in neighbor_ids[:GRAPH_EXPLOIT_SLOTS]}
+    # top-6 按权重恒在(exploit 位)— source_ids 用规范引用前缀(见 1797 行注释)
+    top6 = {f"crystallized:{nid}" for nid in neighbor_ids[:GRAPH_EXPLOIT_SLOTS]}
     assert top6 <= set(sel_a), f"exploit slots must keep the top-{GRAPH_EXPLOIT_SLOTS}"
 
     # 探索位跨日轮转:一周内至少出现两种探索子集(确定性哈希,非随机)
