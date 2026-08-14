@@ -187,7 +187,43 @@ she speaks is hers to decide.**
 
 ## Quick Start
 
-### Requirements
+Two lanes. Pick by what you have.
+
+| Lane | You have | You get | Touches your machine? |
+| --- | --- | --- | --- |
+| **A — Try it (blank machine)** | Python 3.11+ and this checkout | The real provider running end-to-end against a throwaway profile | No. Temp dir only; no network, no systemd, no Hermes |
+| **B — Install it (host)** | A Linux host with an existing Hermes Agent profile | Provider + runtime loops + governed cron lanes | Yes — see lane B |
+
+### Lane A — Try it on a blank machine
+
+No Hermes install, no host, no credentials. Two commands:
+
+```bash
+pip install -e .
+python scripts/memory_os_blank_host_smoke.py
+```
+
+The smoke creates its own temporary profile, drives the real provider
+(`sync_turn` → events → SQLite index → working memory), exercises the
+migrator flow, and prints a JSON report. It never touches an existing
+profile, never opens the network, and never restarts a gateway — the report
+states each of those as an explicit field.
+
+`pip install` also gives you the CLI, which works against any directory you
+point `HERMES_HOME` at:
+
+```bash
+HERMES_HOME=/tmp/memory-os-demo memory-os doctor    # structured health findings
+HERMES_HOME=/tmp/memory-os-demo memory-os status    # counts, index state, prefetch mode
+```
+
+`memory-os --help` lists all subcommands. This lane is enough to read the
+data model, run the test suite, and evaluate the governance surfaces before
+committing a host.
+
+### Lane B — Install on a Hermes host
+
+#### Requirements
 
 - Linux host with an existing Hermes Agent profile
 - Python 3.11+
@@ -195,7 +231,7 @@ she speaks is hers to decide.**
 - `systemctl --user` for timer-based runtime loops; cron fallback remains
   available where user systemd is unavailable
 
-### Install the operational profile
+#### Install the operational profile
 
 ```bash
 git clone https://github.com/btnalit/Hermes-Memory-OS.git
@@ -217,7 +253,7 @@ HERMES_HOME=/root/.hermes \
 
 The installer does **not** restart `hermes-gateway.service`.
 
-### Choose an install posture
+#### Choose an install posture
 
 | Preset | Intended use | Notable behavior |
 | --- | --- | --- |

@@ -3,6 +3,21 @@
 This is the shortest path for installing and verifying Memory-OS on an existing
 Hermes profile.
 
+**No Hermes host yet?** Start with the blank-machine lane instead — it needs
+nothing but Python 3.11+ and this checkout:
+
+```bash
+pip install -e .
+python scripts/memory_os_blank_host_smoke.py
+```
+
+That builds a throwaway profile in a temp directory, drives the real provider
+end to end, and prints a JSON report (it never touches an existing profile,
+never opens the network, and never restarts a gateway). `pip install` also
+installs the `memory-os` CLI, which runs against any `HERMES_HOME` you point
+it at — `HERMES_HOME=/tmp/demo memory-os doctor`. Come back here when you have
+a host to install onto.
+
 ## 1. Choose A Hermes Home
 
 Use the Hermes profile you want Memory-OS to manage:

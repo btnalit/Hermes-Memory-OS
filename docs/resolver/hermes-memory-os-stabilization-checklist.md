@@ -3948,11 +3948,21 @@ E8b 后)选入 14/词表否决 1/风险 0 — 当前流量下几乎不存在。6
 放宽 casual 防线的理由。对照:同账本 Related Memory 全史仅出现 1 次
 (CK 的必要性一个数字说明)。若未来 agent 体验反例出现可凭同一账本重查。
 
-**V3 激活复查日：2026-09-05（不许无日期搁置——owner 决策 2026-08-06）。**
-标准：届时 `v3_seed_evidence_snapshot.activation_evidence_ready=True` 且
+**V3 激活复查日：~~2026-09-05~~ → 顺延至 2026-09-12（owner 批准 2026-08-14，
+按同一"不许无日期搁置"规则记录成因）。**
+标准不变：届时 `v3_seed_evidence_snapshot.activation_evidence_ready=True` 且
 Full Monitor 0 FAIL → 开启 R4（`wandering_enabled=true` 影子观察 14 天再评
-R5）；若 ready=False（当前连续 4/30 天、历史中断 11 次）→ 记录中断原因并
-设定一个**明确的新日期**顺延，同样不许开放式搁置。
+R5）；若仍 ready=False → 记录中断原因并再设一个**明确的新日期**。
+
+**顺延成因（2026-08-14 实测，不是"没到时候"而是有具体断点）**：
+`activation_evidence_ready=False`，历史最长连续有效日 **6/30**
+（2026-08-05→08-10），`valid_day_count=17`、`invalid_day_count=11`。
+断点是 **08-11 整天无自然日行**——该日的 `v3_seed_evidence` 运行在
+`2026-08-12T06:53` 落 `execution_status=error`（sannai 迁移窗口，与 CO 节
+main 心跳停摆、CP 节选择压力连击重置同源）。08-12 起重新计数，因此 30 连
+续日最早在 **~2026-09-11** 达成，复查日取其后一日。
+注意 `consecutive_valid_day_count` 取的是**历史最长**连击而非当前连击，
+故单次断档不会永久重置进度。
 
 **V7 影子→实操毕业（逐组件 owner 决策，随时可启动）**：五个影子治理生产者
 已在生产持续产出并被聚合端消费（见 CI 节），毕业按 owner 信号阶梯逐组件
