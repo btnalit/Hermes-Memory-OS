@@ -48,6 +48,20 @@ MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION = (
     "a separate apply intent for approved-proposal follow-up items."
 )
 
+MEMORY_OS_SESSION_RECALL_TOOL_DESCRIPTION = (
+    "Retrieve the original conversation behind a recalled memory fragment. "
+    "Use when an injected Memory-OS line carries a session pointer — "
+    "`[以现状为准... 原始会话 <session_id>]` — or a truncation annotation "
+    "(`[片段N/M字]`) and the fragment is not enough to act on: credentials, "
+    "deployment facts, configuration details, schedules. Returns a bounded, "
+    "secret-redacted transcript window with pagination (offset/has_more). "
+    "The transcript is a HISTORICAL snapshot: after reading it, verify any "
+    "credential/deployment/config fact against current reality before "
+    "relying on it — 以现实为准, never memory alone. This tool is read-only "
+    "and never returns unredacted secrets; do not use it for ordinary chat "
+    "or when the injected summary already answers the question."
+)
+
 _REQUIRED_BOUNDARY_PHRASES = (
     "explicitly asks for current architecture",
     "provider/backend",

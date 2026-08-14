@@ -1403,6 +1403,222 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+SESSION_TRANSCRIPT_SCHEMA_VERSION = "memory-os.session_transcript.v0"
+SESSION_TRANSCRIPT_MAX_MESSAGES = 40
+SESSION_TRANSCRIPT_MAX_CHARS_PER_MESSAGE = 600
+SESSION_TRANSCRIPT_MAX_TOTAL_CHARS = 12000
+
+
+def read_session_transcript(
+    store: MemoryOSStore,
+    session_id: str,
+    *,
+    max_messages: int = 20,
+    max_chars_per_message: int = SESSION_TRANSCRIPT_MAX_CHARS_PER_MESSAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Bounded, redacted drill-down into one original conversation.
+
+    The 分层深入 read half (owner ruling 2026-08-14): injection carries only
+    compact summaries plus a session pointer; when a recalled fragment is not
+    enough, the agent follows the pointer here, reads the original exchange,
+    and verifies against live state — 以现实为准. Reading is not a permanent
+    write, so per the owner's two-line paradigm it produces NO owner
+    decision; it is bounded, redacted, and ledgered instead.
+
+    Governance properties, each load-bearing:
+
+    * **Redaction at the read boundary.** state.db bodies are the unredacted
+      source of exactly the secrets session_mirror strips before writing
+      events; returning raw rows would bypass that boundary at read time and
+      hand a prompt-injected "go verify session X" a credential exfiltration
+      path. 以现状为准 makes this free: the stored value is untrustworthy by
+      definition, so the agent needs the conversation, never the secret —
+      current values are verified against reality, not against memory.
+    * **Bounded.** Hard ceilings on message count, per-message chars, and
+      total chars; pagination via ``offset`` + ``has_more`` instead of a
+      bigger reply.
+    * **Ledgered, fail-open.** Every read appends one audit row (report-only
+      surface, same shape as prefetch's shadow ledgers); losing the ledger
+      write must never fail the read.
+    * **Structural truncation flags**, not inline ellipses: a tool consumer
+      gets ``content_truncated`` + ``content_total_chars`` per message, so a
+      cut is data, not something to eyeball.
+    """
+    normalized_id = str(session_id or "").strip()
+    clamped_messages = max(1, min(int(max_messages or 1), SESSION_TRANSCRIPT_MAX_MESSAGES))
+    clamped_chars = max(80, min(int(max_chars_per_message or 1), SESSION_TRANSCRIPT_MAX_CHARS_PER_MESSAGE))
+    safe_offset = max(0, int(offset or 0))
+    base: dict[str, Any] = {
+        "schema_version": SESSION_TRANSCRIPT_SCHEMA_VERSION,
+        "session_id": normalized_id,
+        "secret_redaction_applied": True,
+        "body_policy": "redacted_clipped_transcript",
+        "agent_instruction": (
+            "这是当时的原始对话（已脱敏截断）。其中的密钥/部署/配置等事实是历史快照，"
+            "使用前必须与当前现实核对，以现实为准。"
+        ),
+    }
+    if not normalized_id:
+        return {**base, "status": "invalid_request", "reason": "empty_session_id"}
+
+    mirror = SessionMirror(store)
+    source_kind = ""
+    platform = ""
+    updated_at = ""
+    raw_messages: list[dict[str, Any]] | None = None
+
+    if mirror.state_db_path.exists():
+        try:
+            uri = f"file:{mirror.state_db_path.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                if _table_exists(conn, "sessions"):
+                    session_columns = _table_columns(conn, "sessions")
+                    id_col = _first_existing(session_columns, ("id", "session_id", "uuid"))
+                    if id_col:
+                        row = conn.execute(
+                            f"select * from sessions where {id_col} = ?",
+                            (normalized_id,),
+                        ).fetchone()
+                        if row is not None:
+                            source_col = _first_existing(session_columns, ("source", "platform", "channel", "kind"))
+                            updated_col = _first_existing(session_columns, ("updated_at", "last_updated", "created_at"))
+                            platform = str(row[source_col]) if source_col else "unknown"
+                            updated_at = str(row[updated_col]) if updated_col else ""
+                            message_columns = (
+                                _table_columns(conn, "messages") if _table_exists(conn, "messages") else set()
+                            )
+                            raw_messages = _read_messages_for_session(conn, message_columns, normalized_id)
+                            source_kind = "state_db"
+        except Exception as exc:
+            _append_session_transcript_ledger(
+                store,
+                session_id=normalized_id,
+                status="source_error",
+                source_kind="state_db",
+                returned=0,
+                detail=f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return {
+                **base,
+                "status": "source_error",
+                "reason": "state_db_read_failed",
+                "error_type": type(exc).__name__,
+            }
+
+    if raw_messages is None and mirror.sessions_root.exists():
+        direct = mirror.sessions_root / f"session_{normalized_id}.json"
+        candidates = [direct] if direct.exists() else sorted(mirror.sessions_root.glob("session_*.json"))
+        for path in candidates:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            candidate_id = str(data.get("id") or data.get("session_id") or path.stem)
+            if candidate_id != normalized_id and path.stem != f"session_{normalized_id}":
+                continue
+            platform = str(data.get("platform") or data.get("source") or data.get("channel") or "unknown")
+            updated_at = str(data.get("updated_at") or data.get("created_at") or "")
+            raw_messages = [dict(item) for item in data.get("messages", []) if isinstance(item, dict)]
+            source_kind = "session_json"
+            break
+
+    if raw_messages is None:
+        _append_session_transcript_ledger(
+            store,
+            session_id=normalized_id,
+            status="not_found",
+            source_kind="",
+            returned=0,
+        )
+        return {
+            **base,
+            "status": "not_found",
+            "reason": "session_not_found_in_state_db_or_session_files",
+            "checked_state_db": mirror.state_db_path.exists(),
+            "checked_sessions_root": mirror.sessions_root.exists(),
+        }
+
+    total_count = len(raw_messages)
+    window = raw_messages[safe_offset : safe_offset + clamped_messages]
+    messages: list[dict[str, Any]] = []
+    spent = 0
+    truncated_by_total = False
+    for item in window:
+        content = _redact_secrets(str(item.get("content") or ""))
+        total_chars = len(content)
+        clipped = content[:clamped_chars]
+        if spent + len(clipped) > SESSION_TRANSCRIPT_MAX_TOTAL_CHARS:
+            truncated_by_total = True
+            break
+        spent += len(clipped)
+        messages.append(
+            {
+                "role": str(item.get("role") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "content": clipped,
+                "content_truncated": total_chars > len(clipped),
+                "content_total_chars": total_chars,
+            }
+        )
+
+    result = {
+        **base,
+        "status": "ok",
+        "source_kind": source_kind,
+        "platform": platform,
+        "updated_at": updated_at,
+        "total_message_count": total_count,
+        "offset": safe_offset,
+        "returned_message_count": len(messages),
+        "has_more": safe_offset + len(messages) < total_count,
+        "truncated_by_total_budget": truncated_by_total,
+        "messages": messages,
+    }
+    _append_session_transcript_ledger(
+        store,
+        session_id=normalized_id,
+        status="ok",
+        source_kind=source_kind,
+        returned=len(messages),
+    )
+    return result
+
+
+def _append_session_transcript_ledger(
+    store: MemoryOSStore,
+    *,
+    session_id: str,
+    status: str,
+    source_kind: str,
+    returned: int,
+    detail: str = "",
+) -> None:
+    """Append-only read audit; fail-open (a lost audit row must not fail a read)."""
+    path = store.roots.memory_os_root / "system" / "session_transcript_reads.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        from .jsonl_io import append_jsonl_locked
+
+        append_jsonl_locked(
+            path,
+            {
+                "schema_version": "memory-os.session_transcript_read.v0",
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "session_id": session_id,
+                "status": status,
+                "source_kind": source_kind,
+                "returned_message_count": int(returned),
+                **({"detail": detail} if detail else {}),
+            },
+        )
+    except Exception:
+        pass
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute("select name from sqlite_master where type = 'table' and name = ?", (table_name,)).fetchone()
     return row is not None

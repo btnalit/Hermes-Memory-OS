@@ -5864,3 +5864,71 @@ revert→FAIL→restore→PASS）。
 读完再与现实核对、**以现实为准**。这需要一个"按 session_id 取回话history"
 的可调用面，其归属（编排层注入／provider 方法／CLI／Hermes 侧工具）是待定
 的架构决定，另议。
+
+### CR — 注入诚实化 + 分层深入闭环（2026-08-14，PR #60）
+
+owner 实测反馈定性："Hermes agent 看到高度匹配的摘要的部分不完整以为就是
+事实，而且不会召回看具体的会话内容去比对现状"。双 profile 真实注入审计
+（真实预算 12000/20000、带 index）逐字证实，并多出一层：
+
+- **碎片看起来像完整事实**：最相关行恰好切在承重点——URL 切一半
+  （`https://github.c...`）、路径切在要害（`scripts/.en...`，真实是
+  `.env`）、时刻表切在最后一个数字（`09:00、13:00、17:00、21.`）。裸 `...`
+  无法区分"事实到此为止"和"事实在此被截断"。
+- **40%（main）/51%（sannai）预算烧在零相关 floor 填充上**：floor 模式
+  20 条上限 + score-0 照收 + 同一事实重复注入 9 遍。
+- **全文 0 个以现状为准标记**：#58 只盖 event 行，而 event 段全是治理噪音；
+  #59 补的候选/indexed 标记当时未部署。
+
+#### 层1：注入诚实化（纯 prefetch）
+
+- **floor 模式重定义**：score-0 直接排除（floor 自己的注释早就写着
+  "query-aware fallback, not a universal recall"）、上限 20→5、合并两类按
+  分排序（相关性是 floor 唯一准入标准，permanent/provisional 保留位不适用）、
+  **允许空段**——空比 4000 字零相关垃圾好。FTS 命中模式的 20/15/5 上限
+  不变（有守卫测试钉住不外溢）。
+- **注入去重**：规范化正文前 120 字为键，同文只注一次。
+- **诚实截断** `_clip_annotated`：被切的行结尾 `…[片段N/M字]`——agent 一眼
+  知道这是碎片、外面还有多少。零 I/O。
+- **应答查询的段放宽**：候选 180→320、indexed 220→320、event 220→320
+  （event 存储侧本来只有 ~296 字上限，二次裁剪是纯损失）。预算头寸来自
+  floor 砍掉的 ~3000 字。
+
+#### 层2：分层深入的读半边 `memory_os_session_recall`
+
+第 4 个 provider 工具（接缝现成，零宿主管道）。四条治理性质各有测试：
+
+- **读边界强制脱敏**：state.db 正文是 session_mirror 写事件前脱敏对象的
+  未脱敏源头；返回原文=在读取时刻绕过边界，且是提示注入可利用的外泄面
+  （"去核实会话 X"→凭证进上下文）。以现状为准让脱敏零成本：agent 需要的
+  是对话语境，值必须拿现实核对。反事实测试把真密钥喂进 state.db 断言输出
+  缺席。
+- **有界**：max 40 条/600 字/条/12000 字总量 + offset/has_more 分页；
+  超额请求被钳制而非满足。
+- **落台账 + fail-open**：`system/session_transcript_reads.jsonl`（
+  report_only 写面已注册；**metadata_retention 已登记**——顾问抓的，
+  continuity_freshness 的注释原话就是"unregistered ledger grows without
+  bound"，且有 ages-out 测试用真产出器行钉住 created_at 字段名）。
+- **读不设 owner 门**：按两行决策表，读不写永久层 → 不得产生 owner 决策。
+
+**三方互认闭环**：标记文本写明动词（`原始会话 <id> 可用
+memory_os_session_recall 调取`）；system_prompt_block 新增 Layered Recall
+Rule 教协议（`[片段N/M字]`=截断、高匹配≠完整、取回后以现实为准）；工具
+description 教边界（历史快照、必须核对现状、普通聊天勿用）。
+
+#### 顾问预检抓到的三项（合并前处置）
+
+1. **gateway 常驻进程 vs 磁盘代码**（阻塞"部署验证通过"的说法）：
+   `oneshot.py` 在 gateway 进程内 `from run_agent import AIAgent`，provider
+   模块随首会话导入后被模块缓存持有。生产 gateway 今日 15:13 重启、早于
+   19:09 的 a7515c1 部署——**交互路径（prefetch/工具/系统提示）吃到新代码
+   需要 gateway 重启**；systemd 心跳/cron 是新进程不受影响。历史印证：
+   memory 里 V2-0.5 "code green, host-side reply-tool/hook gap" 同型。
+   部署后如实报告"重启后生效"，不得声称"部署验证通过"。
+2. **脱敏从设计声明升级为实测**：部署后对真实含凭证会话跑
+   `read_session_transcript`，断言真值缺席（对齐 #58 telegram 项的标准）。
+3. **复测口径**：截断计数要同时数 `...` 与 `[片段`，否则 after 侧漏计。
+
+**测试计数**：3368 → **3387 passed** / 13 skipped（+19：注入诚实 9、
+transcript 10）。四静态门全绿。层1 反事实 8 项 revert→FAIL→restore→PASS
+（唯一双向通过的是钉"FTS 模式上限不变"的守卫，本该如此）。
