@@ -229,6 +229,83 @@ def test_truncated_candidate_line_says_so(tmp_path):
     assert "以现状为准" in lines[0]
 
 
+def test_bookkeeping_burst_cannot_crowd_conversation_out_of_recency_fill(tmp_path):
+    """Production shape: a clearance cycle emitted 158 governance_resolver_
+    approved + 118 _invalidated events in one window. The selector's global
+    recency fill is pure-recency, so one burst crowded every conversation
+    turn out of Recent Event Summaries. Bookkeeping kinds are excluded from
+    the FILL only — the seeded one-line state/governance slots are pinned
+    design and must keep working."""
+    from plugins.memory.memory_os.fixtures import build_event
+    from plugins.memory.memory_os.prefetch import _event_lines
+    from plugins.memory.memory_os.store import EventEnvelope
+
+    store = _store(tmp_path)
+    for i in range(3):
+        store.append_event(EventEnvelope.from_dict({
+            **build_event(seed=700 + i, profile="memoryos-test"),
+            "ts": f"2026-08-14T07:{i:02d}:00+00:00",
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": f"CONV_MARKER_{i} 用户和助手的真实对话回合。",
+        }))
+    # Newer burst of resolver bookkeeping (would win every recency slot).
+    for i in range(20):
+        store.append_event(EventEnvelope.from_dict({
+            **build_event(seed=800 + i, profile="memoryos-test"),
+            "ts": f"2026-08-14T09:{i:02d}:00+00:00",
+            "source": "governance_feedback",
+            "kind": "governance_resolver_approved",
+            "summary": f"Resolver approved crystallized record cand_{i:04d}",
+            # Classify as the governance source class for real (the fixture's
+            # default safe_ref.source_module would classify as foreground).
+            "safe_ref": {"source_module": "evidence_scoring"},
+        }))
+
+    lines = _event_lines(store, session_id="", seen=set(), source_ids=[])
+    joined = "\n".join(lines)
+
+    for i in range(3):
+        assert f"CONV_MARKER_{i}" in joined, (
+            f"conversation turn {i} crowded out by bookkeeping burst:\n{joined}"
+        )
+    # The flood is capped at the ONE seeded governance slot (cross-lane
+    # awareness, pinned by the bridge-seed test). Whether that single line
+    # renders is up to the pre-existing diagnostic-style render filter —
+    # what this change guarantees is that the fill contributes ZERO extras.
+    assert joined.count("Resolver approved") <= 1, joined
+    from plugins.memory.memory_os.prefetch import _select_continuity_events
+
+    selected, _dropped = _select_continuity_events(store)
+    governance_selected = [
+        e for e in selected if str(getattr(e, "kind", "")).startswith("governance_")
+    ]
+    assert len(governance_selected) == 1, (
+        f"fill leaked bookkeeping past the seeded slot: {len(governance_selected)}"
+    )
+
+
+def test_unknown_event_kind_is_never_hidden(tmp_path):
+    """Fail-open: hiding requires opting into the marker list, so a new
+    producer kind surfaces instead of vanishing (vocabulary-drift guard,
+    inverted to the safe side)."""
+    from plugins.memory.memory_os.fixtures import build_event
+    from plugins.memory.memory_os.prefetch import _event_lines
+    from plugins.memory.memory_os.store import EventEnvelope
+
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict({
+        **build_event(seed=900, profile="memoryos-test"),
+        "source": "telegram",
+        "kind": "totally_new_producer_kind",
+        "summary": "NEW_KIND_MARKER something a future lane wrote.",
+    }))
+
+    lines = _event_lines(store, session_id="", seen=set(), source_ids=[])
+
+    assert any("NEW_KIND_MARKER" in ln for ln in lines)
+
+
 def test_event_summary_is_injected_whole(tmp_path):
     """sync_turn stores at most ~296 chars; the old second clip at 220 was
     pure loss. At 320 the stored summary must appear complete."""

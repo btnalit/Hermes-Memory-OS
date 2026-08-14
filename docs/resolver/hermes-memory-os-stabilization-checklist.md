@@ -5995,3 +5995,36 @@ profile 的**自指污染**——建造期元讨论（架构/治理/测试）充
 
 **测试计数**：3387 → **3390 passed** / 13 skipped（+3）；反事实
 revert→2 FAIL→restore→PASS（语义稀缺守卫双向通过，钉不变路径）。
+
+### CT — 注入构成测量 + 簿记潮防挤占（2026-08-14，PR #62）
+
+owner 转来 main 自查报告，要求深挖是否有高收益优化。按 8 条代表性查询
+（7 现实 + 1 元）电池实测 main 注入构成（46017 字）：
+
+- **meta 自指内容 = 32%（下界）**：问 GTX 960 驱动也有 28% 是记忆系统自谈。
+  载体：Indexed 50%、Working 82%、候选段 40%、Related 44%。
+  问记忆系统本身时 49% = **正确**——所以按查询区分，不能对内容一刀切降权。
+- **治理簿记 = 6%**，其中 bridge 的 2 席是**钉了测试的设计**
+  （state/governance 各 1 行跨 lane 感知）——不动；真暴露面是**全局补位**：
+  近期事件窗 883 条中簿记 ~40%（一次清仓周期发 158 条 resolver_approved +
+  118 条 invalidated），纯 recency 补位会被一次潮水淹没。
+- **候选队列 85/153（56%）是元讨论**——但抽查含真偏好（"审批闭环走主会话
+  推送"是 owner 真实偏好），**不能机器一刀切，移交 owner 批量审查**
+  （reject_candidate_cluster 本日已修复可用）。
+
+**探针工件第 4 例（当场自抓）**：首版分类器把候选段测成 100% meta——行的
+**结构前缀** "- candidate only / review candidate..." 自带 "candidate" 词。
+修法：剥结构前缀再分类 + 收紧到高精度词表。44%→32%，按下界报。
+
+**机制修复（本 PR）**：`_select_continuity_events` 全局补位排除簿记 kind
+（`governance_*`/`state_source_*`/`session_fact_extracted`/`session_observed`）。
+种子席原样保留（钉住的桥设计不动）；**fail-open**：未知 kind 永不隐藏——
+隐藏须显式进名单，生产者词表漂移的后果是"新 kind 出现"而非"消失"（CC 教训
+反相到安全侧）。反事实：还原→对话回合被 20 条 resolver 潮挤光→FAIL。
+
+**放弃的优化（记录否决理由）**：候选注入去重——PAT 对是互补事实（一条
+helper=store 配置、一条 push 验证），算法合并丢信息，收益不抵风险。
+
+**移交 owner 的高收益项**：①候选队列元讨论批量审查（85 条，digest 簇拒绝）；
+②Indexed 50% meta 属数据存量（5-6 月建造期事件被 FTS 正当命中），机制侧无
+安全改法，随 owner 清淤与时间自然稀释。
