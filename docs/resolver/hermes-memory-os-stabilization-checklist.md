@@ -5932,3 +5932,37 @@ description 教边界（历史快照、必须核对现状、普通聊天勿用�
 **测试计数**：3368 → **3387 passed** / 13 skipped（+19：注入诚实 9、
 transcript 10）。四静态门全绿。层1 反事实 8 项 revert→FAIL→restore→PASS
 （唯一双向通过的是钉"FTS 模式上限不变"的守卫，本该如此）。
+
+#### CR 部署与生产验证（2026-08-14，main+sannai 双 home，`e458a8a`）
+
+- `/opt` ff `a7515c1 → e458a8a`；production-safe apply ×2 home 全绿
+  （`fail=[]`）；manifest 双 home `deployed_head=e458a8a`、profile 归属正确；
+  3 文件 ×3 副本 9 哈希一致。
+- **注入复测（同查询同预算，前后对比）**：
+  - main：floor 段 **4038→0 字**（score-0 全排除、空段省略）、标记 **0→5**
+    （2 条带工具名指针）、总注入 10220→**6615**、无未标注截断。
+  - sannai：floor **4469→0**、总注入 8765→**4450**。剩余 2 条旧式 `...`
+    是**存储侧**的（sync_turn 写入时 140 字裁剪自带省略号），注入层已完整
+    展示存储摘要——属存储宽度议题，非注入缺陷。
+  - sannai 标记 0 条属正确：浮现的候选是闲聊时刻，不含漂移话题词。
+- **脱敏从声明升级为测量**：raw state.db 扫出 main 19 / sannai 5 个密钥形
+  值，4 会话取回 **0 泄露**；其中 3 会话无 [REDACTED] 是 40 条窗口挡的而非
+  脱敏挡的——于是**直接翻页到含密钥的第 73 条**：`leaked=False,
+  [REDACTED]=True`，脱敏在正主消息上实测咬住。生产 messages 表无
+  `created_at`（用 `timestamp`），列名容错解析按设计工作。
+- **新进程端到端**（真 agent venv py311 + 真活体插件副本）：4 工具注册、
+  system_prompt_block 含 Layered Recall Rule 并点名工具、真实会话
+  `handle_tool_call` 取回 ok=2 条；读台账双 home 各落 3 行。
+- **llm_judge_probe warn（本轮 main 也 ambiguous）成因良性**：judge 对故意
+  模糊的探针查询裁 `ask_choice/no_clear_match`——floor 收紧后垃圾上下文变
+  少，judge 更诚实了。后续若持续可调探针预期，不是缺陷。
+- **遗留（宿主级，待 owner）**：gateway 进程内持有 provider 模块缓存，
+  **交互路径吃到 #58/#59/#60 需 gateway 重启**（今日 15:13 的重启早于全部
+  三次部署）。systemd 心跳/cron 均新进程、已生效。
+- 证据级别：`deploy_pass` ×2 + 新进程功能实测；`live_monitor_pass` 未跑
+  （下个 02:30 定时刷新覆盖）。
+
+- `f5a3487..e458a8a（PR#60 CR）`：注入诚实化（floor 重定义/去重/诚实截断/
+  应答段放宽）+ 分层深入读半边 `memory_os_session_recall`（脱敏/有界/台账/
+  无 owner 门）+ 三方互认（标记点名工具、说明书教协议、description 教边界）；
+  双 home 部署复测 floor 归零、标记上线、脱敏实测咬住；全量 3387/13。
