@@ -34,7 +34,16 @@ SCHEMA_VERSION = "memory-os.memory_sources.v0"
 # v2 从今日(S1 归属线程钉死后的首个真正完备 producer)起受门约束;
 # 零 v2 样本走既有 healthy_no_sample + attribution_era_no_sample 冻结
 # 护栏,不买绿。
-ATTRIBUTION_SCHEMA_VERSION = "memory-os.memory_sources_attribution.v2"
+# v2→v3(2026-08-14):v2 又被生产数据证伪 — graph_layer/indexed 两类段的
+# 生产者用存储层类型名拼 source_ids(`crystallized_record:`/
+# `crystallized_candidate:`),而 source_ids.py 安全过滤器与
+# exposure_rollup.CANONICAL_SOURCE_ID_PREFIXES 只认规范引用前缀
+# (`crystallized:`/`candidate:`),ID 在写入前被静默滤空 — CJ/CL 图谱注入
+# 上线后的首批真实入选段全部落成 v2 纪元内 gap(实测 10 行:graph_layer 7
+# + indexed 3,08-07~08-12),已披露、不可追溯补齐。生产者已改为归一化
+# (prefetch._canonical_source_id),v2 行按同一纪元边界模式整体降为已分类
+# 债务;v3 空样本仍走 healthy_no_sample + attribution_era_no_sample 护栏。
+ATTRIBUTION_SCHEMA_VERSION = "memory-os.memory_sources_attribution.v3"
 LAST_SCHEMA_VERSION = "memory-os.memory_sources_last.v0"
 HISTORY_SCHEMA_VERSION = "memory-os.memory_sources_history.v0"
 STATS_SCHEMA_VERSION = "memory-os.memory_sources_stats.v0"

@@ -2110,6 +2110,32 @@ GRAPH_SHADOW_OUTCOMES = frozenset({
 })
 
 
+# Storage-layer record_type names → canonical citation prefixes. The FTS
+# index and the graph edge store speak in storage types
+# ("crystallized_record", "crystallized_candidate"), but every downstream
+# source_id consumer — source_ids.filter_safe_source_id_values (safety
+# allowlist) and the audit-side classification vocabulary
+# (CANONICAL_SOURCE_ID_PREFIXES; module deliberately not named here, same
+# one-way X.3 contract as the section-attribution comment above) — speaks
+# canonical citation prefixes ("crystallized:", "candidate:"). Emitting the
+# raw storage name got the ID silently dropped by the safety filter, which
+# is how the first real graph_layer/indexed selected sections all landed as
+# attribution gaps (the v2→v3 attribution era bump in memory_sources.py
+# records the consequence). A guard test pins the index writer's
+# record_type vocabulary against this mapping.
+_CANONICAL_SOURCE_ID_PREFIX_BY_RECORD_TYPE = {
+    "crystallized_record": "crystallized",
+    "crystallized_candidate": "candidate",
+}
+
+
+def _canonical_source_id(record_type: str, record_id: str) -> str:
+    prefix = _CANONICAL_SOURCE_ID_PREFIX_BY_RECORD_TYPE.get(
+        str(record_type), str(record_type)
+    )
+    return f"{prefix}:{record_id}"
+
+
 def _graph_layer_shadow_lines(
     store: MemoryOSStore,
     anchor_ids: list[str],
@@ -2450,7 +2476,7 @@ def _render_graph_layer_lines(
         if seen is not None:
             seen.add((group["neighbor_type"], group["neighbor_id"]))
         if source_ids is not None:
-            source_ids.append(f"{group['neighbor_type']}:{group['neighbor_id']}")
+            source_ids.append(_canonical_source_id(group["neighbor_type"], group["neighbor_id"]))
 
     return lines, decisions
 
@@ -3030,7 +3056,7 @@ def _indexed_lines(
         if snippet:
             lines.append(f"- {record_type}/{record_id}: {snippet}")
             if source_ids is not None and record_type and record_id:
-                source_ids.append(f"{record_type}:{record_id}")
+                source_ids.append(_canonical_source_id(record_type, record_id))
     if lines:
         display_query = str(route.get("display_query", ""))
         lines.insert(0, f"- query route: {route.get('route', 'slow_path')}; search: {display_query}")

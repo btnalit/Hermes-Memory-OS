@@ -39,12 +39,18 @@ def _write_fake_monitor(path: Path, *, write_snapshot: bool, exit_code: int) -> 
                 "p.add_argument('--python-bin', required=True)",
                 "p.add_argument('--snapshot-out', type=Path, required=True)",
                 "p.add_argument('--output')",
+                # required=True is the counterfactual for the probe-budget fix:
+                # a refresh wrapper that stops declaring its envelope makes
+                # this fake monitor exit 2 with an argparse error, failing
+                # every test below.
+                "p.add_argument('--caller-timeout-seconds', type=int, required=True)",
                 "a = p.parse_args()",
                 "assert a.python_bin == sys.executable",
                 (
                     "a.snapshot_out.write_text(json.dumps({"
                     "'schema_version': 'memory-os.monitor.v1', "
                     "'probe_cwd': str(Path.cwd()), "
+                    "'fake_caller_timeout_seconds': a.caller_timeout_seconds, "
                     "'classification': {'status': 'FAIL', 'fail_codes': ['expected_observation_gate']}"
                     "}), encoding='utf-8')"
                     if write_snapshot
@@ -96,6 +102,9 @@ def test_refresh_publishes_valid_fail_classification_without_alerting(tmp_path):
     assert payload["producer_receipt"]["monitor_exit_code"] == 2
     assert payload["producer_receipt"]["receipt_id"].startswith("fmpr_")
     assert payload["classification"]["status"] == "FAIL"
+    # The wrapper must declare its own envelope to the monitor so the probe
+    # budget can exceed the 300s floor (nightly probe_script_timeout fix).
+    assert payload["fake_caller_timeout_seconds"] == 10
     assert Path(payload["probe_cwd"]).parent == artifacts[0].parent
     assert not Path(payload["probe_cwd"]).exists()
     assert not list(artifacts[0].parent.glob("*.tmp"))
@@ -144,6 +153,7 @@ def test_refresh_rejects_monitor_payload_without_schema_version(tmp_path):
                 "p.add_argument('--python-bin', required=True)",
                 "p.add_argument('--snapshot-out', type=Path, required=True)",
                 "p.add_argument('--output')",
+                "p.add_argument('--caller-timeout-seconds', type=int)",
                 "a=p.parse_args()",
                 "assert a.python_bin == sys.executable",
                 "a.snapshot_out.write_text(json.dumps({'classification': {'status': 'PASS'}}))",

@@ -102,6 +102,12 @@ def refresh(
                 str(temp_path),
                 "--output",
                 "json",
+                # Declare this wrapper's envelope so the monitor can grant its
+                # probe subprocess the real budget instead of the 300s floor
+                # (the nightly probe_script_timeout FAILs were the probe being
+                # killed at the floor while this wrapper still had 300s left).
+                "--caller-timeout-seconds",
+                str(max(int(timeout_seconds), 1)),
             ]
         if monitor_profile:
             monitor_command.extend(["--monitor-profile", monitor_profile])
