@@ -200,3 +200,158 @@ def test_rejection_count_dataclass_field():
 
     c_default = _candidate("cand-default", body="记住：规则1")
     assert c_default.rejection_count == 0
+
+
+# ── 14-day stale TTL vs the promote shield (starvation hole, 2026-08-14) ────
+#
+# Production proof of the hole: all 8 pre-August queue rows (66–98 days old)
+# carried one promote→owner_eligible triage row per run — the promote stage
+# re-claimed every keyword-rich candidate each run before _demote_aged could
+# see it, making the 14-day stale TTL structurally unreachable. run_once's
+# own comment ("Promoted candidates remain in pending so _demote_aged can
+# re-evaluate stale owner_eligible ones") documented the intent the stage
+# order defeated.
+
+
+def _stale_owner_eligible_candidate(store, candidate_id, *, days_old):
+    """Real-producer setup: an appended candidate plus a genuine
+    promote→owner_eligible triage row, aged past the stale TTL."""
+    from datetime import timedelta
+
+    from plugins.memory.memory_os.crystallized import (
+        append_candidate_queue,
+        append_candidate_triage,
+    )
+
+    now = datetime.now(timezone.utc)
+    created = (now - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
+    candidate = _candidate(
+        candidate_id,
+        body="记住：Memory-OS 的部署配置讨论,关键词富集必然成簇的建造期元讨论。",
+        created_at=created,
+    )
+    append_candidate_queue(store, candidate)
+    append_candidate_triage(
+        store,
+        candidate_id=candidate_id,
+        action="promote",
+        target_state="owner_eligible",
+        reason="cluster match (test fixture, resolver declined)",
+        cluster_key="moment:记住",
+        cluster_size=2,
+        execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        now=now - timedelta(days=days_old),
+    )
+    return candidate
+
+
+def test_stale_owner_eligible_candidate_finally_ages_out_through_run_once(tmp_path):
+    """The counterfactual for the starvation fix: with the old stage order
+    (promote before aged) this candidate is re-claimed by promote every run
+    and stays owner_eligible forever; with the stale sweep running first it
+    must come out of run_once demoted."""
+    from plugins.memory.memory_os.crystallized import resolve_candidate_effective_state
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    _stale_owner_eligible_candidate(store, "cand-stale-20d", days_old=20)
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    assert result["stale_owner_eligible_demoted_count"] == 1, result
+    assert result["demoted_count"] >= 1
+    triage_rows = []
+    triage_path = store.roots.crystallized_root / "candidate_triage.jsonl"
+    for line in triage_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            triage_rows.append(json.loads(line))
+    stale_demotes = [
+        row for row in triage_rows
+        if row.get("candidate_id") == "cand-stale-20d"
+        and row.get("action") == "demote"
+        and "stale owner_eligible" in str(row.get("reason") or "")
+    ]
+    assert stale_demotes, (
+        "no stale-owner_eligible demote triage row — the promote stage "
+        f"re-claimed it before the stale sweep. triage={triage_rows}"
+    )
+    # The full loop closes in the SAME run: demoted → compacted out of the
+    # live queue immediately (terminal states are archived at once).
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-stale-20d" not in live_ids, "demoted candidate not compacted"
+
+
+def _stale_candidate_from_queue(store, candidate_id):
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+
+    for candidate in read_candidate_queue(store.roots):
+        if candidate.candidate_id == candidate_id:
+            return candidate
+    raise AssertionError(f"{candidate_id} missing from queue")
+
+
+def test_young_owner_eligible_candidate_is_untouched_by_the_stale_sweep(tmp_path):
+    """Two days old: the stale sweep must skip it, and the promote stage
+    keeps owning it (waiting for the owner) — the fix ages out only what the
+    resolver has already declined for 14+ days."""
+    from plugins.memory.memory_os.crystallized import resolve_candidate_effective_state
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    _stale_owner_eligible_candidate(store, "cand-young-2d", days_old=2)
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    assert result["stale_owner_eligible_demoted_count"] == 0, result
+    triage_rows = []
+    triage_path = store.roots.crystallized_root / "candidate_triage.jsonl"
+    for line in triage_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            triage_rows.append(json.loads(line))
+    candidate = _stale_candidate_from_queue(store, "cand-young-2d")
+    effective = resolve_candidate_effective_state(candidate, triage_rows)
+    assert effective == "owner_eligible", effective
+
+
+def test_backlogged_raw_candidate_still_reaches_the_resolver_first(tmp_path):
+    """The reason the fix is NOT a blanket reorder: a 4-day-old candidate
+    with NO triage history must still get the promote stage's evaluation —
+    running the full aged pass before promote would demote backlogged
+    candidates the resolver has never seen."""
+    from datetime import timedelta
+
+    from plugins.memory.memory_os.crystallized import append_candidate_queue
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    now = datetime.now(timezone.utc)
+    created = (now - timedelta(days=4)).isoformat().replace("+00:00", "Z")
+    append_candidate_queue(
+        store,
+        _candidate(
+            "cand-backlog-4d",
+            body="记住：每次都必须备份用户数据,这是不可妥协的规则。",
+            created_at=created,
+        ),
+    )
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    # The promote stage owned it (any promote outcome counts); the stale
+    # sweep must not have touched a candidate with no owner_eligible state.
+    assert result["stale_owner_eligible_demoted_count"] == 0, result
+    assert result["promoted_count"] >= 1, result

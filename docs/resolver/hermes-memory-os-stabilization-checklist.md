@@ -6040,3 +6040,40 @@ helper=store 配置、一条 push 验证），算法合并丢信息，收益不�
   或声明混杂）。
 - 遗留观察登记：镜像事件 ts=导入时刻而非原会话时刻的语义问题——排水结束后
   评估是否需要 original_ts 参与 recency 排序。
+
+### CU — 候选自动闭环饿死洞：14 天 stale TTL 结构性不可达（2026-08-14，PR #63）
+
+owner 问"元讨论候选不是有自动闭环吗"——**有，且被一个饿死洞废掉了**。
+
+**生命周期机制全景（存在且完整）**：5 生产者（心跳/session_fact_extraction/
+inner_drive/v3_outlet/CLI）；3 晋升通道（关键词聚簇→resolver 判定栈→
+provisional；fact_judge durable 单条直通；owner 批准→永久）；6 条自动消失路
+（拒绝阈值/3 天 TTL/owner_eligible 14 天 stale TTL/fleeting/近重 absorbed/
+与永久近重 demoted）+ 终态即归档 + 进召回排除。
+
+**缺陷**：流水线 `拒绝→晋升→老化→fleeting` 共用单轮 processed 集，而
+`min_cluster_size` 默认 1——**凡带信号关键词的候选每轮被晋升阶段先占**
+（resolver 不批就写 owner_eligible 继续等），老化阶段永远轮不到 → 14 天
+TTL 结构性不可达。**代码 406 行注释明写设计意图"promoted 候选留在 pending
+好让 _demote_aged 重估 stale owner_eligible"——代码违背自己的注释**。
+生产坐实：8/8 条前八月候选（66–98 天）全部 clustered、每轮
+promote→owner_eligible；85 条元讨论候选全是关键词富集型——正好全体豁免。
+老化只对无关键词闲聊生效过。
+
+**修复（外科手术，非全量调序）**：`_demote_aged` 加
+`stale_owner_eligible_only`（默认 False 保旧行为），run_once 在晋升**前**
+先跑 14 天 stale 专段；**3 天无 triage 分支留在晋升后原位**——放前面会误杀
+resolver 从未评估过的积压候选（有测试钉住这条否决理由）。结果新增
+`stale_owner_eligible_demoted_count`，`demoted_count` 聚合含 stale 份额。
+
+**fact_judge 核对（owner 记忆确认）**：owner 记得的"LLM 帮审批"= fact_judge
+（在跑：919 判决/465 durable=True，晋升侧辅助）；消失侧按设计无 LLM（A5）。
+8 条不死候选 fact_judge 全判 durable=False——LLM 没背书、resolver 56 轮没
+批、owner 67 天没动，清扫正是给它们的。durable=True 候选走直通道已转
+provisional 出队不受影响；候选层是晋升管道，事实本体仍在事件层可被 indexed
+召回。任务 #18（session_mirror LLM 辅助审批）核对后关闭：#58 范围退休已
+取消整个审批环节。
+
+**测试**：3 条 run_once 级新测试（stale 20 天→当轮 demote+compact 出队；
+2 天年轻→不动；4 天无 triage 积压→仍先到 resolver）。反事实
+revert→3 FAIL（KeyError 证明旧代码无此通路）→restore→PASS。
