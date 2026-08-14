@@ -58,6 +58,33 @@ _BRIDGE_SEED_SLOTS = {
 
 _MAX_CONTINUITY_RECORDS = 8
 
+# Bookkeeping event kinds are excluded from the selector's GLOBAL recency
+# fill — and only from the fill. The seeded slots above stay untouched: one
+# state_source line and one governance line per bridge is a pinned design
+# (test_prefetch_continuity_selector_preserves_bridge_seed_events) giving the
+# agent cross-lane awareness. The fill is a different animal: production's
+# recent event window carries bursts of producer bookkeeping (a clearance
+# cycle emitted 158 governance_resolver_approved + 118 _invalidated events),
+# and a pure-recency fill lets one burst crowd every conversation turn out of
+# Recent Event Summaries. Fail-open by construction: an UNKNOWN kind is never
+# hidden — hiding requires opting into this list, so producer-vocabulary
+# drift shows new kinds instead of losing them (the CC lesson, inverted to
+# the safe side).
+_BOOKKEEPING_FILL_KIND_MARKERS = (
+    "governance_",
+    "state_source_",
+    "session_fact_extracted",
+    "session_observed",
+)
+
+
+def _is_bookkeeping_event_kind(event: Any) -> bool:
+    kind = str(getattr(event, "kind", "") or "").lower()
+    return any(
+        kind == marker or kind.startswith(marker)
+        for marker in _BOOKKEEPING_FILL_KIND_MARKERS
+    )
+
 _DIAGNOSTIC_QUERY_PATTERNS = (
     re.compile(r"(当前|现在|目前|当前的).{0,12}记忆.{0,8}(架构|系统|后端|provider|提供商|状态)"),
     re.compile(r"当前.*(memory_os|memory-os|记忆|memory).*(状态|架构|系统|provider|backend)", re.I),
@@ -3044,7 +3071,11 @@ def _select_continuity_events(
             selected.append(event)
             selected_ids.add(event.id)
 
-    remaining = [event for event in events if event.id not in selected_ids]
+    remaining = [
+        event
+        for event in events
+        if event.id not in selected_ids and not _is_bookkeeping_event_kind(event)
+    ]
     for event in sorted(remaining, key=_global_sort_key, reverse=True):
         if len(selected) >= _MAX_CONTINUITY_RECORDS:
             break
