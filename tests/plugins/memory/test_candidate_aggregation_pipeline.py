@@ -7,6 +7,8 @@ a pre-created execution gate envelope so append_candidate_triage succeeds.
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
 )
@@ -250,7 +252,6 @@ def test_stale_owner_eligible_candidate_finally_ages_out_through_run_once(tmp_pa
     (promote before aged) this candidate is re-claimed by promote every run
     and stays owner_eligible forever; with the stale sweep running first it
     must come out of run_once demoted."""
-    from plugins.memory.memory_os.crystallized import resolve_candidate_effective_state
     from plugins.modules.governance.candidate_aggregation import (
         run_candidate_aggregation_lane,
     )
@@ -300,7 +301,6 @@ def test_young_owner_eligible_candidate_is_untouched_by_the_stale_sweep(tmp_path
     """Two days old: the stale sweep must skip it, and the promote stage
     keeps owning it (waiting for the owner) — the fix ages out only what the
     resolver has already declined for 14+ days."""
-    from plugins.memory.memory_os.crystallized import resolve_candidate_effective_state
     from plugins.modules.governance.candidate_aggregation import (
         run_candidate_aggregation_lane,
     )
@@ -313,14 +313,21 @@ def test_young_owner_eligible_candidate_is_untouched_by_the_stale_sweep(tmp_path
     )
 
     assert result["stale_owner_eligible_demoted_count"] == 0, result
-    triage_rows = []
+    # The pinned invariant is exactly "the stale sweep did not touch it".
+    # What promote does next is environment-dependent (the conftest autouse
+    # stub auto-allows the resolver gate, so under pytest the young candidate
+    # may legitimately crystallize provisionally and leave the queue — a GOOD
+    # outcome; under the real gate it stays owner_eligible). Either way, a
+    # stale-demote triage row for it must not exist.
     triage_path = store.roots.crystallized_root / "candidate_triage.jsonl"
-    for line in triage_path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            triage_rows.append(json.loads(line))
-    candidate = _stale_candidate_from_queue(store, "cand-young-2d")
-    effective = resolve_candidate_effective_state(candidate, triage_rows)
-    assert effective == "owner_eligible", effective
+    stale_rows = [
+        json.loads(line)
+        for line in triage_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        and json.loads(line).get("candidate_id") == "cand-young-2d"
+        and "stale owner_eligible" in str(json.loads(line).get("reason") or "")
+    ]
+    assert stale_rows == [], stale_rows
 
 
 def test_backlogged_raw_candidate_still_reaches_the_resolver_first(tmp_path):
@@ -355,3 +362,109 @@ def test_backlogged_raw_candidate_still_reaches_the_resolver_first(tmp_path):
     # sweep must not have touched a candidate with no owner_eligible state.
     assert result["stale_owner_eligible_demoted_count"] == 0, result
     assert result["promoted_count"] >= 1, result
+
+
+# ── 洞 B：结晶残影不朽 (2026-08-14 生产 8/8 坐实) ───────────────────────────
+#
+# 生产队列的 8 条 66–98 天候选走的不是 promote 饿死洞——它们都曾被结晶过：
+# ① run_once 的前置过滤按"有无结晶记录"把它们排除出 pending（不查活性），
+#   其中 3 条的 provisional 已被 resolver 驱逐——被驱逐的记录还在替队列行
+#   挡刀，任何阶段永远碰不到它；
+# ② compact 用 triage-only 状态视图，看不到结晶 overlay——5 条 effective=
+#   crystallized(terminal、已进召回排除) 的行因最新 triage 还写着
+#   owner_eligible 而在活队列里永生。
+
+
+def _crystallize_candidate(store, candidate, *, provisional):
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+    service = CrystallizedMemoryService(store)
+    decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver" if provisional else "owner",
+        reviewed_at=datetime.now(timezone.utc).isoformat(),
+        provisional=provisional,
+        expires_at=(
+            datetime.now(timezone.utc).isoformat() if provisional else ""
+        ),
+    )
+    path = service.write_approved_record(
+        candidate, decision, file_name=f"{candidate.candidate_id}.md",
+    )
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("id: "):
+            return service, line.split("id: ", 1)[1].strip()
+    raise AssertionError("record id not found")
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_evicted_provisional_no_longer_shields_the_queue_row(tmp_path):
+    """被驱逐的 provisional 不再替队列行挡刀：候选重回 pending，且因 20 天
+    stale 被当轮清扫降级。反事实：旧前置过滤(不查活性)下它永远不进 pending。"""
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _stale_owner_eligible_candidate(store, "cand-evicted-20d", days_old=20)
+    service, record_id = _crystallize_candidate(store, candidate, provisional=True)
+    service.revoke_record(record_id, revoked_by="resolver", reason="resolver_cap_evicted")
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    assert result["stale_owner_eligible_demoted_count"] == 1, result
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-evicted-20d" not in live_ids, "evicted-record shield survived"
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_actively_crystallized_row_is_archived_by_the_full_terminal_view(tmp_path):
+    """活跃结晶的候选不进 pending(不得重复晋升)，但其队列行必须被完整终态
+    视图归档、其 id 必须进召回排除集——不再靠 triage-only 视图在活队列永生。"""
+    from plugins.memory.memory_os.crystallized import (
+        read_candidate_queue,
+        read_candidate_recall_exclusions,
+    )
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _stale_owner_eligible_candidate(store, "cand-crystal-old", days_old=60)
+    _crystallize_candidate(store, candidate, provisional=False)
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    # Not re-promoted, not stale-swept (it is closed, not stale):
+    assert result["stale_owner_eligible_demoted_count"] == 0, result
+    assert "cand-crystal-old" in read_candidate_recall_exclusions(store.roots)
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-crystal-old" not in live_ids, (
+        "crystallized-long-ago row still immortal in the live queue"
+    )
+
+
+def test_compact_without_terminal_view_keeps_triage_only_behavior(tmp_path):
+    """默认参数 = 历史行为：不传终态视图时，triage 说 owner_eligible 的行
+    保留在活队列（钉住默认不是陷阱、老调用方行为不变）。"""
+    from plugins.memory.memory_os.crystallized import (
+        compact_candidate_queue,
+        read_candidate_queue,
+    )
+
+    store = _store_with_gate(tmp_path)
+    _stale_owner_eligible_candidate(store, "cand-triage-only", days_old=60)
+
+    archived = compact_candidate_queue(store)
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-triage-only" in live_ids
+    assert archived == 0

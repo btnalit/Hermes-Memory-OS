@@ -1743,8 +1743,21 @@ def compact_candidate_queue(
     *,
     archive_path: Path | None = None,
     retention_days: int = 7,
+    terminal_candidate_ids: set[str] | None = None,
 ) -> int:
     """Archive-and-compact: move stale candidates to archive file.
+
+    ``terminal_candidate_ids`` (optional) lets the caller pass the FULL
+    terminal view from ``read_effective_candidates`` — which also sees the
+    crystallized-record and owner-action overlays this function's own
+    triage-only resolution cannot. Measured hole (2026-08-14, production):
+    five queue rows whose candidates had been crystallized long ago resolved
+    ``crystallized``/terminal in the full view (and were recall-excluded),
+    but their latest *triage* row still said owner_eligible, so this
+    function kept them in the live queue forever. The aggregation lane
+    passes the same id set it just published as the recall-exclusion
+    projection — one semantics, one source. ``None`` keeps the historical
+    triage-only behavior.
 
     A candidate is 'active' (stays in main file) if:
       - effective state resolves to owner_eligible (owner needs to see it)
@@ -1808,7 +1821,13 @@ def compact_candidate_queue(
             # they stop cluttering the live queue (previously only archived
             # once aged past retention_days, leaving young demoted/fleeting/
             # absorbed in active).
-            if effective == "owner_eligible" or (
+            if terminal_candidate_ids is not None and cand.candidate_id in terminal_candidate_ids:
+                # The full effective view says this candidate is closed
+                # (crystallized / owner_closed / demoted / ...) even if its
+                # latest triage row does not — archive it now.
+                archived.append(line_stripped)
+                archived_count += 1
+            elif effective == "owner_eligible" or (
                 effective not in ("demoted", "fleeting", "absorbed") and age < retention_days * 86400
             ):
                 active.append(line_stripped)

@@ -6077,3 +6077,27 @@ provisional 出队不受影响；候选层是晋升管道，事实本体仍在�
 **测试**：3 条 run_once 级新测试（stale 20 天→当轮 demote+compact 出队；
 2 天年轻→不动；4 天无 triage 积压→仍先到 resolver）。反事实
 revert→3 FAIL（KeyError 证明旧代码无此通路）→restore→PASS。
+
+#### CU.1 — 洞 B：结晶残影不朽（同批补修，生产 8/8 的真正成因）
+
+部署 CU 后手动跑 lane 验证：`stale_owner_eligible_demoted_count=0`，8 条老
+候选纹丝不动——**它们走的不是饿死洞**。追链发现全部 8 条**都曾被结晶过**
+（各有 1 条结晶记录），命中两个叠加的洞：
+
+- **B1 驱逐记录挡刀**：run_once 前置过滤按"有无结晶记录"排除 pending，
+  **不查活性**——3 条的 provisional 已被 resolver 驱逐（inactive），被驱逐
+  的记录还在替队列行挡刀，任何阶段（含新清扫）永远碰不到。修：过滤只认
+  **active** 记录（`is_active_crystallized_frontmatter`）。
+- **B2 compact 的 triage-only 视图**：5 条 effective=crystallized（terminal、
+  已进召回排除）的行，因最新 triage 还写着 owner_eligible 而被 compact 的
+  triage-only 状态解析当成"owner 还要看"→ 活队列永生。修：
+  `compact_candidate_queue` 增可选 `terminal_candidate_ids`，lane 把它刚为
+  召回排除投影算好的**同一个**完整终态集传入——一个语义一个来源；默认 None
+  保持历史行为（有测试钉住默认不是陷阱）。lane 顺带把完整视图计算提到
+  compact 前、失败记 `candidate_effective_view_failed` 降级 triage-only。
+
+**测试环境暴露的一个既有事实**：conftest autouse 夹具把 resolver gate 桩成
+永远放行，pytest 里年轻候选会被晋升为 provisional——洞 B 修复后其队列行被
+正确归档（好结局），钉"年轻不被清扫"的测试原断言"仍在队列"因此环境依赖；
+改钉真不变量（无 stale 降级 triage 行）。测量教训第 6 例：**断言要钉不变量
+本身，不钉环境合成的下游状态**。
