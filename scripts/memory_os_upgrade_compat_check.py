@@ -69,6 +69,45 @@ COMMANDS: tuple[CommandSpec, ...] = (
 RunCommand = Callable[[tuple[str, ...], str | None, str | None, int], dict[str, Any]]
 
 
+def _unit_suffix_for_home(hermes_home: str | None) -> str:
+    """Per-profile systemd unit suffix, mirroring
+    install_memory_os_plugin.py::_runtime_unit_suffix ('' for a root home,
+    '-<name>' for a profiles/<name>-shaped home)."""
+    if not hermes_home:
+        return ""
+    home = Path(hermes_home).expanduser()
+    if home.name and home.parent.name == "profiles":
+        return f"-{home.name}"
+    return ""
+
+
+def _commands_for(hermes_home: str | None) -> tuple[CommandSpec, ...]:
+    """COMMANDS with the cognitive-loop timer probe pointed at the target
+    home's own unit. The static tuple used to probe the fixed legacy name,
+    so on a profile-shaped home the informational timer check reported the
+    DEFAULT profile's unit state — misleading, though never gating
+    (required=False)."""
+    suffix = _unit_suffix_for_home(hermes_home)
+    if not suffix:
+        return COMMANDS
+    adjusted: list[CommandSpec] = []
+    for spec in COMMANDS:
+        if spec.name == "cognitive_loop_timer":
+            argv = tuple(
+                part.replace(
+                    "hermes-memory-os-cognitive-loop.timer",
+                    f"hermes-memory-os-cognitive-loop{suffix}.timer",
+                )
+                for part in spec.argv
+            )
+            adjusted.append(
+                CommandSpec(spec.name, argv, json_output=spec.json_output, required=spec.required)
+            )
+        else:
+            adjusted.append(spec)
+    return tuple(adjusted)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run read-only Memory-OS Hermes upgrade compatibility checks.")
     parser.add_argument("--host", default="", help="Optional SSH host, for example hermes-media.")
@@ -99,7 +138,7 @@ def run_upgrade_compat_check(
     runner = run_command or run_command_default
     command_results = {
         spec.name: _run_spec(spec, host=host, hermes_home=hermes_home, timeout=timeout, run_command=runner)
-        for spec in COMMANDS
+        for spec in _commands_for(hermes_home)
     }
     classification = classify_report(command_results, hermes_home=hermes_home)
     return {

@@ -15,6 +15,21 @@ from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVICE_NAME = "hermes-memory-os-monitor-dashboard.service"
+
+
+def _default_service_name(hermes_home: Path) -> str:
+    """Per-profile default unit name: root homes keep the legacy fixed name;
+    profiles/<name>-shaped homes get a suffixed default so installing a
+    second profile's dashboard cannot silently overwrite the first (the
+    last-deploy-wins class fixed for the heartbeat/cognitive-loop units in
+    install_memory_os_plugin.py::_runtime_unit_suffix — same rule). An
+    explicit --service-name always wins; note a second dashboard also needs
+    its own --port, which fails loudly at bind time rather than silently.
+    """
+    home = Path(hermes_home).expanduser().resolve()
+    if home.name and home.parent.name == "profiles":
+        return f"hermes-memory-os-monitor-dashboard-{home.name}.service"
+    return DEFAULT_SERVICE_NAME
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 3693
 DEFAULT_PROFILE = "main"
@@ -45,7 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("/etc/systemd/system"),
         help="Systemd unit directory. Default: /etc/systemd/system.",
     )
-    parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help=f"Default: {DEFAULT_SERVICE_NAME}.")
+    parser.add_argument(
+        "--service-name",
+        default="",
+        help=(
+            f"Default: {DEFAULT_SERVICE_NAME} for a root home, "
+            "hermes-memory-os-monitor-dashboard-<profile>.service for a "
+            "profiles/<name>-shaped --hermes-home."
+        ),
+    )
     parser.add_argument("--enable", action="store_true", help="Run systemctl daemon-reload and enable --now.")
     parser.add_argument("--dry-run", action="store_true", help="Print the report without writing or enabling.")
     return parser
@@ -217,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         python_bin=args.python_bin,
         systemd_dir=args.systemd_dir,
-        service_name=args.service_name,
+        service_name=args.service_name or _default_service_name(args.hermes_home),
         enable=args.enable,
         dry_run=args.dry_run,
     )
