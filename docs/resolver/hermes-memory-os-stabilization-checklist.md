@@ -5334,3 +5334,71 @@ lane;loop-contract 表 last_run 覆盖注明是逐 lane retrofit(当前约 6/23,
   probe PUBLIC_DOCS/测试)。审核修正:矛盾边实为积压自动激活非 owner
   审批、vector 例外、edge_promotion 非出生步骤;static_hygiene 探针
   调用补 strict。基线 3274/13 不动。
+
+### CN — P0–P2 批次：profile 归属主线化 + reason-code 覆盖补全 + Loop Health View + 版本门 + 召回评测类别（2026-08-13，`3ca848d` → merge `2b70e57`，PR #55）
+
+**触发**：3.200 迁入 sannai 成为 main+sannai 双 profile 主机后，owner 发现
+ExecutionGate 记录 profile 归属错误（主机上自打了本地 M 补丁）；同批处理
+owner 转来的五项使用发现（reason-code 覆盖、Loop 视图、召回评测、版本
+失真、边界债务——最后一项 P3 按 owner 指示缓做）。
+
+**修了什么**：
+1. **P0-A profile 归属**：runner 本地 `_resolve_profile`（stdlib-only 保持）+
+   `--profile` 参数，优先级 显式 > `HERMES_PROFILE` > profiles/<name> 形 home
+   推导 > default；冲突 fail-closed 且**写 blocked permit**
+   （`profile_home_conflict`）——主机侧建议的“不写 permit 直接退出”正是
+   No Silent Failures 反模式，已纠正；runner 向 helper 子进程注入解析后的
+   `HERMES_PROFILE`；`roots.resolve_profile_name` 插件侧孪生（等价守卫测试
+   钉死）+ `from_hermes_home` 空 profile 时 home 形状推导；清扫约 20 个脚本
+   （含 `v3_wandering` 硬编码 `profile="default"`）；agent-os `_resolve_profile`
+   补推导。**根因升级**：grep 证实 profile 是 8+ 处读者的过滤键
+   （feedback_bridge/scoring/deep_reflection/provider `__init__:1433`），
+   写读不一致会静默丢记录，不只是审计错。legacy right_brain ×2 与 dashboard
+   安装器保留宿主校准默认（注释豁免）。
+2. **P0-B 版本单一真源**：pyproject 0.1.0→0.2.1（v0.2.0 Release 早已存在）；
+   新增 `memory_os_version_consistency_check.py`，CI tag push 断言。
+3. **P1-C reason-code 覆盖**：Explore 盘点 23 lane 实测 6 FULL/10 PARTIAL/
+   7 NONE；新增 `lane_last_run.py` 标准产物（`system/lane_last_run/<id>.json`，
+   封闭原因集、原子覆写、fail-open），接线 15 条 lane；最讽刺一类是“码已
+   写好只 print 不落盘”（hindsight ×2、memory_sources 的 skip_reason 锁在
+   cron 从不传的 `--status-json` 后）；fact_judge status 硬编码 "ok"
+   （error_count>0 照样报干净）已修；full_monitor_refresh 崩溃路径 finally
+   删临时文件不留痕已修；l3_probe 产物迁出 OS temp；working_cleanup 顺带
+   修 `/root/.hermes` 硬编码。**护栏**：`LANE_LAST_RUN_EVIDENCE` census
+   双向钉死 + 源码扫描守卫（声明 lane_last_run 的 lane 必须真调用
+   `record_lane_last_run`——防词表绿），新 lane 出生即定性。
+4. **P2-D Loop Health View**：`loop_health_view.py` 纯投影（八环分组、状态
+   封闭集 attention/active/idle/no_evidence、新鲜度按 lane 自身
+   `due_interval_minutes`）+ CLI + monitor 内嵌探针 `lane_last_run` 节 +
+   `classify_snapshot` INFO-only 条目 `lane_last_run_state`（失败已由
+   helper-completion 分级，此处只解释为何没产出，避免重复告警）。
+5. **P2-E 召回评测仪器**：golden query 加 `category`
+   （`RECOMMENDED_CASE_CATEGORIES` 14 类），报告加
+   `by_category`/`by_classification`/`metrics`（wrong_memory_injection、
+   authority_violation、context_insufficient）；陈旧注入/诚实无答案语义由
+   类别约定承载；50 真实 case 采集流程入模块 docstring（数据被生产 gate）。
+
+**反事实覆盖**：P0-A 三条 revert→FAIL（`''=='sannai'`、`'default'=='sannai'`、
+`'ok'=='permit_blocked'`）→restore→PASS 实测；接线测试断言修复前不存在的
+产物文件；注入指标用真实生产者写入晶体后负例命中验证。
+
+**过程教训**：①改 prompt 脚本 docstring 断行撞了安装测试的整句断言
+（'Hermes agent owns the owner interaction'）——grep 测试符号时 docstring
+整句也算符号；②census 源码扫描测试的 `parents[2]` 层级数错一层
+（tests/plugins/memory 深三层），FileNotFoundError 当场暴露；③本节最初
+误编号 CM——与 PR #54 的 docs-only CM 节撞名，拉取合并后才暴露：编号
+前必须先对齐 origin/main 的清单，不能只看本地工作副本。
+
+**部署提醒**：合并部署 3.200 后覆盖主机本地 M，须 hash 核对三份副本
+（source repo、/root/.hermes/plugins/memory_os、sannai runtime）；registry
+snapshot 无需重生成（本批未增 lane，census 表不进 snapshot）；manifest
+刷新单独处理。
+
+**测试计数**：3274 → **3324 passed** / 13 skipped（+50）；四静态门 + closure
+matrix + `git diff --check` 全绿；import cycle 0；write surface unclassified 0。
+
+- `b20491e..3ca848d(PR#55 CN)`:P0–P2 批次 — profile 归属主线化(冲突写
+  blocked permit,runner 注入解析后 HERMES_PROFILE,替换 3.200 本地 M)、
+  lane_last_run 封闭原因码接线 15 lane + census 双向护栏、Loop Health View
+  纯投影 + monitor INFO、版本门 0.2.1、召回评测 category/注入指标;全量
+  3274→3324/13。
