@@ -424,9 +424,20 @@ def run_candidate_aggregation_lane(
     # in owner_approved.md (or any crystallized .md file). Prevents duplicate
     # promotion of already-crystallized memories.
     crystallized_service = CrystallizedMemoryService(store)
+    # Only an ACTIVE crystallized record shields a candidate from the
+    # pipeline. Measured hole (2026-08-14, production): three queue rows
+    # whose provisional records had been resolver-evicted were still
+    # pre-filtered here — an inactive record kept shielding the row, so no
+    # stage (including the stale sweep) could ever reach it, while compact's
+    # triage-only state view kept the row alive: immortal by construction.
+    from plugins.memory.memory_os.crystallized import is_active_crystallized_frontmatter
+
     pending = [
         c for c in pending
-        if not crystallized_service.find_records_by_candidate_id(c.candidate_id)
+        if not any(
+            is_active_crystallized_frontmatter(record.frontmatter)
+            for record in crystallized_service.find_records_by_candidate_id(c.candidate_id)
+        )
     ]
 
     # Shared processed_ids set ensures each candidate is handled by exactly
@@ -449,46 +460,71 @@ def run_candidate_aggregation_lane(
     # Compaction is an all-or-nothing rewrite. If the tolerant reader observed
     # corruption, preserve the queue byte-for-byte and surface the bounded
     # errors instead of allowing a partial archive/replace transaction.
-    compact_count = 0 if candidate_error_records else compact_candidate_queue(
-        store,
-        archive_path=archive,
-        retention_days=7,
-    )
-
-    # Publish the hot-path recall exclusion projection (owner ruling
-    # 2026-08-14: candidates are admitted to recall at candidate authority
-    # without approval, so the owner's reject must actually take effect).
-    # read_effective_candidates is the authority but costs ~61ms on
-    # production — affordable here in an offline lane, never on the per-turn
-    # prefetch path, which reads the small file this publishes instead.
-    # Fail-open by contract: a failure here leaves the previous snapshot (or
-    # none), which degrades to the pre-ruling behavior rather than blanking
-    # candidate recall.
-    recall_exclusion_count = -1
+    # Compute the FULL terminal view once (crystallized-record + owner-action
+    # overlays included) and let it drive BOTH the queue compaction and the
+    # recall-exclusion projection — one semantics, one source. Before this,
+    # compaction resolved state from triage rows alone and kept
+    # crystallized-long-ago rows in the live queue forever (measured: five
+    # production rows, 66–98 days old, recall-excluded yet never archived).
+    # read_effective_candidates costs ~61ms on production — affordable here
+    # in an offline lane, never on the per-turn prefetch path.
+    effective_terminal_ids: set[str] | None = None
+    effective_count = 0
     try:
         effective = read_effective_candidates(store)
-        excluded = {item.candidate.candidate_id for item in effective if item.terminal}
-        write_candidate_recall_exclusions(
-            store,
-            excluded,
-            now=_now,
-            source_counts={
-                "effective_candidates": len(effective),
-                "terminal": len(excluded),
-            },
-        )
-        recall_exclusion_count = len(excluded)
-    except Exception as exc:  # noqa: BLE001 - projection must not break the lane
+        effective_count = len(effective)
+        effective_terminal_ids = {
+            item.candidate.candidate_id for item in effective if item.terminal
+        }
+    except Exception as exc:  # noqa: BLE001 - view failure degrades, never breaks the lane
         candidate_error_records.append(
             build_error_record(
                 component="candidate_aggregation",
-                operation="write_candidate_recall_exclusions",
-                error_code="candidate_recall_exclusion_publish_failed",
+                operation="read_effective_candidates",
+                error_code="candidate_effective_view_failed",
                 severity="warning",
                 recoverable=True,
                 details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
             )
         )
+
+    compact_count = 0 if candidate_error_records else compact_candidate_queue(
+        store,
+        archive_path=archive,
+        retention_days=7,
+        terminal_candidate_ids=effective_terminal_ids,
+    )
+
+    # Publish the hot-path recall exclusion projection (owner ruling
+    # 2026-08-14: candidates are admitted to recall at candidate authority
+    # without approval, so the owner's reject must actually take effect).
+    # Fail-open by contract: a failure here leaves the previous snapshot (or
+    # none), which degrades to the pre-ruling behavior rather than blanking
+    # candidate recall.
+    recall_exclusion_count = -1
+    if effective_terminal_ids is not None:
+        try:
+            write_candidate_recall_exclusions(
+                store,
+                effective_terminal_ids,
+                now=_now,
+                source_counts={
+                    "effective_candidates": effective_count,
+                    "terminal": len(effective_terminal_ids),
+                },
+            )
+            recall_exclusion_count = len(effective_terminal_ids)
+        except Exception as exc:  # noqa: BLE001 - projection must not break the lane
+            candidate_error_records.append(
+                build_error_record(
+                    component="candidate_aggregation",
+                    operation="write_candidate_recall_exclusions",
+                    error_code="candidate_recall_exclusion_publish_failed",
+                    severity="warning",
+                    recoverable=True,
+                    details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                )
+            )
 
     result = {
         "candidates_read": len(candidates),
