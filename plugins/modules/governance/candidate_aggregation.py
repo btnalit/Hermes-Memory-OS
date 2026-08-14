@@ -434,6 +434,12 @@ def run_candidate_aggregation_lane(
     processed_ids: set[str] = set()
 
     rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
+    # The 14-day stale-owner_eligible sweep runs BEFORE promote so the
+    # promote stage cannot re-claim (and thereby age-exempt) keyword-rich
+    # candidates every run — see _demote_aged's docstring for the measured
+    # starvation hole this closes. The full aged pass (3-day no-triage
+    # branch) stays after promote, unchanged.
+    stale_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records, stale_owner_eligible_only=True)
     promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, error_records=candidate_error_records)
     demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
     fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
@@ -492,7 +498,11 @@ def run_candidate_aggregation_lane(
         "promoted_count": promote_results["promoted_count"],
         "promoted_clusters": promote_results["clusters"],
         "rejected_demoted_count": rejected_results["rejected_demoted_count"],
-        "demoted_count": demote_results["demoted_count"],
+        # Aggregate keeps its historical meaning (all age-driven demotions
+        # this run); the stale share is also reported on its own so the
+        # starvation fix is observable per run.
+        "demoted_count": demote_results["demoted_count"] + stale_results["demoted_count"],
+        "stale_owner_eligible_demoted_count": stale_results["demoted_count"],
         "fleeting_count": fleeting_results["fleeting_count"],
         "compacted_count": compact_count,
         "action": "candidate_aggregation_tick",
@@ -1150,6 +1160,7 @@ def _demote_aged(
     now: datetime | None = None,
     ttl_seconds: int = CANDIDATE_DEMOTE_TTL_SECONDS,
     triage_records: list[dict[str, Any]] | None = None,
+    stale_owner_eligible_only: bool = False,
 ) -> dict[str, Any]:
     """Auto-demote candidates past TTL with no triage action.
 
@@ -1160,6 +1171,22 @@ def _demote_aged(
 
     Owner_eligible candidates get a longer stale TTL (14 days) to give
     the owner time to process them before auto-demotion.
+
+    ``stale_owner_eligible_only=True`` runs ONLY the 14-day stale sweep and
+    exists because of a measured starvation hole: run order used to be
+    rejected → promote → aged over one shared processed set, and any
+    candidate with a signal keyword (min_cluster_size defaults to 1, so a
+    singleton clusters too) was re-claimed by the promote stage EVERY run —
+    resolver declines it, writes owner_eligible again, marks it processed —
+    and the aged stage never saw it. The 14-day TTL was structurally
+    unreachable for exactly the noisiest class (near-duplicate build-era
+    meta candidates are keyword-rich by nature). Production proof: all 8
+    pre-August queue rows, 66–98 days old, each with a promote→owner_eligible
+    triage row per run. The stale sweep therefore runs BEFORE promote — 14
+    days means the resolver already declined ~56 runs and the owner never
+    acted — while the 3-day no-triage branch deliberately stays AFTER
+    promote, because running it first would demote backlogged candidates the
+    resolver has never evaluated.
     """
     _now = now or datetime.now(timezone.utc)
     demoted_count = 0
@@ -1170,6 +1197,8 @@ def _demote_aged(
             continue
         effective = resolve_candidate_effective_state(c, _triage)
         if effective in _TERMINAL_STATES:
+            continue
+        if stale_owner_eligible_only and effective != "owner_eligible":
             continue
         age = _candidate_age_seconds(c.created_at, _now)
 
