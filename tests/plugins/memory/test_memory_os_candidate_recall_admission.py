@@ -255,6 +255,65 @@ def test_owner_reject_stops_recall_immediately_without_waiting_for_the_lane(tmp_
     assert "cand-reject-now" not in _recall_text(store, query)
 
 
+def test_recalled_candidate_carries_the_live_state_marker(tmp_path):
+    """Production verification gap: the marker fired on 41 of the last 400
+    events yet appeared on ZERO recalled lines for a credential question.
+
+    Event selection is recency/session scoped, not query scoped, so the lines
+    that actually answer "where is the GitHub deploy key" are candidate lines
+    — and those carried no marker. The instruction was satisfied on the path
+    that does not respond to the query and missing on the one that does.
+    """
+    store = _store(tmp_path)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-marker",
+        kind="preference",
+        body="Owner 交代了 GitHub 部署密钥由主机统一注入，不要写进仓库配置",
+        source_event_ids=["evt-m1"],
+        sensitivity="private",
+        tags=["test"],
+        bridge_state="owner_eligible",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        provenance={"session_id": "20260513_224454_41ffcf", "platform": "telegram"},
+    )
+    append_candidate_queue(store, candidate)
+
+    text = _recall_text(store, "github 密钥 部署")
+
+    assert "cand-marker" in text
+    assert "以现状为准" in text
+    # The pointer is what makes the instruction actionable — 131 of 150
+    # production rows carry provenance.session_id.
+    assert "20260513_224454_41ffcf" in text
+
+
+def test_live_state_marker_survives_a_candidate_without_provenance(tmp_path):
+    """Missing provenance degrades to the instruction, never loses the marker."""
+    store = _store(tmp_path)
+    _owner_eligible_candidate(
+        store, "cand-nomarkerref", "Owner 交代了 Cloudflare 部署密钥的存放位置", "evt-n1"
+    )
+
+    text = _recall_text(store, "cloudflare 密钥 部署")
+
+    assert "cand-nomarkerref" in text
+    assert "以现状为准" in text
+    assert "原始会话" not in text
+
+
+def test_ordinary_candidate_gets_no_live_state_marker(tmp_path):
+    """The marker must stay scoped to drift-prone facts, not decorate recall."""
+    store = _store(tmp_path)
+    _owner_eligible_candidate(
+        store, "cand-plain", "Owner 说他喜欢在周末看老电影，尤其是黑白片", "evt-p2"
+    )
+
+    text = _recall_text(store, "周末 老电影 黑白片")
+
+    assert "cand-plain" in text
+    assert "以现状为准" not in text
+
+
 def test_dry_run_reject_previews_without_touching_recall(tmp_path):
     """A preview must stay a preview: apply=False may not exclude anything."""
     from plugins.memory.memory_os.owner_actions import apply_owner_action
