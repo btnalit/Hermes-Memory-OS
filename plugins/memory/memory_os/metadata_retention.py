@@ -85,6 +85,16 @@ def metadata_retention_plan(
             now=current,
             actions=actions,
         ),
+        # Session-transcript read audit (memory_os_session_recall tool) — the
+        # fourth report-only ledger written from inside Hermes' request path.
+        # One row per drill-down read; carries created_at so it can age.
+        _ledger_plan(
+            ledger="session_transcript_reads",
+            path=roots.memory_os_root / "system" / "session_transcript_reads.jsonl",
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
         # session_fact_extraction's two bookkeeping ledgers. Registering them is
         # the same non-optional step as above, and the growth is not theoretical:
         # an appended-to session mints a NEW fingerprint by design, so an active

@@ -89,6 +89,11 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     # on every call and the diagnostic would never be written. Same contract as
     # the two report-only shadow writers above. See the closure plan §4.2.
     "plugins/memory/memory_os/prefetch.py::_record_continuity_freshness::append_jsonl_locked_call::path": "report_only_continuity_freshness",
+    # Session-recall read audit: the drill-down tool runs inside Hermes'
+    # request (tool call), not a cron envelope, so like the prefetch shadow
+    # ledgers it has no permit to spend — report-only, append-bounded,
+    # fail-open.
+    "plugins/memory/memory_os/session_mirror.py::_append_session_transcript_ledger::append_jsonl_locked_call::path": "report_only_session_transcript_read",
     "plugins/memory/memory_os/state_overlay.py::append_overlay_run::path.open_a::out_path": "state_overlay_run_ledger",
     "scripts/memory_os_entity_index_refresh.py::main::path.open_a::run_path": "entity_index_refresh_run_ledger",
     "plugins/memory/memory_os/permanent_promotion.py::ProposalLedger.create_or_get::append_under_lock_call::target": "permanent_promotion_proposal_ledger",

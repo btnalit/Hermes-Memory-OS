@@ -44,6 +44,7 @@ from .session_approval import build_session_review_block, build_session_feedback
 from .status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
     MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
+    MEMORY_OS_SESSION_RECALL_TOOL_DESCRIPTION,
     MEMORY_OS_STATUS_TOOL_DESCRIPTION,
 )
 from .store import MemoryOSStore
@@ -603,6 +604,19 @@ class MemoryOSProvider(MemoryProvider):
         lines.extend(
             [
                 "",
+                "## Layered Recall Rule",
+                (
+                    "Injected Memory-OS lines are CLIPPED summaries, not complete facts. A line ending "
+                    "with `[片段N/M字]` was truncated — N of M characters shown; a high-relevance match "
+                    "is NOT evidence the visible fragment is the whole fact. When a line carries "
+                    "`[以现状为准... 原始会话 <session_id>]` or a truncation annotation and you need the "
+                    "specifics (credentials location, deployment facts, configuration, schedules), call "
+                    "`memory_os_session_recall` with that session_id to read the original conversation. "
+                    "The transcript is a historical snapshot: verify any credential/deployment/config "
+                    "fact against current reality before relying on it — 以现实为准. Do not treat a "
+                    "recalled fragment or an old transcript as the current state of any system."
+                ),
+                "",
                 "## Owner Review Command Rule",
                 (
                     "If the latest owner message is a Memory-OS review task, resolve it to a definite action "
@@ -771,6 +785,32 @@ class MemoryOSProvider(MemoryProvider):
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": "memory_os_session_recall",
+                "description": MEMORY_OS_SESSION_RECALL_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "The session id from an injected pointer, e.g. the <id> in `原始会话 <id>`.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Zero-based message offset for paging through a long conversation.",
+                        },
+                        "max_messages": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 40,
+                            "description": "Messages to return in this window (bounded).",
+                        },
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
@@ -818,6 +858,18 @@ class MemoryOSProvider(MemoryProvider):
                 action_token=str(args.get("action_token") or ""),
                 offset=int(args.get("offset") or 0),
                 limit=int(args.get("limit") or 5),
+            )
+            return json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if tool_name == "memory_os_session_recall":
+            if self._store is None:
+                return json.dumps({"status": "error", "reason": "store_unavailable"}, ensure_ascii=False, sort_keys=True)
+            from .session_mirror import read_session_transcript
+
+            result = read_session_transcript(
+                self._store,
+                str(args.get("session_id") or ""),
+                max_messages=int(args.get("max_messages") or 20),
+                offset=int(args.get("offset") or 0),
             )
             return json.dumps(result, ensure_ascii=False, sort_keys=True)
         return super().handle_tool_call(tool_name, args, **kwargs)

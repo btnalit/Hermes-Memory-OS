@@ -1558,6 +1558,16 @@ def _crystallized_lines(
     MAX_TOTAL = 20
     MAX_PROVISIONAL = 5
     MAX_PERMANENT = MAX_TOTAL - MAX_PROVISIONAL  # 15 — reserve floor for provisional
+    # Floor mode (degradation 2) gets a much smaller cap and a score>0 gate.
+    # Production audit (2026-08-14): this section in floor mode was 40% of
+    # main's injection (4038/10220 chars) and 51% of sannai's (4469/8765) —
+    # twenty records of zero query relevance (philosophy chats, duplicate
+    # provisional rows) crowding out the sections that actually answered the
+    # query. The floor's own comment already said "a query-aware fallback,
+    # not a universal recall"; score-0 records are pure filler and the
+    # class-reserve logic (permanent/provisional) does not apply because
+    # relevance is the only admission criterion here.
+    FLOOR_MAX_TOTAL = 5
 
     now = datetime.now(timezone.utc)
 
@@ -1634,6 +1644,13 @@ def _crystallized_lines(
     # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
     permanent_entries: list[tuple[str, str, int]] = []  # (rid, line, recurrence)
     provisional_entries: list[tuple[datetime, str, str, int]] = []
+    # Injection-time dedup by normalized body. Production audit: the same
+    # proposal-approval fact appeared NINE times in one injection (repeated
+    # provisional extraction of one session), each copy burning a cap slot
+    # and ~220 budget chars. Distinct records with identical normalized text
+    # are one fact for injection purposes; semantic near-duplicates remain
+    # the upstream dedup lane's job (dedup_absorb), not this line's.
+    seen_body_keys: set[str] = set()
 
     # ── File traversal ──────────────────────────────────────────────
     # When FTS5 provides relevance, sort by filename (stable, predictable).
@@ -1699,9 +1716,13 @@ def _crystallized_lines(
                 continue
 
             kind = str(frontmatter.get("kind", "item"))
-            text = _redact(_clip(body, 220))
+            text = _redact(_clip_annotated(body, 220))
             if not text or _is_diagnostic_style_seed(text):
                 continue
+            body_key = "".join(str(body or "").split()).lower()[:120]
+            if body_key in seen_body_keys:
+                continue
+            seen_body_keys.add(body_key)
 
             # Record-level score at degradation level 2 — each record body
             # is scored individually so small files with relevant records
@@ -1764,6 +1785,29 @@ def _crystallized_lines(
     # ── Apply caps and track seen only for surviving records ──────
     result: list[str] = []
     record_ids: list[str] = []
+
+    if degradation_level == 2 and floor_tokens:
+        # Floor mode: relevance is the only admission criterion. Merge both
+        # classes, drop score-0 (pure filler — see FLOOR_MAX_TOTAL comment),
+        # take the top slice by score with rid as the deterministic tiebreak.
+        # An empty result here is correct and better than 4000 chars of
+        # zero-relevance records: build_prefetch simply omits the section.
+        merged = [
+            (score, rid, line)
+            for rid, line, _recurrence, score in permanent_entries
+        ] + [
+            (score, rid, line)
+            for _expires, rid, line, _recurrence, score in provisional_entries
+        ]
+        merged = [entry for entry in merged if entry[0] > 0]
+        merged.sort(key=lambda entry: (-entry[0], entry[1]))
+        for _score, rid, line in merged[:FLOOR_MAX_TOTAL]:
+            result.append(line)
+            record_ids.append(f"crystallized:{rid}")
+            if seen is not None and rid:
+                seen.add(("crystallized_record", rid))
+        return result, degradation_level, record_ids
+
     # Cap permanent records at MAX_PERMANENT (15) — reserve floor for provisional
     for rid, line, _recurrence, _score in permanent_entries[:MAX_PERMANENT]:
         result.append(line)
@@ -1887,7 +1931,12 @@ def _candidate_lines(
     for candidate in ordered:
         if len(lines) >= MAX_CANDIDATE_LINES:
             break
-        text = _redact(_clip(candidate.body, 180))
+        # 320 (was 180) + honest-truncation annotation: this is one of the two
+        # sections that actually answer a topical query, and the production
+        # audit caught the 180-clip amputating facts at the load-bearing point
+        # ("git push 到 https://github.c..."). Budget headroom comes from the
+        # floor-mode cap in _crystallized_lines (~3000 chars freed).
+        text = _redact(_clip_annotated(candidate.body, 320))
         if _is_diagnostic_style_seed(text):
             continue
         if text:
@@ -1938,9 +1987,13 @@ def _event_lines(
     for event in selected:
         if _is_diagnostic_style_seed(str(event.summary)):
             continue
+        # 320 (was 220): sync_turn stores at most ~296 chars per turn summary
+        # (140 user + 140 assistant + separators), so 320 means the stored
+        # summary is injected whole — clipping an already-tiny summary a
+        # second time was pure loss. Annotated for the rare longer kinds.
         lines.append(
             f"- {_event_source_class(event)}/{event.kind}: "
-            f"{_redact(_clip(event.summary, 220))}{_live_state_marker(event)}"
+            f"{_redact(_clip_annotated(event.summary, 320))}{_live_state_marker(event)}"
         )
         if seen is not None and event.id:
             seen.add(("event", event.id))
@@ -3107,7 +3160,10 @@ def _indexed_lines(
         if seen is not None and record_type and record_id:
             if (record_type, record_id) in seen:
                 continue  # already emitted by a dedicated section
-        snippet = _redact(_clip(str(hit.get("snippet", "")), 220))
+        # 320 (was 220) + honest-truncation annotation — the other section
+        # that answers topical queries; the audit caught "GitHub token 在
+        # scripts/.en..." cut exactly at the fact being asked for.
+        snippet = _redact(_clip_annotated(str(hit.get("snippet", "")), 320))
         if snippet:
             # Indexed recall IS query scoped, so it is one of the paths that
             # actually answers "where is the deploy key" — it needs the
@@ -3215,7 +3271,11 @@ def _live_state_marker_for(text: Any, session_id: Any = "") -> str:
     pointer = ""
     normalized_session = str(session_id or "").strip()
     if normalized_session:
-        pointer = f"; 原始会话 {normalized_session}"
+        # Name the retrieval verb, not just the location: a pointer nothing
+        # can open is half a feature. memory_os_session_recall is the read
+        # half of 分层深入 (bounded, redacted drill-down into the original
+        # conversation) — the marker is what teaches the agent it exists.
+        pointer = f"; 原始会话 {normalized_session} 可用 memory_os_session_recall 调取"
     return f" [以现状为准:此为当时摘要,使用前请核对当前状态{pointer}]"
 
 
@@ -3534,6 +3594,26 @@ def _clip(value: str, limit: int) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: limit - 1].rstrip() + "..."
+
+
+def _clip_annotated(value: str, limit: int) -> str:
+    """Clip like ``_clip`` but say so honestly when text was cut.
+
+    Production audit (2026-08-14, both profiles): recall lines were cut at
+    exactly the load-bearing point — mid-URL (``https://github.c...``),
+    mid-path (``scripts/.en...``), mid-schedule (``09:00、13:00、17:00、21.``)
+    — and the bare ``...`` suffix gave the agent no way to distinguish "the
+    fact ends here" from "the fact was amputated here". A fragment that looks
+    complete gets *believed*; the annotation makes the cut visible and tells
+    the agent how much of the record it is NOT seeing, which is the trigger
+    to drill down instead of trusting the fragment. Zero I/O — both numbers
+    come from strings already in hand.
+    """
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    shown = clean[: limit - 1].rstrip()
+    return f"{shown}…[片段{len(shown)}/{len(clean)}字]"
 
 
 def _clip_multiline(value: str, limit: int) -> str:
