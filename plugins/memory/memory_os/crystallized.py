@@ -1524,7 +1524,7 @@ def resolve_candidate_effective_state(
     return candidate.bridge_state
 
 
-_TERMINAL_CANDIDATE_STATES = frozenset(
+TERMINAL_CANDIDATE_STATES = frozenset(
     {
         "demoted",
         "fleeting",
@@ -1538,9 +1538,94 @@ _TERMINAL_CANDIDATE_STATES = frozenset(
         "owner_closed",
     }
 )
+# Public alias is the single source of this vocabulary. It was private while
+# only this module judged terminality; candidate_aggregation then grew its own
+# copy, and the recall path needs the same answer — three copies of one
+# vocabulary is precisely the drift this project keeps paying for (see the
+# attributable-source-class incident in CLAUDE.md). New readers import this
+# name; the old private alias stays for in-module call sites.
+_TERMINAL_CANDIDATE_STATES = TERMINAL_CANDIDATE_STATES
+
+# Compact hot-path projection of "which candidates must NOT surface in
+# recall". read_effective_candidates() is the authority but measures ~61ms on
+# production (it parses every crystallized record and the owner action log),
+# which is far too heavy for the per-turn prefetch path — so the expensive
+# truth is computed off-hot-path by the candidate_aggregation lane and
+# published here for prefetch to read in one small file. Same shape as the
+# execution-gate sidecar index and the clearance receipt snapshot.
+CANDIDATE_RECALL_EXCLUSION_FILE = "candidate_recall_exclusions.json"
+CANDIDATE_RECALL_EXCLUSION_SCHEMA_VERSION = "memory-os.candidate_recall_exclusions.v0"
 _TERMINAL_CANDIDATE_ACTIONS = frozenset(
     {"approve_candidate", "reject_candidate", "approve_external_evidence"}
 )
+
+
+def candidate_recall_exclusion_path(roots_or_store: Any) -> Path:
+    roots = getattr(roots_or_store, "roots", roots_or_store)
+    return roots.crystallized_root / CANDIDATE_RECALL_EXCLUSION_FILE
+
+
+def read_candidate_recall_exclusions(roots_or_store: Any) -> set[str]:
+    """Candidate ids that must not surface in recall. Empty set when absent.
+
+    Absence is deliberately fail-OPEN (empty exclusion set = nothing
+    excluded): before this projection existed the recall path surfaced raw
+    queue rows with no state filtering at all, so a missing snapshot simply
+    restores that prior behavior rather than blanking candidate recall
+    entirely. A stale snapshot therefore delays a correction by at most one
+    lane tick; it never silences memory.
+    """
+    path = candidate_recall_exclusion_path(roots_or_store)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    raw = payload.get("excluded_candidate_ids")
+    if not isinstance(raw, list):
+        return set()
+    return {str(item) for item in raw if str(item or "").strip()}
+
+
+def write_candidate_recall_exclusions(
+    store: MemoryOSStore,
+    excluded_ids: set[str] | list[str],
+    *,
+    now: datetime | None = None,
+    source_counts: dict[str, int] | None = None,
+) -> Path:
+    """Publish the hot-path exclusion projection (atomic replace)."""
+    from .jsonl_io import write_json_atomic
+
+    path = candidate_recall_exclusion_path(store)
+    payload = {
+        "schema_version": CANDIDATE_RECALL_EXCLUSION_SCHEMA_VERSION,
+        "generated_at": _timestamp(now),
+        "excluded_candidate_ids": sorted({str(item) for item in excluded_ids if str(item or "").strip()}),
+        "source_counts": dict(source_counts or {}),
+    }
+    write_json_atomic(path, payload)
+    return path
+
+
+def add_candidate_recall_exclusion(store: MemoryOSStore, candidate_id: str) -> bool:
+    """Exclude one candidate immediately (owner reject path).
+
+    The lane republishes the full set on its next tick; this keeps an owner
+    decision from waiting for that tick, which matters because "owner can
+    still reject" is the correction half of admitting candidates to recall
+    without approval.
+    """
+    normalized = str(candidate_id or "").strip()
+    if not normalized:
+        return False
+    current = read_candidate_recall_exclusions(store)
+    if normalized in current:
+        return False
+    current.add(normalized)
+    write_candidate_recall_exclusions(store, current, source_counts={"owner_action_incremental": 1})
+    return True
 
 
 def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:

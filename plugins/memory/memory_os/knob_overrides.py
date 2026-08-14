@@ -28,6 +28,21 @@ _SENTINEL = object()
 # are never listed → V3 physically cannot touch them.
 
 OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
+    # Owner ruling 2026-08-14 (降级准入 / reversible-lane automation): a
+    # summary-only, append-only import lane must not carry a per-approval
+    # platform scope. Default True admits every platform except the owner's
+    # `session_mirror.platform_denylist`; writing False is the rollback to
+    # the legacy per-approval allowlist. See session_mirror_graduation_policy
+    # — this registry default is metadata, the live default is the value
+    # passed to resolve_knob there, and both must move together.
+    "session_mirror_admit_all_platforms": {
+        "module": "session_mirror",
+        "default": True,
+        "bounds": None,
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     "min_cluster_size": {
         "module": "candidate_aggregation",
         "default": 1,

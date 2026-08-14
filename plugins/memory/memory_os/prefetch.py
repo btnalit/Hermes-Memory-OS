@@ -17,6 +17,7 @@ from .context_router import ContextSection, is_low_clue_recall_query, route_cont
 from .crystallized import (
     CrystallizedMemoryService,
     read_candidate_queue,
+    read_candidate_recall_exclusions,
     _parse_markdown_records,
     is_active_crystallized_frontmatter,
 )
@@ -1824,18 +1825,52 @@ def _candidate_lines(
     # query and body scored 4). The >=2 floor also holds for the ASCII case
     # this was built against (score 3 for "about"/"memory"/"continuity").
     RELEVANCE_FLOOR_MIN_SCORE = 2
+    MAX_CANDIDATE_LINES = 5
     magic_word_match = _should_include_candidates(query)
-    relevance_tokens: list[str] = [] if magic_word_match else _extract_query_tokens(query)
+    relevance_tokens: list[str] = [] if magic_word_match else _expand_query_tokens(
+        _extract_query_tokens(query)
+    )
     if not magic_word_match and not relevance_tokens:
         return []
-    lines: list[str] = []
-    for candidate in read_candidate_queue(store.roots)[:5]:
-        if not magic_word_match and _record_body_score(
-            str(candidate.body or ""), relevance_tokens
-        ) < RELEVANCE_FLOOR_MIN_SCORE:
-            # Conservative relevance floor: fewer than 2 distinct token hits
-            # => no line. Never emit an unmatched candidate as filler.
+    # Owner ruling 2026-08-14 ("降级准入"): candidates surface in recall at
+    # candidate authority without owner approval — only permanent
+    # crystallization stays owner-gated — and the owner's reject is the
+    # correction half of that bargain. This projection is what makes the
+    # reject bite; it is published off-hot-path by the candidate_aggregation
+    # lane (read_effective_candidates costs ~61ms, far too much per turn) and
+    # is fail-open when absent, which degrades to the pre-ruling behavior of
+    # surfacing unfiltered queue rows rather than silencing candidate recall.
+    excluded_ids = read_candidate_recall_exclusions(store.roots)
+    scored: list[tuple[int, Any]] = []
+    for candidate in read_candidate_queue(store.roots):
+        if candidate.candidate_id in excluded_ids:
             continue
+        if magic_word_match:
+            score = 0
+        else:
+            score = _record_body_score(str(candidate.body or ""), relevance_tokens)
+            if score < RELEVANCE_FLOOR_MIN_SCORE:
+                # Conservative relevance floor: fewer than 2 distinct token
+                # hits => no line. Never emit an unmatched candidate as filler.
+                continue
+        scored.append((score, candidate))
+    if magic_word_match:
+        # "Show me the review queue" keeps queue order (newest last), as before.
+        ordered = [candidate for _score, candidate in scored]
+    else:
+        # Rank by relevance instead of taking the head of the queue. The old
+        # `[:5]` scored only the five oldest rows, so on a 258-row production
+        # queue a perfectly relevant candidate that arrived later could never
+        # be reached — the same head-of-queue starvation documented for
+        # session_mirror. Ties keep queue order (stable sort).
+        # sorted() is stable, so equal scores keep their queue order.
+        ordered = [
+            candidate for _score, candidate in sorted(scored, key=lambda item: -item[0])
+        ]
+    lines: list[str] = []
+    for candidate in ordered:
+        if len(lines) >= MAX_CANDIDATE_LINES:
+            break
         text = _redact(_clip(candidate.body, 180))
         if _is_diagnostic_style_seed(text):
             continue
@@ -1886,7 +1921,10 @@ def _event_lines(
     for event in selected:
         if _is_diagnostic_style_seed(str(event.summary)):
             continue
-        lines.append(f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}")
+        lines.append(
+            f"- {_event_source_class(event)}/{event.kind}: "
+            f"{_redact(_clip(event.summary, 220))}{_live_state_marker(event)}"
+        )
         if seen is not None and event.id:
             seen.add(("event", event.id))
         if source_ids is not None and event.id:
@@ -3074,6 +3112,82 @@ def _should_ground_diagnostic_query(
     if not text:
         return False
     return any(pattern.search(text) for pattern in _DIAGNOSTIC_QUERY_PATTERNS)
+
+
+# Cross-language synonym groups for the operational domains where a recall
+# miss is most expensive. Measured motivation (2026-08-14, production): the
+# owner asks "cloudflare 密钥", the stored candidate says "凭证", the only
+# shared token is "cloudflare", the relevance floor needs >=2 distinct hits,
+# and the fact is dropped even though it sits in the candidate pool. The
+# floor itself is NOT lowered — >=1 was empirically noise (a bare "什么"
+# bigram matched unrelated bodies) — instead the query's token set is widened
+# so a genuine topical match can reach the existing floor.
+#
+# Deliberately narrow: only groups where the terms are true operational
+# equivalents. A general thesaurus here would re-open the false-match problem
+# the floor exists to prevent.
+_QUERY_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"密钥", "秘钥", "凭证", "凭据", "token", "key", "apikey", "secret", "credential", "credentials"}),
+    frozenset({"部署", "上线", "发布", "deploy", "deployment", "release", "rollout"}),
+    frozenset({"服务器", "主机", "机器", "host", "server", "vps"}),
+    frozenset({"账号", "帐号", "账户", "account", "login"}),
+    frozenset({"配置", "设置", "config", "configuration", "settings"}),
+    frozenset({"域名", "domain", "dns"}),
+)
+
+
+def _expand_query_tokens(tokens: list[str]) -> list[str]:
+    """Add operational synonyms for tokens that hit a synonym group.
+
+    Order is preserved and the original tokens always come first, so a
+    caller that truncates keeps the user's own words. Expansion is additive
+    only — it can raise a body's score toward the relevance floor, never
+    lower it.
+    """
+    if not tokens:
+        return tokens
+    lowered = {str(token).lower() for token in tokens}
+    extra: list[str] = []
+    for group in _QUERY_SYNONYM_GROUPS:
+        if lowered & group:
+            for term in sorted(group):
+                if term not in lowered and term not in extra:
+                    extra.append(term)
+    return list(tokens) + extra
+
+
+# Topics where a remembered summary must never be treated as the current
+# truth: credentials, deployment/config facts and host addresses all drift,
+# and the event layer stores a clipped summary_only body by design — the
+# value itself was never captured, only the fact that it was discussed.
+# Owner instruction 2026-08-14: "以现状为准" — recall these as pointers and
+# verify against live state.
+_LIVE_STATE_TOPIC_TERMS: tuple[str, ...] = (
+    "密钥", "秘钥", "凭证", "凭据", "账号", "帐号", "密码",
+    "token", "api key", "apikey", "secret", "credential",
+    "部署", "上线", "deploy", "配置", "域名", "dns", "端口",
+)
+
+
+def _live_state_marker(event: Any) -> str:
+    """Append a verify-against-current-state pointer for drift-prone facts.
+
+    The pointer is the session id already carried in the event's ``safe_ref``
+    — the memory layer knows where the original conversation lives but has
+    never surfaced it, so an agent recalling "owner gave me a Cloudflare
+    credential" had no way to go read the specifics or check they still
+    apply. This is disclosure only: it adds a reference and an instruction,
+    never a secret (the summary itself stays redacted and clipped).
+    """
+    summary = str(getattr(event, "summary", "") or "").lower()
+    if not any(term in summary for term in _LIVE_STATE_TOPIC_TERMS):
+        return ""
+    raw_ref = getattr(event, "safe_ref", None)
+    session_id = ""
+    if isinstance(raw_ref, dict):
+        session_id = str(raw_ref.get("session_id") or "").strip()
+    pointer = f"; 原始会话 {session_id}" if session_id else ""
+    return f" [以现状为准:此为当时摘要,使用前请核对当前状态{pointer}]"
 
 
 def _extract_query_tokens(query: str) -> list[str]:

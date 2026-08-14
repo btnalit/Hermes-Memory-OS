@@ -151,6 +151,112 @@ def _owner_action_record(store, *, owner_action_id="oact_session_mirror_ok", fin
     }
 
 
+def test_graduation_policy_admits_all_platforms_by_default(tmp_path):
+    """Owner confirmed 2026-08-14: the per-approval platform scope is retired,
+    so the DEFAULT path must ignore the approval's allowlist entirely.
+
+    The approval fixture carries platform_allowlist=["telegram"]; under the
+    retired semantics that would become the whole lane's scope."""
+    store = _store(tmp_path)
+    _append_owner_action(
+        store.roots.memory_os_root / "system" / "owner_actions.jsonl",
+        _owner_action_record(store),
+    )
+
+    policy = session_mirror_graduation_policy(store)
+
+    assert policy["status"] == "active"
+    assert policy["platform_allowlist"] == []  # empty == admit every platform
+    assert policy["platform_scope_mode"] == "admit_all_except_denylist"
+
+
+def test_knob_off_restores_the_legacy_approval_allowlist_rollback(tmp_path):
+    """The knob survives as the rollback path, not as the enabler."""
+    store = _store(tmp_path)
+    _append_owner_action(
+        store.roots.memory_os_root / "system" / "owner_actions.jsonl",
+        _owner_action_record(store),
+    )
+    override_dir = store.roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        json.dumps(
+            {
+                "knob": "session_mirror_admit_all_platforms",
+                "override_value": False,
+                "state": "active",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    policy = session_mirror_graduation_policy(store)
+
+    assert policy["platform_allowlist"] == ["telegram"]
+    assert policy["platform_scope_mode"] == "approval_allowlist"
+
+
+def test_registry_default_matches_the_live_resolve_knob_default():
+    """Two places hold this default and only the call-site one is live;
+    letting them drift means a registry edit silently changes nothing."""
+    import inspect
+
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+    from plugins.memory.memory_os import session_mirror as sm
+
+    source = inspect.getsource(sm.session_mirror_graduation_policy)
+    assert '"session_mirror_admit_all_platforms",\n                default=True,' in source
+    assert OVERRIDABLE_KNOBS["session_mirror_admit_all_platforms"]["default"] is True
+
+
+def test_admit_all_knob_drops_the_per_approval_platform_scope(tmp_path):
+    """Owner ruling 2026-08-14: a summary-only, append-only, reversible
+    import lane must not carry a per-approval scope.
+
+    Production counterfactual: ten approvals over three months, the LAST of
+    which happened to be a subagent session, made the lane's scope
+    ["subagent"] — and 1510/1510 pending sessions were skipped because no
+    session on the host carries that platform. With the knob on, the scope
+    disappears (empty allowlist = admit every platform) and only the owner's
+    own denylist filters."""
+    store = _store(tmp_path)
+    _append_owner_action(
+        store.roots.memory_os_root / "system" / "owner_actions.jsonl",
+        _owner_action_record(store),
+    )
+    save_config(
+        {
+            "session_mirror": {
+                "auto_apply_after_owner_home_graduation": True,
+                "platform_denylist": ["Cron", "curator"],
+            }
+        },
+        store.roots.hermes_home,
+    )
+    override_dir = store.roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        json.dumps(
+            {
+                "knob": "session_mirror_admit_all_platforms",
+                "override_value": True,
+                "state": "active",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    policy = session_mirror_graduation_policy(store)
+
+    assert policy["status"] == "active"
+    assert policy["platform_allowlist"] == []  # empty == admit every platform
+    assert policy["platform_scope_mode"] == "admit_all_except_denylist"
+    # The floor the owner sets once, normalized like every other platform value.
+    assert policy["platform_denylist"] == ["cron", "curator"]
+
+
 def _test_host_governance():
     return {
         "test_host": True,
