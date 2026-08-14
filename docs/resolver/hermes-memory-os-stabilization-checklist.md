@@ -5514,3 +5514,62 @@ target 同根(容量),移交 owner 决策(nice/限流/错峰或接受 WARN)。
   per-profile 化(main 心跳复活实测)、source-id 规范前缀归一+纪元 v3
   (era FAIL 清除)、探针预算接线(314s 完整跑通);V2 观察期达标唯剩
   压力 streak,V3 需重攒 30 日;全量 3332/13。
+
+### CP — 多 profile 清扫收尾 + V2C 解冻门重定义(owner 裁定) + 跨面 census（2026-08-14，PR #57 → `f553204`，双 home 已部署验证）
+
+**owner 追问**"定时任务的多 profile 适配，是不是要看全部定时任务和自动化
+部署/更新脚本" → 按 Rule 5 全面清扫；同轮 owner 裁定 V2C 压力门重定义。
+
+**① 清扫结果**。宿主全量盘点(只读)：systemd 用户级 12 单元(4 个
+Memory-OS timer 已 per-profile 化、全部 enabled)、系统级仅 dashboard、
+gateway 2 进程 env 正确、main cron 22 / sannai cron 19 条**零跨 profile
+路径污染**、main 表内 3 条 sannai 命名任务系有意的主链协同报告(脚本均
+在、无硬编码)、其余 6 个 profile 无 Memory-OS cron。修掉三处残留:
+dashboard 安装器 `--service-name` **默认值**固定(装第二个 profile 会静默
+覆盖第一个单元,与 CO 同类)、compat 探测固定单元名(profile home 上显示的
+是 default 的状态)、l3 探针 temp 日志秒级同名(两 profile 的 evidence tick
+同在 :12 分,同秒互相覆盖诊断)。
+**硬编码 `/root/.hermes` 22 处逐条定性、全部良性**:5 处文档/被检测的禁用
+字面量、1 处生产目标探测启发式(sannai home 为其子串故照样命中)、13 处
+`--hermes-home` 可覆盖默认值、3 处 CI 挂载隔离目标。**核心运转链无硬编码
+home**;监控默认 main 由 owner 裁定为当前可接受(它本就吃 `--hermes-home`)。
+
+**② V2C 解冻门重定义(owner 裁定)**。门要求 `dropped_by_budget>0` 连续 7
+天,而生产实测该计数器**从未非零过一次**(全部自然 rollup 行),同期
+`dropped_by_rank` 持续累积——当前 `prefetch_char_budget` 下每段 rank 上限
+总是先绑死,字节预算永远不是约束。**门在等一个该配置结构上无法产生的
+信号:不是"还没到",是不可达**(与纪元边界前的归因 FAIL 同型)。
+owner 裁定:判据扩为真实**选择压力**(budget 或 rank),而非调低生产预算
+制造旧信号(路线图禁止为移动指标改行为)。含义确有改变(证明"稀缺下行为
+正确"而非"**字节**稀缺下"),属知情取舍。实现要点:
+`budget_pressure_streak_days` **退休而非改义**(键义静默变宽正是本项目
+反复付代价的漂移)→ `selection_pressure_streak_days`;新增
+`budget_pressure_day_count`/`rank_pressure_day_count` **保留"字节压力从未
+发生"的证据**;键 census 已更新。反事实:rank-only 压力在裁定后计数、
+旧代码 KeyError;零丢弃日仍打断连击(扩宽的谓词不得恒真)。
+**部署前预演 = 部署后实测 = 1/7**(main;sannai 2/7),因 08-05→08-10 已有
+**连续 6 天**真实排序压力,随后 sannai 迁移窗口(08-11/08-12)无自然 rollup
+行重置连击——与 V3 断档同源。**可达性由历史证明,不是假设**。
+附带:纪元 v3 生效后 `schema_era_health` 从 FAIL 转 `healthy_no_sample`、
+`attribution_era_no_sample` 仍在 freeze_reasons 中——诚实护栏按设计工作,
+未用缩小度量换绿。
+
+**③ 跨面 census(Advisor 建议)**。`profiles/<name>` 形状推导已散在**八处**
+(gate runner、roots、插件安装器、monitor 内嵌探针、compat 探测、dashboard
+安装器、l3 日志 slug、agent-os),此前只有 runner↔roots 两处互钉。新增一张
+行为表钉死八处(含"仅父目录为 profiles 才算"的边界),bash 那份用源码扫描
+守住——防的正是本轮清扫这一类的下一次漂移。
+
+**部署后实测**:双 home apply/postcheck 全绿;4 个 timer 全 enabled;双心跳
+流动且错峰(07:02 default / 07:03 sannai);两个 profile 独立印证
+`budget_days=0`。
+
+**测试计数**:3332 → **3341 passed** / 13 skipped(+9);四静态门全绿;
+三组反事实 revert→FAIL→restore→PASS。全量另有 1 个已知 flaky
+(`test_execution_gate_runner_serializes_parallel_sidecar_updates`,隔离
+复跑 3/3 通过,本轮未触及该路径,memory 已有登记)。
+
+- `3db959e..f553204(PR#57 CP)`:多 profile 清扫收尾(dashboard 单元默认名/
+  compat 探测/l3 日志三处残留 + 22 处硬编码路径逐条定性全良性)、V2C 压力
+  门按 owner 裁定重定义为选择压力(旧键退休、证据保留、1/7 可达性经历史
+  证明)、八处 home 形状推导 census 钉死;全量 3341/13。
