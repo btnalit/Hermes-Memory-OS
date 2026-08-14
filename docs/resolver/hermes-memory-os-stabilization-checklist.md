@@ -5966,3 +5966,32 @@ transcript 10）。四静态门全绿。层1 反事实 8 项 revert→FAIL→res
   应答段放宽）+ 分层深入读半边 `memory_os_session_recall`（脱敏/有界/台账/
   无 owner 门）+ 三方互认（标记点名工具、说明书教协议、description 教边界）；
   双 home 部署复测 floor 归零、标记上线、脱敏实测咬住；全量 3387/13。
+
+### CS — 图谱注入位关系感知：语义边优先于同源共现（2026-08-14，PR #61）
+
+owner 反馈图谱注入"还没活起来"。shadow 账本量化（main，376 行 8847 条边
+决策）三个成因：①**59% 产出是已列出存根**（emitted_stub 1223 >
+emitted_full 844）——结晶 floor 20 条把 `seen` 塞满，图谱邻居全被降级；
+**CR 的 floor 修复已顺带解决**（复测 5 行 4 全预览）。②**边池 79% 是
+co_occurs**（6967/8847）：同一场会话抽取物互连，语义弱但出生权重高
+（均值 0.7+），纯权重排序把 6 个 exploit 位全给它们；真正有价值的语义边
+（refines/evidence_for/contradicts/depends_on 合计 21%）抢不到位。
+③锚点预览「相关记忆」泛化标签=被 resolver 驱逐记录的 index 残行——登记
+观察不动。
+
+**修复（②，选择侧不碰出生/权重/反馈闭环——2026-08-06 裁定）**：exploit 位
+语义边优先按权重占位，co_occurs 只填语义稀缺剩下的位；explore 轮转保持
+类型盲（反饿死不变）。0.50 的 refines 现在能挤掉 0.90 的 co_occurs。
+
+**注入模块自动匹配普查**（owner 问）：Indexed(FTS5)/结晶(FTS+向量+floor
+按分)/候选(#58 按查询打分+同义词)/图谱(锚点来自查询 FTS)全部查询驱动；
+**故意不按查询**的只有事件段（连续性）与 Overlay（任务状态）。
+
+**gateway 已由 owner 重启**：main 自查报告可见 Layered Recall Rule 注入，
+#58/#59/#60 交互路径实证生效。报告另暴露一个新发现登记待诊断：main
+profile 的**自指污染**——建造期元讨论（架构/治理/测试）充满记忆库，FTS
+什么查询都命中它们；sannai 无此问题，属建造期遗产非机制缺陷，先测量占比
+再定治理。
+
+**测试计数**：3387 → **3390 passed** / 13 skipped（+3）；反事实
+revert→2 FAIL→restore→PASS（语义稀缺守卫双向通过，钉不变路径）。

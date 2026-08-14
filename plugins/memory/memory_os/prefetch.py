@@ -2196,6 +2196,20 @@ GRAPH_MAX_LINES = 8
 GRAPH_EDGE_CANDIDATE_LIMIT = 32
 GRAPH_EXPLOIT_SLOTS = 6
 GRAPH_EXPLORE_SLOTS = 2
+# Semantic relations outrank co-occurrence at injection-slot selection.
+# Measured on production main (8847 edge decisions in the shadow ledger):
+# co_occurs is 79% of the candidate pool with high birth weights (avg 0.7+),
+# so weight-only sorting filled all six exploit slots with same-session
+# co-occurrence — the weakest relation ("extracted from the same session" is
+# not "semantically related") — while refines / evidence_for / contradicts /
+# depends_on (21% of the pool, the edges that carry the graph's actual
+# value) rarely got a slot. This is selection-side only: edge birth, weights
+# and the feedback loop are untouched (2026-08-06 owner ruling); co_occurs
+# still fills whatever exploit slots semantic scarcity leaves empty, and the
+# explore rotation stays type-blind so no class can be starved out entirely.
+_GRAPH_SEMANTIC_RELATIONS = frozenset(
+    {"refines", "evidence_for", "contradicts", "depends_on"}
+)
 GRAPH_ANCHOR_PREVIEW_CHARS = 12
 # 跨段去重命中的短预览长度:是结晶段同一正文 220 字符裁剪的精确前缀,
 # 对阅读方 LLM 是零歧义对齐键(比 record_id 可靠——其它区段不显示 id)。
@@ -2469,8 +2483,21 @@ def _render_graph_layer_lines(
     # invalidated_never_hit 计数验证轮转覆盖。
     workable.sort(key=lambda item: -item["weight"])
     if len(workable) > GRAPH_EXPLOIT_SLOTS + GRAPH_EXPLORE_SLOTS:
-        exploit = workable[:GRAPH_EXPLOIT_SLOTS]
-        remainder = workable[GRAPH_EXPLOIT_SLOTS:]
+        # Relation-aware exploit fill (see _GRAPH_SEMANTIC_RELATIONS):
+        # semantic edges claim exploit slots first (weight order within the
+        # class preserved by the stable sort above); co_occurs fills only the
+        # slots semantic scarcity leaves empty.
+        semantic = [
+            item for item in workable
+            if str(item["edge"].get("relation_type") or "") in _GRAPH_SEMANTIC_RELATIONS
+        ]
+        co_occurrence = [
+            item for item in workable
+            if str(item["edge"].get("relation_type") or "") not in _GRAPH_SEMANTIC_RELATIONS
+        ]
+        exploit = (semantic + co_occurrence)[:GRAPH_EXPLOIT_SLOTS]
+        exploit_marks = {id(item) for item in exploit}
+        remainder = [item for item in workable if id(item) not in exploit_marks]
         if day_ordinal is None:
             day_ordinal = datetime.now(timezone.utc).date().toordinal()
 
