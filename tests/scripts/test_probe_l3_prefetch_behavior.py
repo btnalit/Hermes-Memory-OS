@@ -24,3 +24,13 @@ def test_l3_probe_failure_revokes_and_compacts_provisional_record(tmp_path, monk
     store = MemoryOSStore(roots)
     service = CrystallizedMemoryService(store)
     assert service.read_records("_system_probe.md") == []
+
+
+def test_probe_log_name_is_namespaced_per_profile(tmp_path):
+    """Both profiles' evidence ticks fire on the same minute and the log name
+    is only second-granular, so a shared tempdir name could let co-tenant
+    probes overwrite each other's diagnostics."""
+    probe = importlib.import_module("scripts.probe_l3_prefetch_behavior")
+
+    assert probe._probe_log_slug(tmp_path / ".hermes") == ""
+    assert probe._probe_log_slug(tmp_path / ".hermes" / "profiles" / "sannai") == "_sannai"
