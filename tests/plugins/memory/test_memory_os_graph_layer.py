@@ -2558,3 +2558,124 @@ def test_w1_pair_debias_unedged_records_first(tmp_path):
         "with max_pairs=1 the single examined pair must be the unedged records "
         f"(new_c,new_d); got result={result}"
     )
+
+
+# ── 关系感知注入位(2026-08-14):语义边优先于同源共现 ─────────────────────────
+
+
+def _slot_edge(edge_id, from_id, to_id, relation, weight):
+    return {
+        "edge_id": edge_id,
+        "from_record_type": "crystallized_record",
+        "from_record_id": from_id,
+        "to_record_type": "crystallized_record",
+        "to_record_id": to_id,
+        "relation_type": relation,
+        "weight": weight,
+        "state": "active",
+    }
+
+
+def _slot_store(tmp_path, neighbor_count):
+    """真实 producer 造 1 锚点 + N 邻居,返回 (store, anchor_id, [neighbor_ids])。"""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    anchor = _write_cry_record(
+        store, body="锚点记录:关系感知注入位测试", candidate_id="cand-slot-anchor",
+        file_name="slot_anchor.md",
+    )
+    neighbors = [
+        _write_cry_record(
+            store,
+            body=f"邻居记录 {i}:内容各不相同便于断言 NEIGHBOR_MARK_{i}",
+            candidate_id=f"cand-slot-n{i}",
+            file_name=f"slot_n{i}.md",
+        )
+        for i in range(neighbor_count)
+    ]
+    return store, anchor, neighbors
+
+
+def test_semantic_edges_claim_exploit_slots_before_heavier_co_occurs(tmp_path):
+    """生产测量的反事实:边池 79% 是高权重 co_occurs,纯权重排序把 6 个
+    exploit 位全给它们,语义边(21%,图谱的真正价值)抢不到位。修复后语义边
+    先占位——一条 0.50 的 refines 必须挤掉 0.90 的 co_occurs。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+
+    store, anchor, neighbors = _slot_store(tmp_path, 10)
+    # 8 条高权重 co_occurs + 2 条低权重语义边 → 溢出触发切位。
+    edges = [
+        _slot_edge(f"co-{i}", anchor, neighbors[i], "co_occurs", 0.90 - i * 0.01)
+        for i in range(8)
+    ] + [
+        _slot_edge("sem-refines", anchor, neighbors[8], "refines", 0.50),
+        _slot_edge("sem-evidence", anchor, neighbors[9], "evidence_for", 0.45),
+    ]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(),
+    )
+
+    injected = {
+        str(d["edge"]["edge_id"]) for d in decisions if d.get("injected")
+    }
+    assert "sem-refines" in injected and "sem-evidence" in injected, (
+        f"semantic edges lost their exploit slots to co_occurs: {sorted(injected)}"
+    )
+    joined = "\n".join(lines)
+    assert "NEIGHBOR_MARK_8" in joined and "NEIGHBOR_MARK_9" in joined
+
+
+def test_co_occurs_still_fills_when_semantic_edges_are_scarce(tmp_path):
+    """语义稀缺时 co_occurs 照常填满 exploit 位——不是禁令,是排序。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+
+    store, anchor, neighbors = _slot_store(tmp_path, 10)
+    edges = [
+        _slot_edge(f"co-{i}", anchor, neighbors[i], "co_occurs", 0.90 - i * 0.01)
+        for i in range(10)
+    ]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(),
+    )
+
+    injected = [d for d in decisions if d.get("injected")]
+    assert len(injected) == 8  # 6 exploit + 2 explore, all co_occurs
+    assert len(lines) == 8
+
+
+def test_explore_rotation_stays_type_blind(tmp_path):
+    """探索位轮转不看关系类型——反饿死语义不变:落选的 co_occurs 仍能通过
+    当日轮转拿到 explore 位。用固定 day_ordinal 保证确定性。"""
+    from plugins.memory.memory_os.prefetch import (
+        GRAPH_EXPLOIT_SLOTS,
+        GRAPH_EXPLORE_SLOTS,
+        _render_graph_layer_lines,
+    )
+
+    store, anchor, neighbors = _slot_store(tmp_path, 10)
+    # 6 条语义边占满 exploit 位,4 条 co_occurs 只能竞争 2 个 explore 位。
+    edges = [
+        _slot_edge(f"sem-{i}", anchor, neighbors[i], "refines", 0.80 - i * 0.01)
+        for i in range(6)
+    ] + [
+        _slot_edge(f"co-{i}", anchor, neighbors[6 + i], "co_occurs", 0.95)
+        for i in range(4)
+    ]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(), day_ordinal=738000,
+    )
+
+    injected = {str(d["edge"]["edge_id"]) for d in decisions if d.get("injected")}
+    semantic_injected = {e for e in injected if e.startswith("sem-")}
+    co_injected = {e for e in injected if e.startswith("co-")}
+    assert len(semantic_injected) == GRAPH_EXPLOIT_SLOTS
+    assert len(co_injected) == GRAPH_EXPLORE_SLOTS, (
+        f"explore rotation must stay open to co_occurs: {sorted(injected)}"
+    )
