@@ -5423,7 +5423,7 @@ matrix + `git diff --check` 全绿；import cycle 0；write surface unclassified
   落盘 `stats_refreshed`；冲突注入（HERMES_PROFILE=default + sannai home）
   → rc=2、blocked permit `profile_home_conflict`（requested=default/
   derived=sannai）；main 同 lane `profile=default` 不变；**运行时核心写入方
-  同样生效**——sannai журнал 里 `runtime_heartbeat_core` 01:27 前标
+  同样生效**——sannai 日志里 `runtime_heartbeat_core` 01:27 前标
   default、01:38 起标 sannai（`from_hermes_home` 推导落地）。
 - 布局修复一处：sannai home 有迁移遗留嵌套树 `plugins/memory/`（半份仓库
   结构拷贝，缺 agent/memory_os_agent 包），裸跑 helper 时劫持 import 根
