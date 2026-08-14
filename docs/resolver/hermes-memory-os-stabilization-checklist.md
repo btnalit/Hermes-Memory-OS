@@ -5402,3 +5402,54 @@ matrix + `git diff --check` 全绿；import cycle 0；write surface unclassified
   lane_last_run 封闭原因码接线 15 lane + census 双向护栏、Loop Health View
   纯投影 + monitor INFO、版本门 0.2.1、召回评测 category/注入指标;全量
   3274→3324/13。
+
+### CN 部署与生产验证（2026-08-14，main+sannai 双 profile）
+
+- PR #55 CI 双 `verify` pass 后合并 `2b70e57`，随 docs 提交 `f33b0cd` 对齐；
+  `/opt` ff `c9db477 → f33b0cd`，本地 M 补丁丢弃（备份
+  `/root/runner.local-m.20260814T012035Z.py.bak`）。数据备份：main 66M +
+  sannai 23M（`/root/memory-os-pre-cn-*.tar.gz`；sannai 首次 tar 遇
+  file-changed 静默中断，重跑成功——备份必须显式核验产物存在）。
+- `deploy_memory_os.py` production-safe upgrade **×2 home**：main 全绿
+  （preflight/dry-run/apply/postcheck pass + 三探针 pass + manifest
+  `deployed_head=f33b0cd`）；sannai 全绿 + 唯一 WARN `llm_judge_probe=
+  ambiguous`（bounded_vote/gpt-5.6-luna 对低线索探针 query 裁 `ask_choice`
+  ——sannai 历史浅，属合理裁决非故障）。
+- hash 核验：runner ×3（/opt、main scripts、sannai scripts）、roots ×4
+  （含 `/root/.hermes/plugins/memory_os` 活体副本）全一致；
+  `lane_last_run.py`/`loop_health_view.py` 两 home 就位。
+- **归属实测（本批核心）**：sannai 裸 env（只传 HERMES_HOME）跑
+  event_stats_refresh → permit/completion 均 `profile=sannai`、lane_last_run
+  落盘 `stats_refreshed`；冲突注入（HERMES_PROFILE=default + sannai home）
+  → rc=2、blocked permit `profile_home_conflict`（requested=default/
+  derived=sannai）；main 同 lane `profile=default` 不变；**运行时核心写入方
+  同样生效**——sannai журнал 里 `runtime_heartbeat_core` 01:27 前标
+  default、01:38 起标 sannai（`from_hermes_home` 推导落地）。
+- 布局修复一处：sannai home 有迁移遗留嵌套树 `plugins/memory/`（半份仓库
+  结构拷贝，缺 agent/memory_os_agent 包），裸跑 helper 时劫持 import 根
+  致崩；cron 因 wrapper 注入 PYTHONPATH 幸免。已移开为
+  `plugins/memory.MIGRATION-ARTIFACT-20260814T*`（可逆）。
+- 新观测面生产落地：部署后一个 tick 内 main 4 条 / sannai 5+ 条 lane 写出
+  `system/lane_last_run/*.json`；`memory_os_loop_health_view.py` 两 home
+  渲染正常（memory/cognition/self_evolution=active，低频环 no_evidence
+  属日/周节奏未到，非故障）。
+- **遗留发现（考古证实全部先于本次部署，08-12 sannai 迁入起）**：
+  ① `heartbeat_state_stale`——**main 的 runtime_heartbeat_core 自
+  2026-08-12T05:26 起停摆**（此前每 ~5min），仅部署期间被动跑了一次；
+  sannai 心跳每 5min 连续。判定：gateway（Aug13 重启）的 Memory-OS 心跳
+  被迁移接到了 sannai，main 的自动处理（候选生成/衰减/镜像 auto-apply）
+  实际停转 ~2 天，**需宿主侧 gateway 接线决策**（双 profile 心跳并行或
+  轮转）。② `v2_exposure_schema_era_unhealthy`——纪元门 FAIL=10 缺口，
+  实测**全部**为 `graph_layer`(7)/`indexed`(3) 的 selected 段无
+  source_ids，时间 08-07~08-12 = CJ/CL 图谱注入上线后首批真实入选段：
+  纪元门按设计抓到了新注入路径的归因缺陷，待修（prefetch 图谱/indexed
+  段 source_ids 填充）。③ `probe_script_timeout`——full monitor 探针
+  300s 内跑不完（08-12 起夜间产物 257→300s，历史 183-186s），判定为
+  sannai 共存负载，两次原样复跑均 300.0s 复现，非 flake 非本批回归。
+- 证据级别：`deploy_pass` ×2（main+sannai）。`live_monitor_pass` **未取得**
+  ——被先存 `probe_script_timeout` 挡住，产物考古（08-12/08-13 夜间同型
+  FAIL）证实与本批无关；恢复 live PASS 需先解决遗留 ①③。
+- `2b70e57+f33b0cd 部署（CN 部署,本节）`:双 home production-safe 全绿,
+  归属三向实测通过(sannai 正标/冲突拒绝/main 不变),心跳核心写入方同步
+  生效;暴露迁移期三项先存问题(main 心跳停摆/图谱注入归因缺口/监控超时)
+  移交宿主与图谱工作流。
