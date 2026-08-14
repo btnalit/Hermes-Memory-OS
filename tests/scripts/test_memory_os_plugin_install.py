@@ -57,6 +57,9 @@ def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path
     assert closure_evidence_installed.read_bytes() == closure_evidence_source.read_bytes()
     assert retirement_installed.read_bytes() == retirement_source.read_bytes()
     assert community_retirement_installed.read_bytes() == community_retirement_source.read_bytes()
+    loop_health_source = scripts_root / "memory_os_loop_health_view.py"
+    loop_health_installed = target_home / "scripts" / loop_health_source.name
+    assert loop_health_installed.read_bytes() == loop_health_source.read_bytes()
 
 
 def test_installer_copies_agent_os_shell_by_default_without_cache_files(tmp_path):

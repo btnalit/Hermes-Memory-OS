@@ -51,7 +51,8 @@ REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.fact_judge import run_fact_judge_lane
 
@@ -63,10 +64,7 @@ def _resolve_config() -> tuple[str, str, str]:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
     envelope_id = (
         _preparse_cli_arg(sys.argv, "--envelope-id")
         or os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")
@@ -103,6 +101,33 @@ def main() -> int:
         "error_count": result["error_count"],
         "status": "ok" if not result.get("error") else "error",
     }
+    # A tick with error_count > 0 used to journal exactly like an empty one.
+    # Persist a closed outcome so a quietly-failing judge is visible on disk.
+    if result.get("error"):
+        run_status, reason = "error", "lane_failed"
+    elif int(result.get("candidates_read") or 0) == 0:
+        run_status, reason = "ok", "no_candidates"
+    elif int(result.get("error_count") or 0) > 0:
+        run_status, reason = "ok", "judged_with_errors"
+    elif int(result.get("judged_count") or 0) == 0:
+        run_status, reason = "ok", "no_candidates_judged"
+    else:
+        run_status, reason = "ok", "judged"
+    record_lane_last_run(
+        hermes_home,
+        "fact_judge",
+        status=run_status,
+        reason=reason,
+        counters={
+            "candidates_read": int(result.get("candidates_read") or 0),
+            "judged_count": int(result.get("judged_count") or 0),
+            "durable_count": int(result.get("durable_count") or 0),
+            "moment_count": int(result.get("moment_count") or 0),
+            "skipped_count": int(result.get("skipped_count") or 0),
+            "error_count": int(result.get("error_count") or 0),
+        },
+        error=str(result.get("error") or ""),
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 

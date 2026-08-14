@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Render a bounded MemorySources feedback prompt for Hermes agent delivery.
 
-This script does not send messages and does not write Memory-OS state. Hermes
-cron owns delivery and the Hermes agent owns the owner interaction. Empty
-stdout means there is no suitable feedback context to ask about.
+This script does not send messages and does not write owner-facing Memory-OS
+state. Hermes cron owns delivery and the Hermes agent owns the owner interaction.
+Empty stdout means there is no suitable feedback context to ask about — and
+the per-lane last-run evidence file (system/lane_last_run/) records WHY,
+using the same skip_reason set --status-json reports.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +22,31 @@ try:
 except ModuleNotFoundError:
     from scripts.memory_os_execution_report import write_helper_execution_report
 
+_HERMES_HOME_DEFAULT = str(Path.home() / ".hermes")
+_repo_root = Path(__file__).absolute().parents[1]
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    _runtime_root = Path(os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT) / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
+
+try:
+    from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
+    def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
+        sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
+        return False
+
 CANARY_TARGET = 20
 STATUS_SCHEMA_VERSION = "memory-os.memory_sources_feedback_prompt_status.v0"
+_LANE_ID = "memory_sources_feedback_request"
+
+
+def _record_last_run(status: str, reason: str) -> None:
+    hermes_home = os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT
+    record_lane_last_run(hermes_home, _LANE_ID, status=status, reason=reason)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,32 +62,43 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     args = parser.parse_args(argv)
-    report = _run_json(
-        [
-            "hermes",
-            "memory-os-agent-os",
-            "review",
-            "surface",
-            "--operation",
-            "memory_sources_feedback_context",
-            "--limit",
-            "3",
-        ]
-    )
+    try:
+        report = _run_json(
+            [
+                "hermes",
+                "memory-os-agent-os",
+                "review",
+                "surface",
+                "--operation",
+                "memory_sources_feedback_context",
+                "--limit",
+                "3",
+            ]
+        )
+    except SystemExit:
+        _record_last_run("error", "hermes_cli_failed")
+        raise
     if args.status_json:
         stats = _try_run_json(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
         print(json.dumps(_status_report(report, stats), ensure_ascii=False, sort_keys=True))
         return 0
+    # The skip_reason taxonomy below used to exist only behind --status-json,
+    # which cron never passes — persist it on the cron path too so a silent
+    # run is explainable from disk.
     if report.get("status") != "ok":
+        _record_last_run("skipped", "surface_not_ok")
         return 0
     item = report.get("latest_memory_source")
     if not isinstance(item, dict):
+        _record_last_run("skipped", "no_memory_source_context")
         return 0
     existing_feedback = report.get("existing_feedback") if isinstance(report.get("existing_feedback"), dict) else {}
     if int(existing_feedback.get("count") or 0) > 0:
+        _record_last_run("skipped", "already_feedback_for_latest_source")
         return 0
     token = str((item.get("action_tokens") or {}).get("mark_feedback") or "").strip()
     if not token:
+        _record_last_run("skipped", "feedback_token_missing")
         return 0
 
     source_classes = ", ".join(str(value) for value in item.get("source_classes") or []) or "unknown"
@@ -83,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     print("4. 需要更具体的召回")
     print("你可以直接回：有帮助、缺上下文、太机制化、要更具体。")
     print("OWNER_MESSAGE_END")
+    _record_last_run("ok", "prompt_rendered")
     return 0
 
 

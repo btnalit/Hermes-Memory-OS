@@ -52,7 +52,7 @@ else:
 
 from plugins.memory.memory_os.recall_types import RecallType
 from plugins.memory.memory_os.recall_facade import RetrieverFacade
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 
 # ── Retriever imports — each lane is independently importable ─────────
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         "--hermes-home", default=_HERMES_HOME,
         help="Path to HERMES_HOME",
     )
-    parser.add_argument("--profile", default="default")
+    parser.add_argument("--profile", default="")
     parser.add_argument("--output", choices=("json",), default="json")
     args = parser.parse_args(argv)
 
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         else [args.recall_type]
     )
 
-    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=resolve_profile_name(args.hermes_home, args.profile))
     store = MemoryOSStore(roots)
     store.initialize()
 

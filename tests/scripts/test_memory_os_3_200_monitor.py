@@ -827,6 +827,45 @@ def test_classify_snapshot_continuity_freshness_unknown_grade_count_surfaces_as_
     assert not any("continuity_freshness" in item.get("code", "") for item in classification["fail"])
 
 
+def test_classify_snapshot_lane_last_run_state_surfaces_as_info_only():
+    """The lane_last_run section explains WHY lanes produced nothing
+    ("Completion Is Not Output"). It is deliberately INFO-only: a failed run
+    already fails helper-completion grading, so grading here would
+    double-alarm. Counterfactual: before the wiring classify_snapshot never
+    read snapshot["lane_last_run"], so the info entry below did not exist."""
+    snapshot = _healthy_snapshot()
+    snapshot["lane_last_run"] = {
+        "schema_version": "memory-os.lane_last_run_monitor.v0",
+        "directory_exists": True,
+        "lane_count": 3,
+        "status_counts": {"ok": 1, "skipped": 1, "error": 1, "malformed": 0},
+        "lanes": {
+            "index_sync": {"status": "ok", "reason": "synced", "recorded_at": "2026-08-13T00:00:00Z"},
+            "working_cleanup": {"status": "skipped", "reason": "working_file_absent", "recorded_at": "2026-08-13T00:00:00Z"},
+            "fact_judge": {"status": "error", "reason": "lane_failed", "recorded_at": "2026-08-13T00:00:00Z"},
+        },
+        "raw_body_included": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    entries = [item for item in classification["info"] if item["code"] == "lane_last_run_state"]
+    assert entries, classification["info"]
+    assert entries[0]["value"]["error_lanes"] == ["fact_judge"]
+    assert entries[0]["value"]["status_counts"]["error"] == 1
+    assert not any("lane_last_run" in item.get("code", "") for item in classification["warn"])
+    assert not any("lane_last_run" in item.get("code", "") for item in classification["fail"])
+
+
+def test_classify_snapshot_without_lane_last_run_section_adds_no_entry():
+    snapshot = _healthy_snapshot()
+    snapshot.pop("lane_last_run", None)
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any("lane_last_run" in item.get("code", "") for item in classification["info"])
+
+
 def test_continuity_freshness_summary_reads_real_ledger_and_counts_correctly(tmp_path):
     """Exercises the real embedded-script collector (continuity_freshness_summary(),
     added alongside the classify_snapshot wiring tested above) against an

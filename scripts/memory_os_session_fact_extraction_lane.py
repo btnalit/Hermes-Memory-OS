@@ -52,7 +52,7 @@ REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.cognition.session_fact_extraction import run_session_fact_extraction_lane
 
@@ -64,10 +64,7 @@ def _resolve_config() -> tuple[str, str, str]:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
     envelope_id = (
         _preparse_cli_arg(sys.argv, "--envelope-id")
         or os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")

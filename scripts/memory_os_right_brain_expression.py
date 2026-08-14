@@ -28,6 +28,10 @@ SCHEMA_VERSION = "memory-os.right_brain_expression_adapter_request.v0"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    # Legacy paused per-lane surface: keeps its host-calibrated "main" default
+    # on purpose — its historical score/feedback ledgers are stamped "main",
+    # and rewiring the fallback would split their attribution. Active lanes
+    # resolve via roots.resolve_profile_name instead.
     parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "main"))
     parser.add_argument("--channel", default=os.environ.get("MEMORY_OS_RIGHT_BRAIN_CHANNEL", "origin"))
     parser.add_argument("--max-refs", type=int, default=int(os.environ.get("MEMORY_OS_RIGHT_BRAIN_MAX_REFS", "6")))

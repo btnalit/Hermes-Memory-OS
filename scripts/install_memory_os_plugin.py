@@ -53,6 +53,7 @@ SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
 SOURCE_MONITOR_DASHBOARD_SNAPSHOT = REPO_ROOT / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+SOURCE_LOOP_HEALTH_VIEW = REPO_ROOT / "scripts" / "memory_os_loop_health_view.py"
 SOURCE_FULL_MONITOR_REFRESH = REPO_ROOT / "scripts" / "memory_os_full_monitor_refresh.py"
 SOURCE_FULL_MONITOR = REPO_ROOT / "scripts" / "memory_os_3_200_monitor.py"
 SOURCE_CLOSURE_RUNTIME_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_closure_runtime_evidence.py"
@@ -1168,6 +1169,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "event_stats_refresh": SOURCE_EVENT_STATS_REFRESH,
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
         "monitor_dashboard_snapshot": SOURCE_MONITOR_DASHBOARD_SNAPSHOT,
+        "loop_health_view": SOURCE_LOOP_HEALTH_VIEW,
         "full_monitor_refresh": SOURCE_FULL_MONITOR_REFRESH,
         "full_monitor": SOURCE_FULL_MONITOR,
         "closure_runtime_evidence": SOURCE_CLOSURE_RUNTIME_EVIDENCE,

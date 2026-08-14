@@ -29,7 +29,7 @@ else:
         sys.path.insert(0, str(runtime_root))
 
 from plugins.memory.memory_os.config import load_config
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.v3_seed_evidence import run_v3_seed_evidence_cycle
 
@@ -37,7 +37,7 @@ from plugins.memory.memory_os.v3_seed_evidence import run_v3_seed_evidence_cycle
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=_HERMES_HOME)
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "default"))
+    parser.add_argument("--profile", default="")
     parser.add_argument("--target-date", default="")
     return parser
 
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(seed_config, dict) or seed_config.get("enabled") is not True:
         result = {"status": "ok", "skipped": True, "reason": "v3_seed_evidence_disabled"}
     else:
-        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=resolve_profile_name(args.hermes_home, args.profile))
         store = MemoryOSStore(roots)
         store.initialize()
         result = run_v3_seed_evidence_cycle(

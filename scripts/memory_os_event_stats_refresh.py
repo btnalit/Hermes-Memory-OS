@@ -54,7 +54,8 @@ else:
         sys.path.insert(0, str(_runtime_root))
 
 from plugins.memory.memory_os.event_stats import build_event_stats, write_event_stats
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -64,10 +65,7 @@ def main() -> int:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)
@@ -88,6 +86,16 @@ def main() -> int:
         "has_continuity_selector": bool(stats.continuity_selector),
         "updated_at": stats.updated_at,
     }
+    record_lane_last_run(
+        hermes_home,
+        "event_stats_refresh",
+        status="ok",
+        reason="stats_refreshed" if event_dicts else "no_events",
+        counters={
+            "total_event_count": int(stats.total_event_count or 0),
+            "recent_event_summaries_count": len(stats.recent_event_summaries),
+        },
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     # Helper report for ExecutionGate postcheck (INV-5: no LLM / no network).

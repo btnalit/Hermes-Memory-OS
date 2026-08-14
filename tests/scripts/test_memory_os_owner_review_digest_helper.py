@@ -64,7 +64,7 @@ def test_digest_helper_review_mode_can_render_pull_review_content():
     )
 
 
-def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
+def test_digest_helper_uses_single_delivery_render_command(tmp_path, monkeypatch, capsys):
     module = _load_helper_module()
     commands = []
 
@@ -80,6 +80,7 @@ def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
             "permanent_promotion_delivery": {"shown_proposal_ids": ["ppm_test"]},
         }
 
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("MEMORY_OS_OWNER_REVIEW_CHANNEL", "telegram")
     monkeypatch.setattr(module, "_run_json", fake_run_json)
 
@@ -87,3 +88,31 @@ def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
     assert len(commands) == 1
     assert commands[0][2:4] == ["review", "render-delivery-digest"]
     assert "memory approve ppmt_" in capsys.readouterr().out
+
+    from plugins.memory.memory_os.lane_last_run import read_lane_last_run
+
+    record = read_lane_last_run(tmp_path, "owner_review_digest_render")
+    assert record["status"] == "ok"
+    assert record["reason"] == "digest_rendered"
+
+
+def test_digest_helper_persists_no_meaningful_content_reason(tmp_path, monkeypatch):
+    # A quiet day and a crashed render used to leave identical (empty)
+    # evidence; the skip must now be explainable from disk.
+    module = _load_helper_module()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MEMORY_OS_OWNER_REVIEW_CHANNEL", "telegram")
+    monkeypatch.setattr(
+        module,
+        "_run_json",
+        lambda _command: {"counts": {"action_required_shown": 0}, "text": ""},
+    )
+
+    assert module.main() == 0
+
+    from plugins.memory.memory_os.lane_last_run import read_lane_last_run
+
+    record = read_lane_last_run(tmp_path, "owner_review_digest_render")
+    assert record["status"] == "skipped"
+    assert record["reason"] == "no_meaningful_content"

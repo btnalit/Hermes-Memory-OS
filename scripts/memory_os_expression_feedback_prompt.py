@@ -1,50 +1,90 @@
 #!/usr/bin/env python3
 """Render a bounded right-brain expression feedback prompt for Hermes agent.
 
-This script does not send messages and does not write Memory-OS state. Hermes
-cron owns delivery and the Hermes agent owns the owner interaction.
+This script does not send messages and does not write owner-facing Memory-OS
+state. Hermes cron owns delivery and the Hermes agent owns the owner interaction.
+Its only write is the per-lane last-run evidence file (system/lane_last_run/),
+which records WHY a run produced no prompt.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 try:
     from memory_os_execution_report import write_helper_execution_report
 except ModuleNotFoundError:
     from scripts.memory_os_execution_report import write_helper_execution_report
 
+_HERMES_HOME_DEFAULT = str(Path.home() / ".hermes")
+_repo_root = Path(__file__).absolute().parents[1]
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    _runtime_root = Path(os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT) / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
+
+try:
+    from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
+    def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
+        sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
+        return False
+
+_LANE_ID = "expression_feedback_request"
+
+
+def _record_last_run(status: str, reason: str) -> None:
+    hermes_home = os.environ.get("HERMES_HOME", "") or _HERMES_HOME_DEFAULT
+    record_lane_last_run(hermes_home, _LANE_ID, status=status, reason=reason)
+
 
 def main() -> int:
-    report = _run_json(
-        [
-            "hermes",
-            "memory-os-agent-os",
-            "review",
-            "surface",
-            "--operation",
-            "expression_feedback_context",
-            "--limit",
-            "1",
-        ]
-    )
+    # Empty stdout is a designed outcome here (Hermes cron stays silent), so
+    # every no-prompt exit must record WHY it produced nothing — otherwise a
+    # broken surface and a quiet week are indistinguishable on disk.
+    try:
+        report = _run_json(
+            [
+                "hermes",
+                "memory-os-agent-os",
+                "review",
+                "surface",
+                "--operation",
+                "expression_feedback_context",
+                "--limit",
+                "1",
+            ]
+        )
+    except SystemExit:
+        _record_last_run("error", "hermes_cli_failed")
+        raise
     if report.get("status") != "ok":
+        _record_last_run("skipped", "surface_not_ok")
         return 0
     item = report.get("latest_expression_outcome")
     if not isinstance(item, dict):
         item = report.get("latest_outcome")
     if not isinstance(item, dict):
+        _record_last_run("skipped", "no_expression_outcome")
         return 0
     if bool(item.get("outcome_silent")):
+        _record_last_run("skipped", "outcome_silent")
         return 0
     existing_feedback = report.get("existing_feedback") if isinstance(report.get("existing_feedback"), dict) else {}
     if int(existing_feedback.get("count") or 0) > 0:
+        _record_last_run("skipped", "already_feedback_for_latest_outcome")
         return 0
     preview = str(item.get("expression_preview") or item.get("outcome_preview") or "").strip()
     tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
     if not tokens:
+        _record_last_run("skipped", "action_tokens_missing")
         return 0
 
     print("Memory-OS right-brain expression feedback request")
@@ -84,6 +124,7 @@ def main() -> int:
             'memory_os_review_reply({ "action": "feedback", '
             f'"action_token": "{token}", "rating": "{rating}" }})'
         )
+    _record_last_run("ok", "prompt_rendered")
     return 0
 
 

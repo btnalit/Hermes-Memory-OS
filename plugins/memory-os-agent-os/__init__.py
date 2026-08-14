@@ -183,12 +183,20 @@ def _load_memory_os_audit_api() -> tuple[Any, Any]:
 
 
 def _resolve_profile() -> str:
-    return (
+    explicit = (
         os.environ.get("HERMES_PROFILE")
         or os.environ.get("HERMES_AGENT_IDENTITY")
         or os.environ.get("HERMES_AGENT_NAME")
-        or "default"
     )
+    if explicit:
+        return explicit
+    # Multi-profile hosts often export only HERMES_HOME
+    # (.../profiles/<name>); derive the profile from that shape instead of
+    # collapsing to "default" and mis-attributing the profile's records.
+    home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser().resolve()
+    if home.name and home.parent.name == "profiles":
+        return home.name
+    return "default"
 
 
 def register_cli(subparser: argparse.ArgumentParser) -> None:

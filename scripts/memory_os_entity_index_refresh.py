@@ -49,7 +49,7 @@ else:
     if _runtime_root.exists() and str(_runtime_root) not in sys.path:
         sys.path.insert(0, str(_runtime_root))
 
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.entity_index import refresh_entity_index, entity_index_stats
 from plugins.memory.memory_os.knob_overrides import resolve_knob
 
@@ -62,9 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         "--hermes-home", default=_HERMES_HOME,
         help="Path to HERMES_HOME",
     )
-    parser.add_argument("--profile", default="default")
+    parser.add_argument("--profile", default="")
     parser.add_argument("--output", choices=("json",), default="json")
     args = parser.parse_args(argv)
+    profile = resolve_profile_name(args.hermes_home, args.profile)
 
     t0 = time.monotonic()
     run_status = "ok"
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     record_count = 0
 
     try:
-        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=profile)
         enabled = bool(resolve_knob(
             "entity_index_enabled", default=False, roots=roots,
         ))
@@ -120,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             "entity_count": entity_count,
             "record_count": record_count,
             "duration_ms": duration_ms,
-            "profile": args.profile,
+            "profile": profile,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }))
 

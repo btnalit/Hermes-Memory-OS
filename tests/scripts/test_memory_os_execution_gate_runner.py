@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -513,6 +514,7 @@ def _runner_permit_and_completion(module, hermes_home):
         helper_present=True,
         smoke_mode="off",
         boundary=dict(_FALSE_BOUNDARY),
+        profile="default",
     )
     module._append_completion(
         hermes_home=hermes_home,
@@ -523,6 +525,7 @@ def _runner_permit_and_completion(module, hermes_home):
         smoke_mode="off",
         boundary=dict(_FALSE_BOUNDARY),
         helper_report={},
+        profile="default",
         requires_boundary_report=False,
     )
     records = [
@@ -620,3 +623,183 @@ def test_dual_writer_sidecar_entries_have_identical_shape(tmp_path):
     assert set(runner_entry) == set(core_entry), (
         "sidecar index entries from the two writers diverged in shape"
     )
+
+
+# ── Profile attribution resolution (multi-profile hosts) ────────────────────
+#
+# Multi-profile hosts export only HERMES_HOME=/root/.hermes/profiles/<name>
+# without HERMES_PROFILE.  The old `HERMES_PROFILE or "default"` fallback then
+# stamped that profile's permit/completion records as "default", and
+# profile-filtered readers silently dropped them.
+
+
+def _profile_registry_snapshot(hermes_home, raw_script):
+    registry_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.cron_registry.v0",
+                "specs": [
+                    {
+                        "key": "index_sync",
+                        "name": "memory-os-index-sync",
+                        "raw_script": raw_script,
+                        "wrapper_script": "memory_os_cron_index_sync_gate.py",
+                        "lane_id": "index_sync",
+                        "helper_kind": "local_helper",
+                        "no_agent": True,
+                        "requires_boundary_report": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_resolve_profile_behavior_table(tmp_path, monkeypatch):
+    module = _load_runner_module()
+    plain_home = tmp_path / "home"
+    sannai_home = tmp_path / "profiles" / "sannai"
+
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    assert module._resolve_profile(plain_home) == ("default", None)
+    assert module._resolve_profile(sannai_home) == ("sannai", None)
+    assert module._resolve_profile(plain_home, "explicit-x") == ("explicit-x", None)
+    assert module._resolve_profile(sannai_home, "sannai") == ("sannai", None)
+    profile, conflict = module._resolve_profile(sannai_home, "other")
+    assert profile == "sannai"
+    assert conflict == {"requested": "other", "derived_from_home": "sannai"}
+
+    monkeypatch.setenv("HERMES_PROFILE", "sannai")
+    assert module._resolve_profile(plain_home) == ("sannai", None)
+    assert module._resolve_profile(sannai_home) == ("sannai", None)
+
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    profile, conflict = module._resolve_profile(sannai_home)
+    assert profile == "sannai"
+    assert conflict == {"requested": "default", "derived_from_home": "sannai"}
+
+    # Explicit --profile outranks the environment.
+    monkeypatch.setenv("HERMES_PROFILE", "main")
+    assert module._resolve_profile(plain_home, "sannai") == ("sannai", None)
+
+
+def test_resolve_profile_matches_roots_resolver_behavior_table(tmp_path, monkeypatch):
+    # The runner is stdlib-only, so it carries a local twin of
+    # roots.resolve_profile_name.  This table pins the two implementations
+    # together: any drift between them re-opens split attribution.
+    from plugins.memory.memory_os.roots import RootValidationError, resolve_profile_name
+
+    module = _load_runner_module()
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    plain_home = tmp_path / "home"
+    sannai_home = tmp_path / "profiles" / "sannai"
+
+    for home, explicit in [
+        (plain_home, ""),
+        (plain_home, "explicit-x"),
+        (sannai_home, ""),
+        (sannai_home, "sannai"),
+    ]:
+        runner_profile, runner_conflict = module._resolve_profile(home, explicit)
+        assert runner_conflict is None
+        assert resolve_profile_name(home, explicit) == runner_profile
+
+    # Conflict: the runner reports it structurally, roots fails closed.
+    runner_profile, runner_conflict = module._resolve_profile(sannai_home, "other")
+    assert runner_conflict is not None
+    try:
+        resolve_profile_name(sannai_home, "other")
+    except RootValidationError:
+        pass
+    else:
+        raise AssertionError("roots resolver accepted a conflicting profile")
+
+
+def test_profile_shaped_home_stamps_permit_and_completion_with_derived_profile(tmp_path, monkeypatch):
+    # Counterfactual for the sannai mis-attribution: before the resolver these
+    # records said "default" whenever HERMES_PROFILE was not exported.
+    module = _load_runner_module()
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    hermes_home = tmp_path / "profiles" / "sannai"
+    _profile_registry_snapshot(hermes_home, "memory_os_missing_helper_for_profile_test.py")
+
+    outcome = module.run_registry_key_detailed("index_sync", hermes_home=hermes_home)
+
+    # Helper is intentionally missing: permit + helper_missing completion both
+    # get written, which is exactly the pair whose attribution matters.
+    assert outcome["status"] == "helper_missing"
+    records_path = hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["stage"] for record in records] == ["permit", "completion"]
+    assert records[0]["profile"] == "sannai"
+    assert records[1]["profile"] == "sannai"
+    assert records[0]["permit_decision"] == "allowed"
+
+
+def test_profile_home_conflict_blocks_lane_with_durable_permit(tmp_path, monkeypatch):
+    # HERMES_PROFILE=default + a sannai-shaped home must not run the helper —
+    # but it must leave a blocked permit as evidence, never exit silently.
+    module = _load_runner_module()
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    hermes_home = tmp_path / "profiles" / "sannai"
+    _profile_registry_snapshot(hermes_home, "memory_os_module_cadence_report_cron.py")
+
+    outcome = module.run_registry_key_detailed("index_sync", hermes_home=hermes_home)
+
+    assert outcome["status"] == "permit_blocked"
+    assert outcome["error_code"] == "profile_home_conflict"
+    assert outcome["returncode"] == 2
+    records_path = hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["stage"] == "permit"
+    assert records[0]["permit_decision"] == "blocked"
+    assert records[0]["permit_reason"] == "profile_home_conflict"
+    assert records[0]["profile"] == "sannai"
+    assert records[0]["profile_conflict"] == {"requested": "default", "derived_from_home": "sannai"}
+
+
+def test_runner_injects_resolved_profile_into_helper_environment(tmp_path):
+    # The helper subprocess must see the same profile the envelope was stamped
+    # with, so lane scripts stop re-deriving (and mis-deriving) it themselves.
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    runner = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_execution_gate_runner.py"
+    shutil.copy2(runner, scripts_dir / "memory_os_execution_gate_runner.py")
+    (scripts_dir / "memory_os_profile_probe_helper.py").write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "out = Path(os.environ['HERMES_HOME']) / 'seen_profile.txt'",
+                "out.write_text(os.environ.get('HERMES_PROFILE', '<unset>'), encoding='utf-8')",
+                "print('PROBE_OK')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    hermes_home = tmp_path / "profiles" / "sannai"
+    _profile_registry_snapshot(hermes_home, "memory_os_profile_probe_helper.py")
+    env = {key: value for key, value in os.environ.items() if key != "HERMES_PROFILE"}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(scripts_dir / "memory_os_execution_gate_runner.py"),
+            "--registry-key",
+            "index_sync",
+            "--hermes-home",
+            str(hermes_home),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (hermes_home / "seen_profile.txt").read_text(encoding="utf-8") == "sannai"

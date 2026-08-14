@@ -561,6 +561,51 @@ MEMORY_OS_CRON_LANES: tuple[MemoryOSCronLaneDef, ...] = (
 )
 
 
+# ── Per-lane last-run evidence census ("Completion Is Not Output") ──────────
+#
+# Every lane must declare HOW a reader separates "no eligible input" from
+# "processing failed" without re-running it:
+#
+#   "lane_last_run"      — writes the standard system/lane_last_run/<lane_id>.json
+#                          record (plugins.memory.memory_os.lane_last_run).
+#   "dedicated_artifact" — carries its own richer per-run artifact with a
+#                          closed reason/status set (e.g. exposure_rollup's
+#                          snapshot last_run block, v3_wandering_runs.jsonl,
+#                          session_fact_extraction runs.jsonl).
+#
+# A census test pins this table to MEMORY_OS_CRON_LANES in both directions,
+# so a new lane cannot be registered without triaging its evidence surface
+# at birth — the pattern that closed the exposure_monitor_stats orphan-key
+# class of drift.
+LANE_LAST_RUN_EVIDENCE: dict[str, str] = {
+    "event_stats_refresh": "lane_last_run",
+    "index_sync": "lane_last_run",
+    "state_overlay_refresh": "dedicated_artifact",  # system/state_overlay/runs.jsonl
+    "entity_index_refresh": "dedicated_artifact",  # system/entity_index_runs.jsonl
+    "proposal_followups_opsgate": "lane_last_run",
+    "clearance_cycle": "lane_last_run",
+    "hindsight_health_probe": "lane_last_run",
+    "fact_judge": "lane_last_run",
+    "candidate_aggregation": "lane_last_run",
+    "l3_probe_verification": "lane_last_run",
+    "v3_wandering": "dedicated_artifact",  # system/v3_wandering_runs.jsonl
+    "session_fact_extraction": "dedicated_artifact",  # system-modules/session_fact_extraction/runs.jsonl
+    "exposure_rollup": "dedicated_artifact",  # exposure_rollup_snapshot.json last_run block
+    "v3_seed_evidence": "dedicated_artifact",  # v3_seed_edges_daily.jsonl + snapshot
+    "v3_journal_sweep": "lane_last_run",
+    "working_cleanup": "lane_last_run",
+    "state_source_mirror": "lane_last_run",
+    "hindsight_advisory_digest": "lane_last_run",
+    "owner_review_digest_render": "lane_last_run",
+    "memory_sources_feedback_request": "lane_last_run",
+    "expression_feedback_request": "lane_last_run",
+    "full_monitor_refresh": "lane_last_run",
+    "module_cadence_report": "dedicated_artifact",  # system-modules/module_cadence/reports.jsonl
+}
+
+LANE_LAST_RUN_EVIDENCE_KINDS = frozenset({"lane_last_run", "dedicated_artifact"})
+
+
 def _build_specs() -> tuple[MemoryOSCronSpec, ...]:
     groups = {group.key: group for group in MEMORY_OS_CRON_GROUPS}
     missing = sorted({lane.group_key for lane in MEMORY_OS_CRON_LANES} - set(groups))

@@ -350,6 +350,124 @@ class TestEvaluateRecallCounterfactual:
         assert after_score["recall_rate"] == 0.0
         assert after_score["recall_rate"] < before_score["recall_rate"]
 
+def test_golden_query_category_round_trips(tmp_path: Path):
+    gs = GoldenSet(
+        profile="cat",
+        queries=[
+            GoldenQuery(
+                query="今天的部署状态如何",
+                expected=[GoldenResult(recall_type="crystallized", content_pattern="deploy")],
+                category="chinese_natural",
+            ),
+        ],
+    )
+    path = tmp_path / "cat.golden.json"
+    save_golden_set(path, gs)
+
+    loaded = load_golden_set(path)
+
+    assert loaded.queries[0].category == "chinese_natural"
+
+
+def test_legacy_golden_file_without_category_reports_uncategorized(tmp_path: Path):
+    import json
+
+    path = tmp_path / "legacy_cat.golden.json"
+    path.write_text(json.dumps({
+        "schema_version": "memory-os.recall_golden_set.v1",
+        "profile": "legacy",
+        "queries": [
+            {
+                "query": "some fact",
+                "expected": [{"recall_type": "crystallized", "content_pattern": "ABSENT"}],
+            }
+        ],
+    }), encoding="utf-8")
+    store = _init_store(tmp_path)
+
+    report = run_golden_set_report(store, path, profile="legacy")
+
+    assert report["items"][0]["category"] == "uncategorized"
+    assert "uncategorized" in report["by_category"]
+
+
+class TestReportCategoryBreakdownAndInjectionMetrics:
+    def test_no_answer_honesty_counts_negative_check_without_injection(self, tmp_path):
+        # Honest no-answer: all-negative expectations on an empty store must
+        # register as a checked negative with zero injections.
+        store = _init_store(tmp_path)
+        gs = GoldenSet(
+            profile="metrics",
+            queries=[
+                GoldenQuery(
+                    query="谁是从未提过的人物",
+                    expected=[GoldenResult(
+                        recall_type="crystallized",
+                        content_pattern="NEVER_STORED_TOKEN_777",
+                        must_hit=False,
+                    )],
+                    category="no_answer",
+                ),
+                GoldenQuery(
+                    query="an entity that was never captured",
+                    expected=[GoldenResult(
+                        recall_type="crystallized",
+                        content_pattern="ALSO_ABSENT_TOKEN_888",
+                    )],
+                    category="entity",
+                ),
+            ],
+        )
+        path = tmp_path / "metrics.golden.json"
+        save_golden_set(path, gs)
+
+        report = run_golden_set_report(store, path, profile="metrics")
+
+        assert report["metrics"]["negative_checks"] == 1
+        assert report["metrics"]["wrong_memory_injection_count"] == 0
+        assert report["metrics"]["wrong_memory_injection_rate"] == 0.0
+        assert report["by_category"]["no_answer"] == {"hit": 1}
+        assert report["by_category"]["entity"] == {"miss_missing": 1}
+        assert report["by_classification"]["miss_missing"] == 1
+
+    @pytest.mark.usefixtures("crystallized_test_write_authority")
+    def test_superseded_fact_matching_negative_check_counts_as_injection(self, tmp_path):
+        # Stale-injection semantics: the OLD (superseded) fact is written via
+        # the real production path and listed as must_hit=False; the pipeline
+        # surfacing it is a wrong-memory injection. Counterfactual: before
+        # the metrics rollup the report had no "metrics" key at all.
+        store = _init_store(tmp_path)
+        frontmatter = build_crystallized_frontmatter(seed=17, kind="moment")
+        store.append_crystallized_record(
+            "superseded.md",
+            frontmatter,
+            "Old address marker STALE_FACT_4242 was replaced last month.",
+        )
+        gs = GoldenSet(
+            profile="metrics2",
+            queries=[
+                GoldenQuery(
+                    query="old address marker",
+                    expected=[GoldenResult(
+                        recall_type="crystallized",
+                        content_pattern="STALE_FACT_4242",
+                        must_hit=False,
+                    )],
+                    category="superseded",
+                ),
+            ],
+        )
+        path = tmp_path / "metrics2.golden.json"
+        save_golden_set(path, gs)
+
+        report = run_golden_set_report(store, path, profile="metrics2")
+
+        assert report["metrics"]["negative_checks"] == 1
+        assert report["metrics"]["wrong_memory_injection_count"] == 1
+        assert report["metrics"]["wrong_memory_injection_rate"] == 1.0
+        assert report["by_category"]["superseded"] == {"false_positive": 1}
+
+
 def test_loader_ignores_min_score_and_unknown_keys(tmp_path: Path):
     """Backlog 10: min_score was removed as unimplementable dead schema (no
     per-section score exists at the disclosure surface). Golden files already

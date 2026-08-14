@@ -44,7 +44,8 @@ REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
 
@@ -55,10 +56,7 @@ def main() -> int:
         or os.environ.get("HERMES_HOME", "")
         or str(Path.home() / ".hermes")
     )
-    profile = (
-        _preparse_cli_arg(sys.argv, "--profile")
-        or os.environ.get("HERMES_PROFILE", "default")
-    )
+    profile = resolve_profile_name(hermes_home, _preparse_cli_arg(sys.argv, "--profile"))
     envelope_id = (
         _preparse_cli_arg(sys.argv, "--envelope-id")
         or os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")
@@ -121,6 +119,39 @@ def main() -> int:
         "actual_crystallized_approval": result["actual_crystallized_approval"],
         "status": "ok" if not result.get("error") else "error",
     }
+    # Both existing artifacts (status ledger + helper report) are counters
+    # only; persist a closed outcome code so "nothing pending" and "triage
+    # produced nothing" are distinguishable from a failed run.
+    triage_actions = sum(
+        int(result.get(key) or 0)
+        for key in ("promoted_count", "demoted_count", "fleeting_count", "compacted_count")
+    )
+    if result.get("error"):
+        run_status, reason = "error", "lane_failed"
+    elif int(result.get("candidates_read") or 0) == 0:
+        run_status, reason = "ok", "no_candidates"
+    elif int(result.get("pending") or 0) == 0:
+        run_status, reason = "ok", "nothing_pending"
+    elif triage_actions == 0:
+        run_status, reason = "ok", "no_triage_actions"
+    else:
+        run_status, reason = "ok", "triaged"
+    record_lane_last_run(
+        hermes_home,
+        "candidate_aggregation",
+        status=run_status,
+        reason=reason,
+        counters={
+            "candidates_read": int(result.get("candidates_read") or 0),
+            "pending": int(result.get("pending") or 0),
+            "already_triaged": int(result.get("already_triaged") or 0),
+            "promoted_count": int(result.get("promoted_count") or 0),
+            "demoted_count": int(result.get("demoted_count") or 0),
+            "fleeting_count": int(result.get("fleeting_count") or 0),
+            "compacted_count": int(result.get("compacted_count") or 0),
+        },
+        error=str(result.get("error") or ""),
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 

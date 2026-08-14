@@ -29,7 +29,7 @@ else:
         sys.path.insert(0, str(_RUNTIME_ROOT))
 
 from plugins.memory.memory_os.config import load_config
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.v3_ephemeral_adapter import HermesEphemeralAdapter, resolve_host_route_snapshot
 from plugins.memory.memory_os.v3_wandering import (
@@ -45,7 +45,7 @@ def main(argv=None) -> int:
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
     args = parser.parse_args(argv)
     home = Path(args.hermes_home).expanduser().resolve()
-    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(home, profile="default"))
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(home, profile=resolve_profile_name(home)))
     store.initialize()
     cfg = load_config(home).get("v3_inner_life", {})
     cfg = cfg if isinstance(cfg, dict) else {}

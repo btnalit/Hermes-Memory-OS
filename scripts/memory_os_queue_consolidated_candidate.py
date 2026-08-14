@@ -61,14 +61,14 @@ from plugins.memory.memory_os.crystallized import (  # noqa: E402
     append_candidate_queue,
     read_candidate_queue,
 )
-from plugins.memory.memory_os.roots import MemoryOSRoots  # noqa: E402
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name  # noqa: E402
 from plugins.memory.memory_os.store import MemoryOSStore  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes"))
-    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE") or "default")
+    parser.add_argument("--profile", default="")
     parser.add_argument("--source-event-id", required=True)
     parser.add_argument("--body", required=True)
     parser.add_argument("--kind", default="preference")
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
 
-    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+    roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=resolve_profile_name(args.hermes_home, args.profile))
     store = MemoryOSStore(roots)
     store.initialize()
 

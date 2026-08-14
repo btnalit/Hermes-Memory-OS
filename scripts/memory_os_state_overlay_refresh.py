@@ -50,7 +50,7 @@ else:
     if _runtime_root.exists() and str(_runtime_root) not in sys.path:
         sys.path.insert(0, str(_runtime_root))
 
-from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.roots import MemoryOSRoots, resolve_profile_name
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.state_overlay import (
     build_state_overlay,
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
-        default="default",
+        default="",
         help="Memory-OS profile name",
     )
     parser.add_argument(
@@ -82,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         default="json",
     )
     args = parser.parse_args(argv)
+    profile = resolve_profile_name(args.hermes_home, args.profile)
 
     t0 = time.monotonic()
     run_status = "ok"
@@ -89,11 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     section_count = 0
 
     try:
-        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=profile)
         store = MemoryOSStore(roots)
         store.initialize()
 
-        effective_task = read_effective_current_task(roots, profile=args.profile)
+        effective_task = read_effective_current_task(roots, profile=profile)
         current_task_anchor = str((effective_task or {}).get("anchor") or "")
 
         overlay = build_state_overlay(
@@ -161,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": error_msg,
             "sections": section_count,
             "duration_ms": duration_ms,
-            "profile": args.profile,
+            "profile": profile,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }))
 

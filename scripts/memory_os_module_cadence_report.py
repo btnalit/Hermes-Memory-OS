@@ -149,6 +149,10 @@ MODULE_TARGETS: tuple[dict[str, Any], ...] = (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    # Stdlib-only script: no access to roots.resolve_profile_name.  Under the
+    # ExecutionGate runner HERMES_PROFILE is injected with the resolved
+    # profile, so cron runs attribute correctly; manual runs keep the
+    # host-calibrated default.
     parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", DEFAULT_PROFILE))
     parser.add_argument("--apply", action="store_true", help="Append the report to system-modules/module_cadence/reports.jsonl.")
     parser.add_argument("--format", choices=["json", "summary"], default="json")
