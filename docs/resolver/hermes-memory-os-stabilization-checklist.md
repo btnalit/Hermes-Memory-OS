@@ -6112,3 +6112,95 @@ revert→3 FAIL（KeyError 证明旧代码无此通路）→restore→PASS。
   3 条 stale-demote triage 行与预测的 3 条驱逐残影一一对应。
 - 85 条八月 meta 候选按 14 天 stale TTL 自然到期清扫（排水期新镜像出的
   同理），无需 owner 手动批量拒绝——自动闭环按 owner 的可逆范式恢复运转。
+
+### CV — /code-review 对 PR #57 的 14 项发现：11 项修复 + 3 项定性（2026-08-14，`26f4a80..d4bc158`）
+
+深度评审（10 个视角 + gap sweep，全部经引用源码或实测复现核实）对 CP 批次
+（PR #57）产出 14 项发现。11 项修复、2 项按范围裁定不动、监控器 9 处只读
+残留记录不改。
+
+**① dashboard 安装器 `--profile` 默认值毁掉 PR 自己的主场景（CONFIRMED，
+评审复现两次）**。CP 只把单元**名**per-profile 化，`--profile` 默认仍是
+字面量 `"main"`——给 `profiles/sannai` home 装 dashboard 时 ExecStartPre
+渲染成 `--profile main`，snapshot 里 `roots.resolve_profile_name` 按矛盾
+检查 raise，单元在 `Restart=on-failure/5s` 下无限 crash-loop；CP 的新测试
+只断言 `service_name`，从没看过渲染出的 profile。修复：谓词收敛为文件内
+单份 `_derive_home_profile`（roots 同规则），`_default_profile` 按 home
+形状推导（root home 保 "main"；**有意不读 HERMES_PROFILE**——安装器是往
+单元里**写**这个 env 的，默认值不得依赖调用 shell 的环境）；空 profile 的
+归一化收在 `install_service` 单点（直接调用方与 CLI 同径）；显式矛盾
+`--profile` 在安装时就 SystemExit，而不是发货一个必然 crash-loop 的单元。
+顺带修掉同函数 docstring 的第二处谎言："fails loudly at bind time"——
+systemd 不等 `Type=simple` 子进程 bind，端口冲突实际是 enable/restart 全
+exit 0、报告 `enabled:true`、journal 里静默 crash-loop。edge 钉住：
+`profiles/main` 形 home 推导 profile "main" **且**单元名带 `-main` 后缀
+（后缀键在 home 形状上，不在"是否等于默认 profile"上）。
+
+**② CP 的证据保全承诺没兑现：两个 day-count 键零读者（CONFIRMED）**。
+`budget_pressure_day_count`/`rank_pressure_day_count` 是 owner 裁定"扩宽
+门但保留字节压力从未发生的证据"的载体，但全仓 grep 零读者，而键 census
+给它们标的 "info — v2_exposure_rollup_ledger_state" 条目里根本没有它们
+——census 只钉键**集合**，钉不住"info 标签背后真有读者"，这正是仓库文档
+写明要防的 orphan-key 类缺陷原样复发。修复：monitor 的 ledger-state INFO
+条目补上两键（透传链已核实：`v2_exposure_monitor` 本地与远端分支都是
+`exposure_monitor_stats()` 整字典透传，无枚举点，无第三接触点；dashboard
+无键白名单）；monitor 测试的严格相等断言即反事实。**语义选择（两读法都
+可辩护，选择必须可见）**：day counts 只计 `valid` 日——与
+`valid_natural_days`/streak 同一谓词，否则 rank_pressure_day_count=7 可以
+贴着 streak=0 摆在一起而无任何标记解释矛盾；生产者注释同步改写。附带修
+同段的负值直通：`or 0` 只替换 falsy，恶意/损坏行的负计数会流进日聚合抵消
+真实压力日（构造了守恒算式仍成立的 -1 行实测 streak 7→0）——日聚合处
+`max(0, ...)` 钳位；**cumulative_* 有意不钳**，钳了反而掩盖
+conservation_total_passes 要抓的守恒破坏。
+
+**③ census 宣称钉八处、实钉七处（CONFIRMED）**。`_observed()` 把 roots
+的两个入口（derive+resolve）数成两处凑足 8 键，monitor 内嵌探针那份
+（docstring 点名了的）从未检查——且它独缺 `expanduser()`。修复：monitor
+份按 bash 份先例用源码扫描钉住（string-embedded、不可 import；**不去给它
+加 expanduser**——推导只看路径结构，规范化超出本轮范围）；docstring 改为
+如实记账（含"第一版宣称 8 实钉 7"的差错本身）；`_default_profile` 作为
+新面加入 census（`dashboard_profile` 键）。
+
+**④ compat 探测三处（CONFIRMED×2 + 结构加固）**。(a)
+`_unit_suffix_for_home` 缺 `.resolve()`：cwd 在 profiles/ 下传相对
+home（实测演示）或 symlink home 时它推出 ''、装置侧推出 '-sannai'，探测
+打到 default profile 的 timer——而 timer 检查是**硬门**（见 c）。补
+`.resolve()` 与 `_runtime_unit_suffix` 逐字对齐；反事实用
+monkeypatch.chdir+相对路径（symlink 分支平台不可用时 skip）。(b)
+`_commands_for` 按硬编码 spec 名挑选并手抄四字段重建——泛化为"任何 argv
+token 匹配 `hermes-memory-os-*.timer/.service` 就替换后缀" +
+`dataclasses.replace`，下一个 unit-bearing spec（heartbeat timer、
+dashboard service 都已存在）不可能再静默复发定名探测，第五个字段也不会被
+静默重置为默认值。(c) 同函数 docstring 断言"misleading, though never
+gating (required=False)"是**假的**：`_require_cognitive_loop_timer_active`
+被 classify_report 无条件调用且进 FAIL 驱动 exit code——修前的错单元探测
+可以把健康 profile 宿主判 FAIL、也可以在目标 timer 死掉时判 PASS。注释改
+为如实陈述。另修 spec 双源：`run_upgrade_compat_check` 用 `_commands_for`
+跑、`_classify_command_exit` 却重读全局 `COMMANDS`——现在分类消费**同一个**
+调整后元组（反事实：monkeypatch 出带额外 required spec 的元组，命令跑了
+但旧分类器不判、无 fail code）。
+
+**⑤ l3 探针 run() 的 `profile="default"` 硬编码**（同 ①③ 的错归因类；
+`from_hermes_home` 显式值静默胜过 home 形状推导）→ 去掉显式参数，测试钉
+`run()` 源码不含 `profile=`。**⑥ CLAUDE.md 第 131 行**仍写已退休的
+`budget_pressure_streak_days` → 更新为现名并注明退休出处。
+
+**按范围裁定不修（2 项）+ 记录不改（1 项）**：谓词副本收敛重构（census
+已钉住漂移风险，独立立项）；census 测试加载卫生（重复 exec、env 时序——纯
+测试整洁，今天无害）。Rule 5 扫描：`profile="default"` 硬编码剩 9 处全在
+`memory_os_3_200_monitor.py` 只读探针路径（monitor 吃 `--hermes-home`，
+路径无 roots.profile 消费者；大文件最小改动原则，记录于此不改）；其余两处
+"fails loudly" 措辞（clearance rebuild、overlay renderer import-time）
+核实属实。
+
+**测试**：+10（dashboard 3、compat 3、exposure 2、probe 1、census 1），
+12 个反事实测试对 origin/main 预修复实现实测 revert→**12 FAIL**（每个都
+以预期原因失败）→restore→PASS。全量 **3408 passed / 13 skipped / 0
+failed**（11:46），四静态门 + `git diff --check` 全绿。
+
+- `26f4a80..d4bc158（CV，本节）`：PR #57 评审 14 项发现收口——dashboard
+  `--profile main` 默认值 crash-loop（主场景级）、孤儿 day-count 键接上
+  monitor 读者并统一 valid 口径 + 负值钳位、census 补钉 monitor 内嵌第八
+  份副本、compat 探测 resolve 对齐 + 泛化替换 + 单一 spec 源 + 两处虚假
+  注释改正、探针去 profile 硬编码、CLAUDE.md 退休键名更新；11 修 2 不动
+  1 记录，全量 3408/13。
