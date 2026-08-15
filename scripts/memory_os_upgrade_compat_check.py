@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 from pathlib import Path
 
@@ -72,39 +73,42 @@ RunCommand = Callable[[tuple[str, ...], str | None, str | None, int], dict[str, 
 def _unit_suffix_for_home(hermes_home: str | None) -> str:
     """Per-profile systemd unit suffix, mirroring
     install_memory_os_plugin.py::_runtime_unit_suffix ('' for a root home,
-    '-<name>' for a profiles/<name>-shaped home)."""
+    '-<name>' for a profiles/<name>-shaped home). expanduser().resolve()
+    matches that helper exactly: without resolve(), a relative or symlinked
+    --hermes-home derives '' here while the installer derives '-<name>',
+    and the probe targets the DEFAULT profile's unit."""
     if not hermes_home:
         return ""
-    home = Path(hermes_home).expanduser()
+    home = Path(hermes_home).expanduser().resolve()
     if home.name and home.parent.name == "profiles":
         return f"-{home.name}"
     return ""
 
 
+# A whole argv token naming a Memory-OS systemd unit (fixed legacy name).
+_UNIT_ARGV_TOKEN = re.compile(r"^(hermes-memory-os-[a-z0-9-]+)\.(timer|service)$")
+
+
 def _commands_for(hermes_home: str | None) -> tuple[CommandSpec, ...]:
-    """COMMANDS with the cognitive-loop timer probe pointed at the target
-    home's own unit. The static tuple used to probe the fixed legacy name,
-    so on a profile-shaped home the informational timer check reported the
-    DEFAULT profile's unit state — misleading, though never gating
-    (required=False)."""
+    """COMMANDS with every systemd-unit probe pointed at the target home's
+    own per-profile unit. The static tuple used to probe the fixed legacy
+    name, so on a profile-shaped home the timer check judged the DEFAULT
+    profile's unit state — and that check GATES: classify_report's
+    _require_cognitive_loop_timer_active hard-FAILs on an inactive unit
+    regardless of spec.required, so the wrong-unit probe could fail a
+    healthy profile host or pass a dead one. The substitution matches any
+    unit-name argv token rather than one hardcoded spec name, so the next
+    unit-bearing spec added to COMMANDS cannot silently reintroduce the
+    fixed-name probe."""
     suffix = _unit_suffix_for_home(hermes_home)
     if not suffix:
         return COMMANDS
     adjusted: list[CommandSpec] = []
     for spec in COMMANDS:
-        if spec.name == "cognitive_loop_timer":
-            argv = tuple(
-                part.replace(
-                    "hermes-memory-os-cognitive-loop.timer",
-                    f"hermes-memory-os-cognitive-loop{suffix}.timer",
-                )
-                for part in spec.argv
-            )
-            adjusted.append(
-                CommandSpec(spec.name, argv, json_output=spec.json_output, required=spec.required)
-            )
-        else:
-            adjusted.append(spec)
+        argv = tuple(
+            _UNIT_ARGV_TOKEN.sub(rf"\g<1>{suffix}.\g<2>", part) for part in spec.argv
+        )
+        adjusted.append(spec if argv == spec.argv else replace(spec, argv=argv))
     return tuple(adjusted)
 
 
@@ -136,11 +140,12 @@ def run_upgrade_compat_check(
     run_command: RunCommand | None = None,
 ) -> dict[str, Any]:
     runner = run_command or run_command_default
+    specs = _commands_for(hermes_home)
     command_results = {
         spec.name: _run_spec(spec, host=host, hermes_home=hermes_home, timeout=timeout, run_command=runner)
-        for spec in _commands_for(hermes_home)
+        for spec in specs
     }
-    classification = classify_report(command_results, hermes_home=hermes_home)
+    classification = classify_report(command_results, hermes_home=hermes_home, specs=specs)
     return {
         "schema_version": "memory-os.hermes_upgrade_compat.v0",
         "host": host or "local",
@@ -186,12 +191,22 @@ def run_command_default(
     }
 
 
-def classify_report(command_results: dict[str, dict[str, Any]], *, hermes_home: str | None = None) -> dict[str, list[dict[str, Any]]]:
+def classify_report(
+    command_results: dict[str, dict[str, Any]],
+    *,
+    hermes_home: str | None = None,
+    specs: tuple[CommandSpec, ...] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     fail: list[dict[str, Any]] = []
 
-    _classify_command_exit(command_results, passed, warn, fail)
+    # Classify against the SAME spec tuple that produced command_results.
+    # Re-reading the module-level COMMANDS here would silently diverge the
+    # moment _commands_for adds, drops, or re-flags a spec per-profile.
+    if specs is None:
+        specs = _commands_for(hermes_home)
+    _classify_command_exit(specs, command_results, passed, warn, fail)
     _require_memory_provider(command_results, passed, fail)
     _require_schema(command_results, "shell_status", "memory-os.status.v0", passed, fail)
     _require_doctor_ok(command_results, "shell_doctor", passed, fail)
@@ -286,12 +301,13 @@ def _parse_json(text: str) -> Any:
 
 
 def _classify_command_exit(
+    specs: tuple[CommandSpec, ...],
     results: dict[str, dict[str, Any]],
     passed: list[dict[str, Any]],
     warn: list[dict[str, Any]],
     fail: list[dict[str, Any]],
 ) -> None:
-    for spec in COMMANDS:
+    for spec in specs:
         result = results.get(spec.name, {})
         if int(result.get("exit_code", 1)) == 0:
             passed.append({"code": f"{spec.name}_command_ok"})

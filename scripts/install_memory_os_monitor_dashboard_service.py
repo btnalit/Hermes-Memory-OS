@@ -17,23 +17,51 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVICE_NAME = "hermes-memory-os-monitor-dashboard.service"
 
 
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 3693
+DEFAULT_PROFILE = "main"
+DEFAULT_ENVIRONMENT = "prod"
+
+
+def _derive_home_profile(hermes_home: Path) -> str:
+    """profiles/<name>-shaped home -> <name>, else ''. Same rule as
+    roots._derive_profile_from_home, pinned cross-surface by
+    tests/scripts/test_multiprofile_home_shape_census.py."""
+    home = Path(hermes_home).expanduser().resolve()
+    if home.name and home.parent.name == "profiles":
+        return home.name
+    return ""
+
+
 def _default_service_name(hermes_home: Path) -> str:
     """Per-profile default unit name: root homes keep the legacy fixed name;
     profiles/<name>-shaped homes get a suffixed default so installing a
     second profile's dashboard cannot silently overwrite the first (the
     last-deploy-wins class fixed for the heartbeat/cognitive-loop units in
     install_memory_os_plugin.py::_runtime_unit_suffix — same rule). An
-    explicit --service-name always wins; note a second dashboard also needs
-    its own --port, which fails loudly at bind time rather than silently.
+    explicit --service-name always wins. A second dashboard also needs its
+    own --port: systemd does not wait for a Type=simple child to bind, so a
+    port collision is NOT loud — enable/restart exit 0, the installer
+    reports enabled:true, and the unit crash-loops on "Address already in
+    use" visible only in the journal.
     """
-    home = Path(hermes_home).expanduser().resolve()
-    if home.name and home.parent.name == "profiles":
-        return f"hermes-memory-os-monitor-dashboard-{home.name}.service"
+    derived = _derive_home_profile(hermes_home)
+    if derived:
+        return f"hermes-memory-os-monitor-dashboard-{derived}.service"
     return DEFAULT_SERVICE_NAME
-DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 3693
-DEFAULT_PROFILE = "main"
-DEFAULT_ENVIRONMENT = "prod"
+
+
+def _default_profile(hermes_home: Path) -> str:
+    """Default --profile follows the home shape, like the unit name: a
+    profiles/<name>-shaped home implies profile <name>; the snapshot script's
+    roots.resolve_profile_name would reject anything else at ExecStartPre
+    time and crash-loop the unit. Deliberately ignores HERMES_PROFILE: the
+    installer WRITES that env into the unit rather than reading it, so its
+    defaults must not depend on the invoking shell's environment.
+    """
+    return _derive_home_profile(hermes_home) or DEFAULT_PROFILE
+
+
 DEFAULT_REFRESH_INTERVAL_SECONDS = 60
 
 Runner = Callable[..., Any]
@@ -43,7 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT, help="Hermes-Memory-OS checkout root.")
     parser.add_argument("--hermes-home", type=Path, default=Path.home() / ".hermes", help="Target HERMES_HOME.")
-    parser.add_argument("--profile", default=DEFAULT_PROFILE, help=f"Dashboard profile. Default: {DEFAULT_PROFILE}.")
+    parser.add_argument(
+        "--profile",
+        default="",
+        help=(
+            f"Dashboard profile. Default: {DEFAULT_PROFILE} for a root home, "
+            "<name> for a profiles/<name>-shaped --hermes-home."
+        ),
+    )
     parser.add_argument("--environment", default=DEFAULT_ENVIRONMENT, help=f"Dashboard environment label. Default: {DEFAULT_ENVIRONMENT}.")
     parser.add_argument(
         "--refresh-interval-seconds",
@@ -93,6 +128,20 @@ def install_service(
     repo_root = repo_root.expanduser().resolve()
     hermes_home = hermes_home.expanduser().resolve()
     systemd_dir = systemd_dir.expanduser().resolve()
+    # Empty means "derive": normalizing here (not only in main) keeps direct
+    # install_service callers on the same home-shape default as the CLI.
+    profile = profile or _default_profile(hermes_home)
+    derived_profile = _derive_home_profile(hermes_home)
+    if derived_profile and profile != derived_profile:
+        # Fail at install time instead of shipping a unit whose ExecStartPre
+        # (snapshot --profile) hits the same contradiction check in
+        # roots.resolve_profile_name and crash-loops under Restart=on-failure.
+        raise SystemExit(
+            f"--profile {profile!r} contradicts profiles/<name>-shaped "
+            f"--hermes-home {hermes_home} (implies {derived_profile!r}); "
+            "the snapshot ExecStartPre would fail the same check at runtime "
+            "and crash-loop the unit"
+        )
     _validate_dashboard_inputs(repo_root)
     _validate_service_options(
         service_name=service_name,

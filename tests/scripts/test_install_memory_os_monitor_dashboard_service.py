@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.install_memory_os_monitor_dashboard_service import install_service, render_service_unit
 
 
@@ -143,3 +145,79 @@ def test_main_resolves_suffixed_default_but_explicit_name_wins(tmp_path, capsys)
     ]) == 0
     report = _json.loads(capsys.readouterr().out)
     assert report["service_name"] == "custom.service"
+
+
+def test_main_derives_profile_default_from_home_shape(tmp_path, capsys):
+    """The unit-name fix alone did not make a profile home installable: with
+    --profile defaulting to the literal "main", the rendered ExecStartPre
+    called the snapshot with --profile main, roots.resolve_profile_name
+    raised on the contradiction with the profiles/<name> home shape, and the
+    unit crash-looped under Restart=on-failure/RestartSec=5s. The profile
+    default must follow the home shape exactly like the unit-name default.
+
+    Counterfactual: with the fixed "main" default the first block renders
+    profile main and the --profile flag in the unit text is wrong."""
+    import json as _json
+
+    from scripts.install_memory_os_monitor_dashboard_service import main
+
+    home = tmp_path / ".hermes" / "profiles" / "sannai"
+    assert main([
+        "--hermes-home", str(home),
+        "--systemd-dir", str(tmp_path / "systemd"),
+        "--dry-run",
+    ]) == 0
+    report = _json.loads(capsys.readouterr().out)
+    assert report["profile"] == "sannai"
+
+    # Root homes keep the legacy default.
+    assert main([
+        "--hermes-home", str(tmp_path / "home"),
+        "--systemd-dir", str(tmp_path / "systemd"),
+        "--dry-run",
+    ]) == 0
+    report = _json.loads(capsys.readouterr().out)
+    assert report["profile"] == "main"
+
+
+def test_contradicting_explicit_profile_fails_at_install_time(tmp_path):
+    """An explicit --profile that contradicts a profiles/<name>-shaped home
+    would pass install (systemd does not run ExecStartPre at enable time)
+    and then crash-loop on roots.resolve_profile_name's contradiction check.
+    Fail at install time instead.
+
+    Counterfactual: without the guard this install_service call returns a
+    report with enabled semantics intact and the broken unit ships."""
+    repo = tmp_path / "repo"
+    _write_dashboard_inputs(repo)
+
+    with pytest.raises(SystemExit, match="contradicts"):
+        install_service(
+            repo_root=repo,
+            hermes_home=tmp_path / ".hermes" / "profiles" / "sannai",
+            profile="main",
+            environment="prod",
+            refresh_interval_seconds=60,
+            host="0.0.0.0",
+            port=3693,
+            python_bin="/usr/bin/python3",
+            systemd_dir=tmp_path / "systemd",
+            service_name="hermes-memory-os-monitor-dashboard-sannai.service",
+            enable=False,
+            dry_run=True,
+        )
+
+
+def test_profiles_main_shaped_home_gets_suffixed_unit_and_profile_main(tmp_path):
+    """Edge the derivation must not collapse: a home literally at
+    profiles/main derives profile "main" AND a suffixed unit name — the
+    suffix keys on the home SHAPE, never on the profile differing from the
+    default profile name."""
+    from scripts.install_memory_os_monitor_dashboard_service import (
+        _default_profile,
+        _default_service_name,
+    )
+
+    home = tmp_path / ".hermes" / "profiles" / "main"
+    assert _default_profile(home) == "main"
+    assert _default_service_name(home) == "hermes-memory-os-monitor-dashboard-main.service"

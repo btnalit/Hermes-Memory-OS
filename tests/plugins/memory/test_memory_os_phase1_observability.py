@@ -307,6 +307,123 @@ def test_a_day_without_any_drop_still_breaks_the_streak(tmp_path):
     assert "selection_pressure_streak:0/7" in stats["freeze_reasons"]
 
 
+def test_pressure_day_counts_cover_valid_days_only(tmp_path):
+    """The day counts are the owner ruling's preserved evidence, so they use
+    the same validity predicate as valid_natural_days and the streak: a
+    conservation-failed day's accounting is known-broken and must not count
+    as pressure evidence — otherwise rank_pressure_day_count=8 can sit
+    beside a streak that same day can never join, with no marker explaining
+    the contradiction.
+
+    Counterfactual: without the valid filter the broken day is counted and
+    rank_pressure_day_count reads 8."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor",
+        "created_at": "2026-07-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    _write_rollups(store, [
+        {
+            # 08-07: rank pressure recorded, but the day's accounting is
+            # known-broken (conservation failed).
+            "window_start": "2026-08-07T00:00:00Z",
+            "window_end": "2026-08-07T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": 1,
+            "conservation_passes": False,
+        },
+    ] + [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": 1,
+            "conservation_passes": True,
+        }
+        for day in range(8, 15)
+    ])
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+
+    assert stats["rank_pressure_day_count"] == 7
+    assert stats["budget_pressure_day_count"] == 0
+    # The invalid day cannot join the streak either — one predicate, both
+    # readers.
+    assert stats["selection_pressure_streak_days"] == 7
+
+
+def test_negative_counters_cannot_cancel_a_real_pressure_day(tmp_path):
+    """`or 0` substitutes only FALSY values, so a malformed row's negative
+    counter flowed straight into the daily sums, where rank=-1 on a rank=1
+    day nets day_pressure=0 — silently breaking the streak (or, mirrored,
+    fabricating pressure). Clamp at accumulation; the cumulative_* totals
+    stay unclamped on purpose so conservation_total_passes can still catch
+    the break.
+
+    Counterfactual: without max(0, ...) the poisoned latest day nets zero
+    pressure — the streak collapses to 0 and the day leaves the rank
+    day count."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor",
+        "created_at": "2026-07-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "attribution_schema": ATTRIBUTION_SCHEMA_VERSION,
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    _write_rollups(store, [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": 1,
+            "conservation_passes": True,
+        }
+        for day in range(8, 15)
+    ] + [
+        {
+            # Second rollup row on the latest completed day with a NEGATIVE
+            # rank counter. Its arithmetic still satisfies
+            # eligible == selected + budget + rank (0 == 1 + 0 - 1), so
+            # per-row conservation cannot reject it.
+            "window_start": "2026-08-14T23:00:00Z",
+            "window_end": "2026-08-14T23:30:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 0,
+            "selected": 1,
+            "dropped_by_budget": 0,
+            "dropped_by_rank": -1,
+            "conservation_passes": True,
+        },
+    ])
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+
+    assert stats["selection_pressure_streak_days"] == 7
+    assert stats["rank_pressure_day_count"] == 7
+    assert stats["budget_pressure_day_count"] == 0
+
+
 def test_candidate_cluster_defer_is_a_cooldown_not_permanent_closure():
     from plugins.memory.memory_os.owner_actions import (
         _closed_targets,

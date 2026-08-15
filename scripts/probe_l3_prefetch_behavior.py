@@ -244,7 +244,11 @@ def run(cleanup: bool = True) -> dict[str, str]:
     log_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
 
     # ── init production store ───────────────────────────────────
-    roots = MemoryOSRoots.from_hermes_home(HERMES_HOME, profile="default")
+    # No explicit profile: an explicit value overrides the profiles/<name>
+    # home-shape derivation with no contradiction check, so a hardcoded
+    # "default" would mis-attribute a sannai-home probe run the moment
+    # anything on this path starts stamping roots.profile.
+    roots = MemoryOSRoots.from_hermes_home(HERMES_HOME)
     store = MemoryOSStore(roots)
     store.initialize()
     service = CrystallizedMemoryService(store)

@@ -7957,6 +7957,8 @@ def test_rollup_ledger_state_is_surfaced_as_info_and_never_graded():
             "last_run_outcome": "no_new_records",
             "last_run_at": "2026-08-03T00:05:00Z",
             "last_run_new_records": 0,
+            "budget_pressure_day_count": 0,
+            "rank_pressure_day_count": 41,
         },
     })
     entry = next(
@@ -7975,6 +7977,13 @@ def test_rollup_ledger_state_is_surfaced_as_info_and_never_graded():
         "last_run_outcome": "no_new_records",
         "last_run_at": "2026-08-03T00:05:00Z",
         "last_run_new_records": 0,
+        # CP owner ruling: the per-class pressure day counts are the widened
+        # gate's preserved evidence (budget=0 here IS the "byte pressure
+        # never occurred" record) and this entry is their only reader --
+        # without these two keys they are computed-and-ignored, the orphan
+        # class the exposure_monitor_stats key census exists to prevent.
+        "budget_pressure_day_count": 0,
+        "rank_pressure_day_count": 41,
     }
     for bucket in ("warn", "fail"):
         assert not any(
