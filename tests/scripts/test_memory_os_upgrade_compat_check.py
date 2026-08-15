@@ -382,3 +382,86 @@ def test_cognitive_loop_timer_probe_follows_profile_shaped_home(tmp_path):
     for spec in profile_specs:
         if spec.name != "cognitive_loop_timer":
             assert spec in COMMANDS
+
+
+def test_unit_suffix_resolves_relative_and_symlinked_homes(tmp_path, monkeypatch):
+    """_unit_suffix_for_home mirrors install_memory_os_plugin.py::
+    _runtime_unit_suffix INCLUDING its .resolve(): without it, a relative
+    --hermes-home passed from inside .../profiles derives '' here while the
+    installer derives '-sannai', so the (gating) timer check probes the
+    DEFAULT profile's unit and can fail a healthy profile host or pass a
+    dead one.
+
+    Counterfactual: with expanduser() alone the relative-path assertion
+    returns '' instead of '-sannai'."""
+    import pytest as _pytest
+
+    from scripts.memory_os_upgrade_compat_check import _unit_suffix_for_home
+
+    profiles = tmp_path / ".hermes" / "profiles"
+    (profiles / "sannai").mkdir(parents=True)
+    monkeypatch.chdir(profiles)
+    assert _unit_suffix_for_home("sannai") == "-sannai"
+
+    link = tmp_path / "home-link"
+    try:
+        link.symlink_to(profiles / "sannai", target_is_directory=True)
+    except OSError:
+        _pytest.skip("symlinks unavailable on this platform")
+    assert _unit_suffix_for_home(str(link)) == "-sannai"
+
+
+def test_profile_shaped_home_runs_and_classifies_its_own_timer_unit(tmp_path):
+    """End-to-end over run_upgrade_compat_check: a profiles/<name>-shaped
+    hermes_home must both RUN the suffixed timer probe and CLASSIFY its
+    result through the same adjusted spec tuple."""
+    home = tmp_path / ".hermes" / "profiles" / "sannai"
+    outputs = _healthy_outputs()
+    seen_units: list[str] = []
+
+    def run_command(argv, host, hermes_home, timeout):
+        argv = tuple(argv)
+        if argv[:3] == ("systemctl", "--user", "show"):
+            seen_units.append(argv[3])
+            return dict(outputs["cognitive_loop_timer"])
+        return dict(outputs[_name_for_argv(argv)])
+
+    report = run_upgrade_compat_check(hermes_home=str(home), run_command=run_command)
+
+    assert seen_units == ["hermes-memory-os-cognitive-loop-sannai.timer"]
+    assert report["classification"]["fail"] == []
+    assert any(
+        item["code"] == "cognitive_loop_timer_active"
+        for item in report["classification"]["pass"]
+    )
+    assert (
+        "hermes-memory-os-cognitive-loop-sannai.timer"
+        in report["commands"]["cognitive_loop_timer"]["command"]
+    )
+
+
+def test_classification_judges_the_adjusted_spec_tuple_not_the_global(monkeypatch):
+    """classify_report must consume the SAME spec tuple that produced the
+    results; re-reading the module-level COMMANDS silently diverges the
+    moment _commands_for adds, drops, or re-flags a spec per-profile.
+
+    Counterfactual: with a classifier iterating the global COMMANDS, the
+    extra required spec's failing command RUNS but is never judged — no
+    fail code appears and the report lies green."""
+    import scripts.memory_os_upgrade_compat_check as compat
+
+    extra = compat.CommandSpec("extra_probe", ("hermes", "extra-probe"), json_output=False)
+    monkeypatch.setattr(compat, "_commands_for", lambda hermes_home: compat.COMMANDS + (extra,))
+    outputs = _healthy_outputs()
+
+    def run_command(argv, host, hermes_home, timeout):
+        if tuple(argv) == ("hermes", "extra-probe"):
+            return {"exit_code": 1, "stdout": "", "stderr": "boom"}
+        return dict(outputs[_name_for_argv(tuple(argv))])
+
+    report = compat.run_upgrade_compat_check(run_command=run_command)
+
+    assert any(
+        item["code"] == "extra_probe_command_failed"
+        for item in report["classification"]["fail"]
+    )

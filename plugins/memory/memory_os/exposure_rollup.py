@@ -633,8 +633,13 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
             continue
         date_key = timestamp.date().isoformat()
         bucket = daily.setdefault(date_key, {"budget": 0, "rank": 0, "valid": True})
-        bucket["budget"] = int(bucket["budget"]) + int(record.get("dropped_by_budget") or 0)
-        bucket["rank"] = int(bucket["rank"]) + int(record.get("dropped_by_rank") or 0)
+        # max(0, ...): `or 0` only substitutes falsy values, so a malformed
+        # row's NEGATIVE counter would flow through and could cancel a real
+        # pressure day (or fabricate one) in the streak/day-count sums. The
+        # cumulative_* totals above stay unclamped on purpose — clamping them
+        # would hide the very break conservation_total_passes exists to catch.
+        bucket["budget"] = int(bucket["budget"]) + max(0, int(record.get("dropped_by_budget") or 0))
+        bucket["rank"] = int(bucket["rank"]) + max(0, int(record.get("dropped_by_rank") or 0))
         bucket["valid"] = bool(bucket["valid"]) and record.get("conservation_passes") is True
     valid_natural_days = sum(1 for bucket in daily.values() if bucket["valid"] is True)
     # Owner ruling 2026-08-14 — "selection pressure", not "budget pressure".
@@ -657,7 +662,11 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     # discarding candidates under scarcity" instead of the narrower "…under
     # BYTE scarcity". The budget-only evidence is not erased — the
     # per-class day counts below keep it visible, so a later reader can
-    # still see that byte pressure never occurred.
+    # still see that byte pressure never occurred. Like valid_natural_days
+    # and the streak, those day counts cover VALID days only: a
+    # conservation-failed day's accounting is known-broken, so counting it
+    # as pressure evidence would let rank_pressure_day_count=7 sit beside
+    # streak=0 with no marker explaining the contradiction.
     pressure_streak = 0
     latest_completed_date = current.date() - timedelta(days=1)
     ordered_dates = sorted(
@@ -757,8 +766,14 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         # than redefined. The two day-counts below preserve the pre-ruling
         # evidence (byte pressure has never occurred on this deployment).
         "selection_pressure_streak_days": pressure_streak,
-        "budget_pressure_day_count": sum(1 for bucket in daily.values() if int(bucket["budget"]) > 0),
-        "rank_pressure_day_count": sum(1 for bucket in daily.values() if int(bucket["rank"]) > 0),
+        # Valid days only, same predicate as valid_natural_days / the streak
+        # (see the owner-ruling comment above the streak loop).
+        "budget_pressure_day_count": sum(
+            1 for bucket in daily.values() if bucket["valid"] is True and int(bucket["budget"]) > 0
+        ),
+        "rank_pressure_day_count": sum(
+            1 for bucket in daily.values() if bucket["valid"] is True and int(bucket["rank"]) > 0
+        ),
         "v2c_unfreeze_ready": not freeze_reasons,
         "downstream_clearance_closure_frozen": bool(freeze_reasons),
         "freeze_reasons": freeze_reasons,

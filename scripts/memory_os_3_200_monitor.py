@@ -1596,6 +1596,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "last_run_outcome": str(v2_exposure.get("last_run_outcome") or "unrecorded"),
                 "last_run_at": str(v2_exposure.get("last_run_at") or ""),
                 "last_run_new_records": int(v2_exposure.get("last_run_new_records") or 0),
+                # CP owner ruling (2026-08-14): the per-class pressure day
+                # counts preserve the evidence the widened selection-pressure
+                # gate no longer distinguishes — budget_pressure_day_count=0
+                # is the durable record that byte pressure never occurred on
+                # this deployment. This entry is their reader; without it they
+                # are computed-and-ignored, the exact orphan-key class the
+                # exposure_monitor_stats key census exists to prevent.
+                "budget_pressure_day_count": int(
+                    v2_exposure.get("budget_pressure_day_count") or 0
+                ),
+                "rank_pressure_day_count": int(
+                    v2_exposure.get("rank_pressure_day_count") or 0
+                ),
             },
         })
         # Backlog 18 (priority entry): schema_era_classified_ratio is the

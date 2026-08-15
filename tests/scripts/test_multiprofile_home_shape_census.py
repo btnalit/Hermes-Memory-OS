@@ -14,8 +14,13 @@ of them to a single behavior table, so a future edit to any one copy fails
 here instead of silently splitting behavior across surfaces (e.g. units
 suffixed but attribution not, or vice versa).
 
-The bash copy in install_memory_os.sh cannot be imported, so it is checked
-by source scan for the same parent=="profiles" rule.
+Two copies cannot be imported and are pinned by source scan instead: the
+bash copy in install_memory_os.sh, and the monitor's embedded remote-probe
+copy in memory_os_3_200_monitor.py (string-embedded python, shipped over
+SSH). The first version of this census claimed eight copies while pinning
+seven — roots contributes two entry points (derive + resolve), which
+double-counted, and the monitor copy was named in this docstring yet never
+checked.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ def _expected(shaped: bool) -> dict[str, object]:
             "unit_suffix": "-sannai",
             "compat_suffix": "-sannai",
             "dashboard_unit": "hermes-memory-os-monitor-dashboard-sannai.service",
+            "dashboard_profile": "sannai",
             "probe_slug": "_sannai",
             "agent_os": "sannai",
         }
@@ -65,6 +71,9 @@ def _expected(shaped: bool) -> dict[str, object]:
         "unit_suffix": "",
         "compat_suffix": "",
         "dashboard_unit": DEFAULT_SERVICE_NAME,
+        # The dashboard's legacy default profile is "main", not "default" --
+        # a root-home production deployment predating profiles kept it.
+        "dashboard_profile": "main",
         "probe_slug": "",
         "agent_os": "default",
     }
@@ -72,7 +81,10 @@ def _expected(shaped: bool) -> dict[str, object]:
 
 def _observed(home: Path, monkeypatch) -> dict[str, object]:
     from plugins.memory.memory_os.roots import _derive_profile_from_home, resolve_profile_name
-    from scripts.install_memory_os_monitor_dashboard_service import _default_service_name
+    from scripts.install_memory_os_monitor_dashboard_service import (
+        _default_profile,
+        _default_service_name,
+    )
     from scripts.install_memory_os_plugin import _runtime_unit_suffix
     from scripts.memory_os_upgrade_compat_check import _unit_suffix_for_home
 
@@ -96,6 +108,7 @@ def _observed(home: Path, monkeypatch) -> dict[str, object]:
         "unit_suffix": _runtime_unit_suffix(home),
         "compat_suffix": _unit_suffix_for_home(str(home)),
         "dashboard_unit": _default_service_name(home),
+        "dashboard_profile": _default_profile(home),
         "probe_slug": probe._probe_log_slug(home),
         "agent_os": agent_os._resolve_profile(),
     }
@@ -124,4 +137,24 @@ def test_bash_installer_carries_the_same_rule(tmp_path):
     assert 'home_parent}" == "profiles"' in source, (
         "bash unit_suffix no longer keys on the parent directory being 'profiles' — "
         "it has drifted from the Python copies pinned above"
+    )
+
+
+def test_monitor_embedded_probe_carries_the_same_rule():
+    """The monitor's remote-probe script is string-embedded python (shipped
+    over SSH), so its copy of the predicate cannot be imported either; pin it
+    by source scan like the bash copy. This was the eighth copy the census
+    docstring claimed and the first version never checked — an edit to the
+    shared rule that misses it splits monitor evidence from every other
+    surface while the importable-copy tests above stay green."""
+    source = (_SCRIPTS / "memory_os_3_200_monitor.py").read_text(encoding="utf-8")
+    assert '_home_path.parent.name == "profiles"' in source, (
+        "the monitor's embedded per-profile unit suffix no longer keys on the "
+        "parent directory being 'profiles' — it has drifted from the copies "
+        "pinned above"
+    )
+    assert '_unit_suffix = f"-{_home_path.name}" if _home_path.name and _home_path.parent.name == "profiles" else ""' in source, (
+        "the monitor's embedded _unit_suffix derivation changed shape; "
+        "re-verify it still matches install_memory_os_plugin.py::"
+        "_runtime_unit_suffix and update this pin"
     )
