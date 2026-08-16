@@ -3930,7 +3930,149 @@ owner 若日后决定静音：把 "Memory State Overlay" 加进
 `SAFE_CASUAL_HEADINGS` 即可。其余 5 WARN 与 CH 部署时相同
 （knob 过期预期告警 + 4 既有家族）。全量 3234 passed / 13 skipped。
 
+## CW — 全项目代码评审 20 项发现的并行修复 + 两轮 Rule-5 扫描（2026-08-15，提交 `85fa2e4`）
+
+`/code-review 整个项目` 产出 20 条发现（15 主 + 5 截断项）。**先逐条对源码复核**，
+再分 15 个文件所有权互不重叠的包并行修复（全部 Sonnet）。复核阶段推翻了子代理
+的 5 处判断，这部分比修复本身更重要——照着错误的触发路径去修会修错东西。
+
+### CW.0 复核阶段的 5 处更正（3 机制 + 2 严重性）
+
+- **router.py:87 的触发路径不成立**：生产传 `live_guard=self._config`（dict，
+  `__init__.py:496`），`_kill_switch_enabled` 走 dict 分支直接返回 bool，checker
+  循环与其 `except` 根本不执行；`config.snapshot_id` 是纯字符串构造。生产接线下
+  `health()` **没有可实现的抛出路径**。降级为"结构不对称值得加固"，仍修。
+- **edge_weight_feedback 游标风险是潜在的**：`metadata_retention.py:145-152` 明写
+  `dry_run: True, executor_wired: False`——"no executor exists anywhere"。今天没有
+  任何东西裁剪那个账本。
+- **candidate_aggregation 的"任何错误→跳过压缩"是既有策略**，不是本次引入：同一个
+  `candidate_error_records` 在 401、454 行已有两个投喂者。真正的新回归窄得多。
+- **#9/#10 entity_index 两条都是潜在缺陷**：`INDEXABLE_ENTITY_CLASSES` 只含
+  `proper_noun`，两个索引写入点都不传 `classes=`，所以现存 entity_index 每行的
+  class/weight 都相同，错源无法显形。（初版报告把 #9 列为"生产上就会咬人"，错。）
+- **cron_group_runner 时区混用是条件性的**：`now` 默认 `datetime.now(timezone.utc)`，
+  只有 `--now`（标注 testing only）传带偏移量的串才成立。
+
+### CW.1 静默失败改为可观测
+
+- **`index._copy_embeddings_from_live` 裸 `pass` 吞掉所有 `sqlite3.Error`**（根因：
+  防止静默清空 embedding 的守卫，自己失败时静默）。无 embedder 重建 + live 库被
+  并发读者短暂锁住 → staging 里 0 行 → 原子替换上线 → 唯一证据是 `status="ok"`、
+  `details={}` 的审计行。现返回封闭 outcome 集（`copied`/`no_live_index`/
+  `live_table_missing`/`copy_failed`）+ live/copied 双向行数，`copy_failed` 另发
+  `component="sqlite"` 的 error_record；`ATTACH DATABASE` 改参数绑定（原来路径含
+  单引号即永久失败），`DETACH` 移入 `finally`（原异常路径泄漏）。
+- **`llm_edge_proposer`**：`float(parsed.get("confidence"))` 无守卫，模型回 `"high"`
+  即抛出 `_call_llm` 并中断整个 pair 循环（部分边已写入、无 summary 无审计）；
+  `batch` 是死旋钮而 docstring 承诺"合并成一次调用（更便宜）"，实际每轮最多 100 次
+  串行 15s 调用；summary 无任何失败计数，"没关系可提"与"连错 100 次"字节相同。
+  现按 `fact_judge` 范式给出 typed failure、删除死旋钮、补齐四类失败计数与
+  `outcome`/`degraded` 状态。
+- **`edge_weight_feedback` 行号游标**：改为"行数 + 旧游标位内容指纹"双判据检测错位；
+  错位时**不重放**（强化 `w += 0.12(1-w)` 非幂等）而是前移并记 `cursor_misaligned`
+  与跳过行数。实测确认修复前纯截断**不会**重复强化，缺陷性质是"静默漏强化"。
+- **解析器契约收敛**：`clearance_cycle` 与 `llm_contradiction_lane` 两处手搓花括号
+  计数器改用 `low_clue_recall._extract_json_object`（CLAUDE.md 指定的解析器）。
+  注意二者**失败模式不同**（计数器怕字符串内未配对花括号，`_extract_json_object`
+  怕结尾散文含 `}`），是交换不是严格更优；同时补 `llm_parse_failed` typed 记录，
+  并加 `isinstance(parsed, dict)` 守卫——`json.loads` 成功但返回列表时
+  `parsed.get()` 会抛 `AttributeError` 杀掉整个 lane。
+
+### CW.2 数据丢失路径
+
+- **provisional-backed 候选被归档后无回流路径**（根因：`read_effective_candidates`
+  把"存在 active 结晶记录"判为 terminal，而 provisional 记录同样带 `candidate_id`
+  且 sweep 前一直是 active）。归档 → provisional TTL 到期失活 → 候选既不在活队列
+  也不在活结晶里；`candidates.archive.jsonl` **全项目无生产读者**。
+  修复：`EffectiveCandidate.provisional_backed` + 归档集与召回排除集**分离**
+  （内容已结晶，仍应排除召回；但不可归档）。**两条通道都堵**：终态分支与按年龄
+  归档的 `elif/else`（后者更易触发，provisional TTL 常长于 7 天保留期）。
+  参数 `provisional_backed_candidate_ids` **必填、无默认值**（规则 4：`None` 会导致
+  数据丢失就不是可选参数）。
+- **压缩跳过语义反转**：初判要求"视图失败仍降级压缩"，缺陷 C 发现后**推翻**——视图
+  不可用时根本不知道谁是 provisional-backed，归档不可逆而队列变长可恢复。三个失败
+  来源（队列解析、聚类阶段、有效视图）现行为一致并记 `compaction_skip_reason`
+  封闭集，接通脚本摘要 → 状态账本 → owner digest 三层读者。
+
+### CW.3 归属覆盖（故意扩大口径）
+
+`"Recent Cross-Session"` 与 `"Recall Facade (unified)"` 都是真实注入 section，却同时
+缺席 `SECTION_SOURCE_CLASS_BY_TITLE` 与 `_budget_keep_priority`，落到 `other` →
+`NON_ATTRIBUTABLE` → 被归属缺口门**永久跳过**。根因是守卫测试的方向：
+`_producer_vocabulary()` 把 map 的 **values** 定义为生产者词汇表，"发射的标题 ⊆ map
+的键"这个方向结构上不可能被测到。现两者都已分类、接 source_ids、给显式预算优先级
+（55 / 58），新增 `recall_facade` 类并同步 `exposure_rollup`，守卫测试改为**用真实
+`build_prefetch` 断言发射标题全部有映射**。facade 侧另发现：原样透传
+`RecallObject.source_ref` 能过宽松检查却挂在 `test_every_attributable_class_has_a_
+recognised_id_prefix`（"填了 ID 但读者认不出"），故做前缀翻译。
+**这会让归属缺口计数上升——是覆盖变对，不是质量变差。**
+
+### CW.4 新增信号接读者（本批出现 4 次的同一形状）
+
+`llm_call_*`、`cursor_*`/`tracked_edge_count`、`edge_provenance.write_failed_count`、
+`compaction_skip_reason` 都被逐键白名单挡在读者之外。全部接通两层并**逐层单独回退**
+证明各自承重；一律 INFO，不新增分级（错位游标不是事故，加 WARN 只会造出没人能处理
+的告警）。审计另发现 `vector_edge_proposer` 压根不产出 `outcome` 与写失败计数——
+生产者缺口，见待办。
+
+### CW.5 execution_gate：保留不变量、只削成本
+
+调查确认 sidecar 的 `completion_count` **不权威**：`complete_execution_gate_envelope`
+先追加日志再单独更新 sidecar，两步非原子，中间被杀会留下"存在但陈旧"的条目（不同于
+缺失条目，不会经 index-miss 自愈）；且 `scripts/memory_os_execution_gate_runner.py::
+_update_sidecar_index` 是**第二个互不协调的写入方**。故 `and not require_unused`
+**保留**并补 30 行"为什么不能删"的注释（点名第二写入方与钉住该不变量的既有测试）。
+只删成功路径上的无条件全量索引重建（改为仅在索引真缺失时重建，保留自愈），
+反测：50 次 resolve 的重建次数 50 → 0。
+
+### CW.6 两轮 Rule-5 时间戳扫描（23 处）
+
+`datetime.fromisoformat("2026-12-31")` 返回 naive，与 aware `now` 比较抛 `TypeError`，
+而 `except ValueError` 接不住。三种破形：只捕 ValueError、try 只包解析而比较在外、
+完全无保护。修 23 处，含**两处每轮 prefetch 热路径**（`_last_session_lines`、
+`_recent_cross_session_lines`）、`audit.py` 完全无保护且喂 CLI 状态、以及
+`scripts/cleanup_expired_working.py`——**它才是真正每日运行的 `working_cleanup`
+cron lane，完全绕开 `WorkingMemoryService`**，不修它则 `working.py` 的修复对生产
+无效。失败方向逐点判定而非统一套用：删除类路径保留条目、decay 类自愈重刷时间戳、
+CLI 参数直接报错。全仓库 **94 个 `fromisoformat` 调用点 / 53 个文件**已全部分类
+（fixed / clean-because-X / 语义警示），无未分类项。
+
+### CW.7 其余
+
+`entity_index.query_related_records` 的 `min(entity_text)` 与 `max(weight)` 是两个
+独立聚合，会把 A 实体的名字配上 B 实体的 class/weight 交给 agent（CTE + `row_number()`
+取唯一获胜行，class 改读权威列，删除浮点带段推导）；`min_weight` 由 HAVING 过滤组
+改为 join 层过滤实体（与 docstring 一致）。`event_stats._build_continuity_selector`
+自称"精确镜像"却漏了 bookkeeping 排除，且三处常量是硬拷贝——改为从 `prefetch` 单源
+导入。`runtime.processed_event_ids_compacted` 被两处硬编码 `False` 致永不可能为真。
+`substrates/router.recall` 的 `health()` 移入 try。脚本侧：`deploy_l3_probe`/
+`l3_probe_helper` 补 `encoding="utf-8"`、`cron_group_runner` 时区归一。
+
+### 反事实覆盖与测试数
+
+每个修复都配 revert→FAIL→restore→PASS **实测**（用 `cp` 备份，禁用
+`git checkout --`/`git stash`——共享工作区有 15 个代理的未提交改动）。两处方法学
+收获：①`event_stats` 的排序修复经 20000 次差分模糊测试证明**当前不可观测**，代理
+拒绝伪造假失败并如实报告；②一次测试追加的 `old_string` 匹配到倒数第二行，把上一个
+测试的末条断言静默并入新测试——**语法合法、测试全绿、全量套件永远抓不到**，只有
+`git diff` 尾部看得见。故整合期增设"测试文件有删除行即人工核对"检查。
+
+**测试数：3408 → 3521 passed（+113），13 skipped，0 failed。** 四道门全绿，
+`git diff --check` 干净，34 源文件 + 24 测试文件，15 个包零越界。
+
 ## 待办
+
+**`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
+兄弟五个 edge 步骤都产出封闭 `outcome`，只有它没有；写失败也无计数（是生产者缺口，
+不是白名单丢弃，故 CW.4 的接线修不到它）。后果：该 lane 写失败与"没边可提"在任何
+读者处都同貌。需独立立项——加计数要连带决定 `status` 降级语义。
+
+**`timeutil.py` 已存在却几乎无人用（CW 登记，2026-08-15）。**
+仓库里早有 `parse_utc`/`safe_compare`/`age_seconds` 三个正确实现，但仅 3 个文件采用；
+约 25 处（含 CW 本轮新修的若干）各自内联重复同一套归一逻辑。当前状态**正确**，但这
+正是本项目反复付出代价的"同一词汇多份拷贝"漂移形状。收敛需独立评估：批量替换的回归
+面不小，且各点的失败方向**不统一**（删除类保留、decay 类自愈、CLI 报错），不能无脑
+套同一个 helper。
 
 **图谱遗忘潮预期落点：2026-10-06 前后（CJ 登记,2026-08-07）。**
 first_injection_at=2026-08-07 起算 60 天,过密图谱（refines 为主,重归一后
@@ -6204,3 +6346,13 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   份副本、compat 探测 resolve 对齐 + 泛化替换 + 单一 spec 源 + 两处虚假
   注释改正、探针去 profile 硬编码、CLAUDE.md 退休键名更新；11 修 2 不动
   1 记录，全量 3408/13。
+
+- `d4bc158..85fa2e4（CW，本节）`：`/code-review 整个项目` 20 项发现逐条复核后
+  15 包并行修复——复核先推翻 5 处判断（router 生产不可复现、retention 无执行器、
+  压缩跳过策略系既有、entity_index 两条皆潜在、cron 时区条件性）；修 embedding
+  静默清空与 ATTACH 注入、llm 判据崩溃与死旋钮、provisional-backed 候选两条归档
+  通道（参数改必填）、压缩跳过语义反转并接三层读者、两个注入 section 的归属黑洞
+  （守卫测试补上"发射标题 ⊆ 映射键"方向）、四类新增信号接读者、execution_gate
+  保留不变量只削成本（50→0 次索引重写）、两轮 Rule-5 时间戳扫描 23 处（含两处
+  prefetch 热路径与真正的 working_cleanup cron lane），94 个 fromisoformat 调用点
+  全部分类；全量 3408→3521 passed（+113）/13 skipped，四门全绿。
