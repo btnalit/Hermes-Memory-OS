@@ -81,8 +81,13 @@ If "none", still respond with valid JSON showing relation_type "none"."""
 def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, Any]:
     """Call the configured Hermes LLM to determine relationship between two records.
 
-    Returns a dict with keys: relation_type, confidence, reasoning.
-    Returns {"relation_type": "none", "confidence": 0.0, "reasoning": "llm_unavailable"} on failure.
+    Returns a dict with keys: relation_type, confidence, reasoning, outcome.
+    ``outcome`` is a closed-set typed failure value ("ok" on success) mirroring
+    fact_judge.py's failure_reason typing — llm_call_exception / empty_llm_response
+    / parse_failed / not_a_dict / invalid_confidence. Never raises: every failure
+    path (including a non-numeric or null "confidence" field, which previously
+    propagated a bare ValueError/TypeError out of this function) returns a typed
+    failure dict with relation_type "none" and confidence 0.0 instead.
     """
     kind_a = str(record_a.get("kind", ""))
     kind_b = str(record_b.get("kind", ""))
@@ -103,10 +108,16 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
     try:
         response = _call_hermes_runtime_model(prompt, _DEFAULT_LLM_CONFIG)
     except Exception:
-        return {"relation_type": "none", "confidence": 0.0, "reasoning": "llm_call_exception"}
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "llm_call_exception", "outcome": "llm_call_exception",
+        }
 
     if not response or not response.strip():
-        return {"relation_type": "none", "confidence": 0.0, "reasoning": "empty_llm_response"}
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "empty_llm_response", "outcome": "empty_llm_response",
+        }
 
     # Parse JSON from response (handle wrapping markdown code fences)
     json_str = response.strip()
@@ -118,22 +129,41 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
     try:
         parsed = json.loads(json_str)
     except (json.JSONDecodeError, TypeError):
-        return {"relation_type": "none", "confidence": 0.0, "reasoning": "parse_failed"}
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "parse_failed", "outcome": "parse_failed",
+        }
 
     if not isinstance(parsed, dict):
-        return {"relation_type": "none", "confidence": 0.0, "reasoning": "not_a_dict"}
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "not_a_dict", "outcome": "not_a_dict",
+        }
 
     rtype = str(parsed.get("relation_type", "none")).strip().lower()
     if rtype not in ("refines", "contradicts", "depends_on", "co_occurs", "none"):
         rtype = "none"
 
-    confidence = float(parsed.get("confidence", 0.0))
+    # D1 fix: the model reply's "confidence" field is untrusted input — a
+    # non-numeric string (e.g. "high") raises ValueError, null raises
+    # TypeError. Both used to propagate out of this function (and out of
+    # run_llm_proposer's pair loop) with no failure typing, ending the run
+    # after partial writes. Type it the way fact_judge.py types LLM-reply
+    # failures: a typed failure dict, never a raised exception.
+    try:
+        confidence = float(parsed.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "invalid_confidence", "outcome": "invalid_confidence",
+        }
     reasoning = str(parsed.get("reasoning", ""))
 
     return {
         "relation_type": rtype,
         "confidence": min(max(confidence, 0.0), 1.0),
         "reasoning": reasoning,
+        "outcome": "ok",
     }
 
 
@@ -172,7 +202,6 @@ def run_llm_proposer(
     *,
     index: object | None = None,
     audit_path: str | None = None,
-    batch: bool = True,
 ) -> dict[str, Any]:
     """Run the LLM-class edge proposer across all crystallized record pairs.
 
@@ -183,10 +212,22 @@ def run_llm_proposer(
         index_path: Path to the index DB.
         index: MemoryOSIndex instance (needed for edge writing).
         audit_path: Optional audit path.
-        batch: If True, batches all pairs into a single LLM call (cheaper).
-               If False, calls LLM per pair (more accurate).
 
-    Returns a summary dict.
+    Every eligible pair makes its own sequential LLM round-trip (up to
+    _MAX_PAIRS=100, each bounded by _DEFAULT_LLM_CONFIG["timeout_ms"]).
+    D2: this function used to accept a dead ``batch`` parameter, documented
+    as "batches all pairs into a single LLM call (cheaper)" but never read
+    anywhere in the body — no caller ever passed it (grepped repo-wide), so
+    it was removed rather than wired up. There is no batched call path;
+    real batching would be a behavior change beyond this fix.
+
+    Returns a summary dict. ``status`` is "ok" unless at least one pair's
+    LLM call failed this run, in which case it is "degraded" — see
+    ``llm_call_failure_count`` / ``llm_call_failure_reasons`` for the typed
+    breakdown and ``outcome`` for a closed-set characterization of what the
+    run produced (no_eligible_pairs / llm_degraded / no_relationships_found
+    / produced), so "the judge found nothing" is distinguishable from "the
+    judge could not be reached" without re-running or reading source.
     """
     start_time = datetime.now(timezone.utc)
 
@@ -272,6 +313,14 @@ def run_llm_proposer(
     proposed = 0
     auto_active = 0
     dedup_skipped = 0
+    # D2b: per-run _call_llm outcome tally. "Completion Is Not Output" —
+    # pair_count=100/proposed_count=0 was byte-identical whether the judge
+    # legitimately found no relationships or every call failed; these
+    # counters (surfaced in the summary below) make that distinguishable
+    # from the summary alone, without re-running or reading source.
+    llm_call_count = 0
+    llm_ok_count = 0
+    llm_failure_reasons: dict[str, int] = {}
 
     for i in range(len(records)):
         if pairs >= _MAX_PAIRS:
@@ -293,6 +342,12 @@ def run_llm_proposer(
 
             # Call LLM for this pair
             llm_result = _call_llm(records[i], records[j])
+            llm_call_count += 1
+            call_outcome = str(llm_result.get("outcome", "ok"))
+            if call_outcome == "ok":
+                llm_ok_count += 1
+            else:
+                llm_failure_reasons[call_outcome] = llm_failure_reasons.get(call_outcome, 0) + 1
             rtype = llm_result.get("relation_type", "none")
             confidence = llm_result.get("confidence", 0.0)
 
@@ -334,13 +389,36 @@ def run_llm_proposer(
                         auto_active += 1
 
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+    llm_failure_count = sum(llm_failure_reasons.values())
+
+    # D2b closed outcome set — what this run actually produced, distinct
+    # from "status" (whether calls degraded). See docstring above.
+    if llm_call_count == 0:
+        run_outcome = "no_eligible_pairs"
+    elif llm_ok_count == 0:
+        run_outcome = "llm_degraded"
+    elif proposed:
+        run_outcome = "produced"
+    else:
+        run_outcome = "no_relationships_found"
+
+    # D2b: status must not lie "ok" through call failures — any typed
+    # _call_llm failure this run marks the lane degraded, even if other
+    # pairs succeeded and produced edges.
+    run_status = "degraded" if llm_failure_count > 0 else "ok"
+
     summary = {
-        "status": "ok",
+        "status": run_status,
+        "outcome": run_outcome,
         "record_count": len(records),
         "pair_count": pairs,
         "proposed_count": proposed,
         "auto_active_count": auto_active,
         "dedup_skipped": dedup_skipped,
+        "llm_call_count": llm_call_count,
+        "llm_call_ok_count": llm_ok_count,
+        "llm_call_failure_count": llm_failure_count,
+        "llm_call_failure_reasons": llm_failure_reasons,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
         "llm_model": _resolve_runtime().get("model", "unknown"),
@@ -351,7 +429,7 @@ def run_llm_proposer(
         append_audit(
             Path(audit_path),
             action="llm_edge_proposer_run",
-            status="ok",
+            status=run_status,
             target=str(index_path),
             details=summary,
         )

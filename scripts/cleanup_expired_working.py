@@ -28,10 +28,14 @@ else:
 
 try:
     from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+    from plugins.memory.memory_os.timeutil import ensure_utc_aware
 except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
     def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
         sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
         return False
+
+    def ensure_utc_aware(dt: datetime) -> datetime:  # type: ignore[misc]
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 RETENTION_DAYS = 7
 _LANE_ID = "working_cleanup"
@@ -61,6 +65,7 @@ def main(hermes_home: str | None = None) -> int:
     surviving = []
     removed_count = 0
     removed_chars = 0
+    malformed_ts_count = 0
 
     for item in items:
         if not isinstance(item, dict) or item.get("status") != "expired":
@@ -72,10 +77,18 @@ def main(hermes_home: str | None = None) -> int:
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
+            ts = ensure_utc_aware(ts)
+            age_days = (now - ts).total_seconds() / 86400
         except (ValueError, TypeError):
+            # Malformed/unparseable stored timestamp -- this lane DELETES
+            # expired items, so a wrong answer here is data loss. Keep the
+            # item rather than risk deleting something that was not
+            # actually expired (matches working.py::prune_expired_items'
+            # conservative direction), and record the bad input so it is
+            # diagnosable rather than silently swallowed.
             surviving.append(item)
+            malformed_ts_count += 1
             continue
-        age_days = (now - ts).total_seconds() / 86400
         if age_days > RETENTION_DAYS:
             removed_count += 1
             removed_chars += len(str(item.get("text", "")))
@@ -83,12 +96,15 @@ def main(hermes_home: str | None = None) -> int:
         surviving.append(item)
 
     if removed_count == 0:
+        counters = {"items_scanned": before, "items_removed": 0}
+        if malformed_ts_count:
+            counters["items_malformed_timestamp"] = malformed_ts_count
         record_lane_last_run(
             home,
             _LANE_ID,
             status="ok",
             reason="no_expired_items",
-            counters={"items_scanned": before, "items_removed": 0},
+            counters=counters,
         )
         return 0
 
@@ -102,16 +118,19 @@ def main(hermes_home: str | None = None) -> int:
         sys.stderr.write(f"working_cleanup: cannot write {working_path}: {exc}\n")
         return 1
 
+    counters = {
+        "items_scanned": before,
+        "items_removed": removed_count,
+        "chars_freed": removed_chars,
+    }
+    if malformed_ts_count:
+        counters["items_malformed_timestamp"] = malformed_ts_count
     record_lane_last_run(
         home,
         _LANE_ID,
         status="ok",
         reason="removed_expired_items",
-        counters={
-            "items_scanned": before,
-            "items_removed": removed_count,
-            "chars_freed": removed_chars,
-        },
+        counters=counters,
     )
     print(
         f"🧹 Working Memory Cleanup: removed {removed_count} expired items "

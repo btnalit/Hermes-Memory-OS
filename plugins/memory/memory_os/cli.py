@@ -683,6 +683,8 @@ def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:
         **projection_fields,
         "local_first_authority_preserved": shadow.get("local_first_authority_preserved") if shadow else None,
         "external_authoritative_count": int(shadow.get("external_authoritative_count") or 0) if shadow else 0,
+        "provider_error_count": int(shadow.get("provider_error_count") or 0) if shadow else 0,
+        "provider_errors": shadow.get("provider_errors") if shadow and isinstance(shadow.get("provider_errors"), list) else [],
     }
 
 
@@ -950,17 +952,53 @@ def trace_record(store: MemoryOSStore, record_id: str, *, include_private: bool 
     return trace
 
 
+def _diff_report_parse_record_ts(value: str) -> datetime | None:
+    """Parse a stored event/audit timestamp for the diff report.
+
+    Naive (no-offset) values are treated as UTC. Returns None on
+    genuinely unparseable input so the caller skips the record instead of
+    crashing the report -- ``diff`` is a best-effort diagnostic surface,
+    not a gating or data-deleting path.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def diff_report(store: MemoryOSStore, *, since: str, until: str) -> dict[str, Any]:
-    since_dt = datetime.fromisoformat(since)
-    until_dt = datetime.fromisoformat(until)
-    events = [
-        event for event in store.read_events()
-        if since_dt <= datetime.fromisoformat(event.ts) <= until_dt
-    ]
-    audit_entries = [
-        entry for entry in read_audit_entries(store.roots.audit_path)
-        if entry.get("ts") and since_dt <= datetime.fromisoformat(str(entry["ts"])) <= until_dt
-    ]
+    # since/until are raw --since/--until CLI arguments. A parse failure or
+    # a bare (offset-less) date/time is ambiguous user input, not a stored
+    # record we can safely normalize -- fail with a clear CLI message
+    # rather than silently guessing the caller meant UTC.
+    try:
+        since_dt = datetime.fromisoformat(since)
+        until_dt = datetime.fromisoformat(until)
+    except (ValueError, TypeError) as exc:
+        raise SystemExit(
+            f"diff: invalid --since/--until timestamp ({exc}); expected an "
+            f"ISO-8601 timestamp, e.g. 2026-08-01T00:00:00+00:00"
+        ) from exc
+    if since_dt.tzinfo is None or until_dt.tzinfo is None:
+        raise SystemExit(
+            "diff: --since and --until must include a UTC offset "
+            "(e.g. 2026-08-01T00:00:00+00:00) -- a bare date/time is ambiguous"
+        )
+    events = []
+    for event in store.read_events():
+        event_ts = _diff_report_parse_record_ts(event.ts)
+        if event_ts is not None and since_dt <= event_ts <= until_dt:
+            events.append(event)
+    audit_entries = []
+    for entry in read_audit_entries(store.roots.audit_path):
+        if not entry.get("ts"):
+            continue
+        entry_ts = _diff_report_parse_record_ts(str(entry["ts"]))
+        if entry_ts is not None and since_dt <= entry_ts <= until_dt:
+            audit_entries.append(entry)
     return {
         "schema_version": "memory-os.diff.v0",
         "since": since,

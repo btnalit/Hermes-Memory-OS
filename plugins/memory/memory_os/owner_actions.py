@@ -53,6 +53,7 @@ from .jsonl_io import (
     locked_jsonl_file,
 )
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 from .review_content_safety import (
     contains_transcript_marker as _shared_contains_transcript_marker,
     looks_like_raw_review_content as _shared_looks_like_raw_review_content,
@@ -450,6 +451,7 @@ def _candidate_aggregation_status_block(store: MemoryOSStore) -> dict[str, Any]:
             "demoted_count": 0,
             "fleeting_count": 0,
             "compacted_count": 0,
+            "compaction_skip_reason": "",
         }
     return {
         "available": True,
@@ -462,6 +464,7 @@ def _candidate_aggregation_status_block(store: MemoryOSStore) -> dict[str, Any]:
         "demoted_count": int(latest.get("demoted_count", 0)),
         "fleeting_count": int(latest.get("fleeting_count", 0)),
         "compacted_count": int(latest.get("compacted_count", 0)),
+        "compaction_skip_reason": str(latest.get("compaction_skip_reason") or ""),
     }
 
 
@@ -5300,6 +5303,16 @@ def _provisional_crystallized_review_items(store: MemoryOSStore, closed: set[str
         if expires_str:
             try:
                 expires_at = datetime.fromisoformat(expires_str)
+                # Naive (no-offset) expires_str parses without error but
+                # raises TypeError on the aware subtraction below -- not a
+                # ValueError, so the bare `except ValueError` would not
+                # catch it, and previously the naive-input path fell through
+                # to the remaining_days=999 default, silently mis-priming
+                # this item to "fyi" instead of its real urgency in the
+                # owner digest. Normalize before subtracting, same as
+                # knob_overrides._is_expired. Genuinely unparseable input
+                # keeps the existing fail-open default (999 / "fyi").
+                expires_at = ensure_utc_aware(expires_at)
                 remaining_seconds = (expires_at - now).total_seconds()
                 remaining_days = max(0, int(remaining_seconds / 86400))
             except (ValueError, TypeError):
@@ -5383,9 +5396,10 @@ def _provisional_knob_override_review_items(store: MemoryOSStore, closed: set[st
         if expires_str:
             try:
                 expires_dt = datetime.fromisoformat(expires_str)
+                expires_dt = ensure_utc_aware(expires_dt)
                 remaining = expires_dt - datetime.now(timezone.utc)
                 days_left = f"{max(0, remaining.days)}d"
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
         summary = (
@@ -5810,6 +5824,19 @@ def _fyi_items(status: dict[str, Any], *, limit: int, start: int = 1) -> list[di
     raw_aggr = status.get("candidate_aggregation")
     aggr: dict[str, Any] = raw_aggr if isinstance(raw_aggr, dict) else {}
     if aggr.get("available"):
+        aggr_summary = (
+            f"聚合上次运行: promoted={aggr.get('promoted_count')}; "
+            f"rejected_demoted={aggr.get('rejected_demoted_count')}; "
+            f"demoted={aggr.get('demoted_count')}; "
+            f"fleeting={aggr.get('fleeting_count')}; "
+            f"compacted={aggr.get('compacted_count')}"
+        )
+        # Only appended when set, so a healthy tick's digest line is
+        # byte-identical to before this field existed -- compacted_count
+        # alone cannot tell "0, nothing to archive" from "0, not attempted".
+        skip_reason = aggr.get("compaction_skip_reason")
+        if skip_reason:
+            aggr_summary += f"; compaction_skipped={skip_reason}"
         fyi.append(
             {
                 "anchor": f"F{start + 2}",
@@ -5817,13 +5844,7 @@ def _fyi_items(status: dict[str, Any], *, limit: int, start: int = 1) -> list[di
                 "target_type": "digest_status",
                 "target_id": "candidate_aggregation",
                 "source_module": "candidate_aggregation",
-                "summary": (
-                    f"聚合上次运行: promoted={aggr.get('promoted_count')}; "
-                    f"rejected_demoted={aggr.get('rejected_demoted_count')}; "
-                    f"demoted={aggr.get('demoted_count')}; "
-                    f"fleeting={aggr.get('fleeting_count')}; "
-                    f"compacted={aggr.get('compacted_count')}"
-                ),
+                "summary": aggr_summary,
                 "raw_body_included": False,
             }
         )

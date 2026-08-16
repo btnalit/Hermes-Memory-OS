@@ -128,6 +128,16 @@ class EffectiveCandidate:
     owner_review_eligible: bool
     terminal: bool
     exclusion_reason: str
+    # True when this candidate's terminality (state == "crystallized") comes
+    # ONLY from active provisional crystallized record(s) -- no active
+    # PERMANENT record backs it. Provisional is reversible by design
+    # (resolver TTL/cap eviction, owner reject via invalidate_provisional_
+    # record); a candidate whose only anchor is provisional must stay
+    # reachable in the live queue so it can resurface once that anchor is
+    # invalidated. Always False for non-"crystallized" states and for a
+    # candidate that also has an active permanent record (permanent wins:
+    # archival is correct there, same as before this field existed).
+    provisional_backed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1448,6 +1458,12 @@ def write_candidate_aggregation_status(
         "demoted_count": int(summary.get("demoted_count", 0)),
         "fleeting_count": int(summary.get("fleeting_count", 0)),
         "compacted_count": int(summary.get("compacted_count", 0)),
+        # Closed set: "" (compaction ran), "effective_view_unavailable", or
+        # "upstream_error" -- see run_candidate_aggregation_lane. Lets a
+        # reader tell "compacted_count is 0 because there was nothing to
+        # archive" from "compaction did not run", which the counter alone
+        # cannot distinguish.
+        "compaction_skip_reason": str(summary.get("compaction_skip_reason") or ""),
         "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
         "created_at": _timestamp(now),
     }
@@ -1661,6 +1677,12 @@ def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:
             latest_triage[candidate_id] = dict(record)
 
     canonical_candidate_ids: set[str] = set()
+    # Tracks candidate_ids backed by at least one active PERMANENT (non-
+    # provisional) crystallized record -- separate from canonical_candidate_
+    # ids (any active record, provisional or not) so provisional_backed
+    # below can tell "only provisional anchors this" from "a permanent
+    # record already anchors this too" (permanent always wins).
+    permanent_active_candidate_ids: set[str] = set()
     service = CrystallizedMemoryService(store)
     if store.roots.crystallized_root.exists():
         for path in sorted(store.roots.crystallized_root.glob("*.md")):
@@ -1668,6 +1690,8 @@ def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:
                 candidate_id = str(record.frontmatter.get("candidate_id") or "")
                 if candidate_id and is_active_crystallized_frontmatter(record.frontmatter):
                     canonical_candidate_ids.add(candidate_id)
+                    if record.frontmatter.get("provisional") is not True:
+                        permanent_active_candidate_ids.add(candidate_id)
 
     owner_closed_ids: set[str] = set()
     owner_actions_path = store.roots.memory_os_root / "system" / "owner_actions.jsonl"
@@ -1733,6 +1757,10 @@ def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:
                 owner_review_eligible=owner_review_eligible,
                 terminal=terminal,
                 exclusion_reason=exclusion_reason,
+                provisional_backed=(
+                    candidate.candidate_id in canonical_candidate_ids
+                    and candidate.candidate_id not in permanent_active_candidate_ids
+                ),
             )
         )
     return projected
@@ -1744,13 +1772,20 @@ def compact_candidate_queue(
     archive_path: Path | None = None,
     retention_days: int = 7,
     terminal_candidate_ids: set[str] | None = None,
+    provisional_backed_candidate_ids: set[str],
 ) -> int:
     """Archive-and-compact: move stale candidates to archive file.
 
-    ``terminal_candidate_ids`` (optional) lets the caller pass the FULL
-    terminal view from ``read_effective_candidates`` — which also sees the
+    ``terminal_candidate_ids`` (optional) lets the caller pass a terminal-id
+    set derived from ``read_effective_candidates`` — which also sees the
     crystallized-record and owner-action overlays this function's own
-    triage-only resolution cannot. Measured hole (2026-08-14, production):
+    triage-only resolution cannot. The caller (candidate_aggregation) passes
+    only the ARCHIVABLE subset of the full terminal view: it excludes
+    candidates whose only active crystallized record is provisional
+    (``EffectiveCandidate.provisional_backed``), because archival here is
+    one-way while a provisional anchor is reversible by design. This
+    function has no opinion on that distinction — it archives exactly the
+    ids it is given. Measured hole (2026-08-14, production):
     five queue rows whose candidates had been crystallized long ago resolved
     ``crystallized``/terminal in the full view (and were recall-excluded),
     but their latest *triage* row still said owner_eligible, so this
@@ -1759,14 +1794,71 @@ def compact_candidate_queue(
     projection — one semantics, one source. ``None`` keeps the historical
     triage-only behavior.
 
+    ``provisional_backed_candidate_ids`` is a REQUIRED keyword argument (no
+    default) — it is the enforcement half of the same reversibility
+    guarantee, for the branches below that ``terminal_candidate_ids`` alone
+    does not reach. Excluding a provisional-backed id from
+    ``terminal_candidate_ids`` (as the aggregation lane already does) only
+    protects it from the FIRST branch; the retention-window ``elif``/``else``
+    below resolves state from triage rows alone
+    (``resolve_candidate_effective_state``), which has no idea a candidate
+    is provisional-backed. A resolver-approved provisional candidate whose
+    triage state is ``resolver_approved`` (not ``owner_eligible``) — once
+    its row passes ``retention_days`` and its provisional anchor is later
+    invalidated (TTL/cap eviction, owner reject) — is no longer in
+    ``provisional_backed_candidate_ids`` (the record is inactive) and has
+    the same loss shape as the 2026-08-14 hole: ``invalidate_provisional_
+    record`` mutates only the crystallized record's frontmatter and appends
+    no triage row, so ``resolve_candidate_effective_state`` still returns
+    the frozen ``resolver_approved`` written at promotion time, and without
+    a further exemption the candidate would be in neither the live queue
+    nor active crystallized memory (``candidates.archive.jsonl`` has no
+    production reader). Pre-merge fix (2026-08-15): the retention-window
+    ``elif`` below now treats ``resolver_approved`` as sticky, exactly like
+    ``owner_eligible`` — a resolver-approved row is never archived by the
+    AGE branch regardless of how long ago its anchor was evicted. This does
+    NOT make the row immortal: once the general aged-demote sweep
+    (``candidate_aggregation._demote_aged``, unaffected by this parameter)
+    eventually writes a ``demoted`` triage row for it, ``resolve_candidate_
+    effective_state`` returns ``demoted`` and the row archives normally on
+    the next tick — either through ``terminal_candidate_ids`` (when the
+    caller supplies the full effective view) or through the ``else`` branch
+    here. Any id in ``provisional_backed_candidate_ids`` is kept active
+    UNCONDITIONALLY — checked first, ahead of every other branch including
+    ``terminal_candidate_ids`` itself, so that guarantee does not depend on
+    every caller constructing ``terminal_candidate_ids`` correctly; the
+    ``resolver_approved`` stickiness below is the narrower, second guarantee
+    that covers the gap between eviction and the next demote sweep.
+
+    Invariant enforced by requiring this argument: a candidate can be
+    archived ONLY if the caller has affirmatively said it is not
+    provisional-backed. There is no ``None``/omitted spelling of "I don't
+    know" — unlike ``terminal_candidate_ids``, where ``None`` is a safe,
+    documented, strictly-more-conservative fallback (archives less, never
+    more), a ``None`` here would have to mean either "archive
+    provisional-backed rows anyway" (the exact data loss this parameter
+    exists to prevent) or "abort compaction" decided from inside a function
+    that has no visibility into why the caller doesn't have the set. Both
+    are worse than making the caller compute it. Pass ``set()`` only when
+    you have genuinely confirmed (e.g. via ``read_effective_candidates``)
+    that no candidate in this run is provisional-backed — never as a
+    reflexive default to satisfy the signature.
+
     A candidate is 'active' (stays in main file) if:
+      - it is provisional-backed (see above) -- unconditionally, regardless
+        of triage state or age
       - effective state resolves to owner_eligible (owner needs to see it)
+      - effective state resolves to resolver_approved (sticky, same as
+        owner_eligible -- see above; survives an evicted provisional anchor
+        until the general aged-demote sweep writes a demoted/absorbed/
+        fleeting triage row for it)
       - effective state is NOT demoted/absorbed AND created_age < retention_days
 
     Demoted/absorbed candidates are resolved outcomes and are ALWAYS archived
     (even when newer than retention_days) so they stop cluttering the live
-    candidate queue. Other non-owner-eligible, non-terminal candidates within
-    the retention window stay active for observation.
+    candidate queue -- UNLESS provisional-backed, per above. Other
+    non-owner-eligible, non-terminal candidates within the retention window
+    stay active for observation.
 
     Others are appended to archive and excluded from the main file.
     Returns count of archived candidates.
@@ -1778,7 +1870,9 @@ def compact_candidate_queue(
 
     Holds a shared sidecar lock with append_candidate_queue so concurrent
     appends cannot be lost during the read→replace window (§3.3).
-    A conservation assertion catches silent write-loss (§3.4A fail-closed).
+    A conservation assertion catches silent write-loss (§3.4A fail-closed):
+    unaffected by this parameter, since every row still lands in exactly
+    one of ``active``/``archived``.
     """
     if archive_path is None:
         archive_path = store.roots.crystallized_root / "candidates.archive.jsonl"
@@ -1816,18 +1910,34 @@ def compact_candidate_queue(
             age = _candidate_age_seconds(cand.created_at, now)
 
             # Active (stays in main file) if the owner still needs to see it,
-            # OR it is within the retention window AND not a resolved outcome.
-            # Demoted/fleeting/absorbed are resolved — always archive them so
-            # they stop cluttering the live queue (previously only archived
-            # once aged past retention_days, leaving young demoted/fleeting/
-            # absorbed in active).
-            if terminal_candidate_ids is not None and cand.candidate_id in terminal_candidate_ids:
+            # OR the row's latest triage is a resolver-approve that has not
+            # been overwritten by a newer triage action (sticky like
+            # owner_eligible — see the docstring's "resolver_approved is
+            # sticky" note: this is the retention-branch half of the
+            # provisional_backed_candidate_ids reversibility guarantee, for
+            # the window between provisional eviction and the general
+            # aged-demote sweep actually writing a demoted/absorbed/fleeting
+            # triage row), OR it is within the retention window AND not a
+            # resolved outcome. Demoted/fleeting/absorbed are resolved —
+            # always archive them so they stop cluttering the live queue
+            # (previously only archived once aged past retention_days,
+            # leaving young demoted/fleeting/absorbed in active).
+            if cand.candidate_id in provisional_backed_candidate_ids:
+                # Reversibility guarantee, checked first and unconditionally:
+                # a provisional-backed candidate's only crystallized anchor
+                # can be invalidated later (TTL/cap eviction, owner reject),
+                # and archival here has no way back. Never let triage state
+                # (resolver_approved, demoted, ...) or age override this —
+                # see the docstring for the retention-window hole this
+                # closes.
+                active.append(line_stripped)
+            elif terminal_candidate_ids is not None and cand.candidate_id in terminal_candidate_ids:
                 # The full effective view says this candidate is closed
                 # (crystallized / owner_closed / demoted / ...) even if its
                 # latest triage row does not — archive it now.
                 archived.append(line_stripped)
                 archived_count += 1
-            elif effective == "owner_eligible" or (
+            elif effective in ("owner_eligible", "resolver_approved") or (
                 effective not in ("demoted", "fleeting", "absorbed") and age < retention_days * 86400
             ):
                 active.append(line_stripped)

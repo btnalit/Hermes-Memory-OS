@@ -982,3 +982,136 @@ def test_dead_judge_returning_empty_for_every_pair_fails_closed(tmp_path: Path) 
         )
     assert verdict == "clear"
     assert unknown_reason == ""
+
+
+def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(
+    tmp_path: Path,
+) -> None:
+    """Defect 1 counterfactual (clearance_cycle).
+
+    The old hand-rolled brace-depth counter treated every "{" character as
+    a structural token, including one that appears inside a JSON string
+    value. When a claim's "object" field itself contained an unescaped
+    "{", the counter's depth never returned to 0, `end` stayed -1, and the
+    pair was skipped with no signal -- even though the reply was otherwise
+    perfectly valid JSON. _extract_json_object instead takes the outermost
+    find("{")..rfind("}") span and does not share that failure mode.
+
+    Counterfactual: without the fix, the reply below (prefixed with prose
+    so the first json.loads() attempt fails, forcing the extraction path)
+    is dropped -> pairs_evaluated stays 0 -> verdict "unknown" /
+    "judge_unavailable" (the same fail-closed guard as the dead-judge test
+    above). With the fix, the reply parses and the two differing objects
+    are a real contradiction -> verdict "conflict".
+    """
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _judge_against_permanents
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+
+    perm_records_list = [
+        {"id": "perm_brace", "body": "The config sets a clean value.",
+         "frontmatter": {"id": "perm_brace", "provisional": False}},
+    ]
+    mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+    malformed_reply = (
+        "Here is the result: "
+        '{"claim_a": {"subject": "config", "predicate": "sets", '
+        '"object": "path with { unmatched brace", "confidence": 0.9}, '
+        '"claim_b": {"subject": "config", "predicate": "sets", '
+        '"object": "a different value", "confidence": 0.9}}'
+    )
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value=malformed_reply,
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        verdict, conflict_refs, _entities, _mode, unknown_reason = (
+            _judge_against_permanents(
+                store, "cand_brace", "The config sets a different value.", {},
+                perm_records_list, max_pairs=5,
+            )
+        )
+
+    assert verdict == "conflict", (
+        f"unbalanced-brace claim value must still be parsed and judged, "
+        f"got verdict={verdict!r} unknown_reason={unknown_reason!r}"
+    )
+    assert conflict_refs == ["perm_brace"]
+
+
+def test_non_dict_json_reply_does_not_crash_and_is_not_counted_as_evaluated(
+    tmp_path: Path,
+) -> None:
+    """Follow-up 1 counterfactual (clearance_cycle).
+
+    A first-attempt json.loads() success does not guarantee a dict result:
+    a bare JSON array/string/number is valid JSON. Before this fix, the
+    very next line (parsed.get("claim_a")) had no dict guard, so a
+    non-dict reply raised AttributeError uncaught inside this function's
+    pair loop -- the same defect class fixed elsewhere in this batch in
+    llm_edge_proposer._call_llm (its `if not isinstance(parsed, dict)`
+    guard, added there for exactly this reply shape, is the reference for
+    this fix).
+
+    Counterfactual: without the fix, _judge_against_permanents raises
+    AttributeError. With the fix, the pair is skipped without incrementing
+    pairs_evaluated -- and, being the only pair, the existing fail-closed
+    guard at the bottom of the function (already covered by the dead-judge
+    test above) returns "unknown"/"judge_unavailable".
+    """
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _judge_against_permanents
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+
+    perm_records_list = [
+        {"id": "perm_nondict", "body": "The sky is blue.",
+         "frontmatter": {"id": "perm_nondict", "provisional": False}},
+    ]
+    mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value="[1, 2, 3]",
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        verdict, conflict_refs, _entities, _mode, unknown_reason = (
+            _judge_against_permanents(
+                store, "cand_nondict", "The sky is green.", {},
+                perm_records_list, max_pairs=5,
+            )
+        )
+
+    assert verdict == "unknown", (
+        f"a non-dict-but-valid-JSON reply must not crash and must fail "
+        f"closed, got verdict={verdict!r}"
+    )
+    assert unknown_reason == "judge_unavailable"
+    assert conflict_refs == []

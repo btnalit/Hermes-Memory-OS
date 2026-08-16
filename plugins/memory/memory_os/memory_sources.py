@@ -14,6 +14,7 @@ from .audit import append_audit
 from .context_router import ContextSection
 from .roots import MemoryOSRoots
 from .source_ids import filter_safe_source_id_values
+from .timeutil import ensure_utc_aware
 
 
 SCHEMA_VERSION = "memory-os.memory_sources.v0"
@@ -596,10 +597,11 @@ def _records_since(records: list[dict[str, Any]], *, hours: int) -> list[dict[st
     for record in records:
         try:
             created_at = datetime.fromisoformat(str(record.get("created_at", "")).replace("Z", "+00:00"))
-        except ValueError:
+            created_at = ensure_utc_aware(created_at)
+            if created_at >= cutoff:
+                result.append(record)
+        except (ValueError, TypeError):
             continue
-        if created_at >= cutoff:
-            result.append(record)
     return result
 
 

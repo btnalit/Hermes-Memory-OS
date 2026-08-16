@@ -51,6 +51,7 @@ from .store import MemoryOSStore
 from .substrates.hindsight import GovernedHindsightConfig, GovernedHindsightSubstrate
 from .substrates.local_artifact import LocalArtifactProvider
 from .substrates.router import SubstrateRouter
+from .timeutil import ensure_utc_aware
 
 
 # ── C2: maximum age (hours) for recovering a cross-session active anchor.
@@ -1560,8 +1561,9 @@ class MemoryOSProvider(MemoryProvider):
             created_at = datetime.fromisoformat(
                 str(record.get("source_at") or "").replace("Z", "+00:00")
             )
+            created_at = ensure_utc_aware(created_at)
         except (ValueError, TypeError):
-            pass
+            created_at = None
         anchor_session_id = str(record.get("session_id") or "")
         if anchor_session_id and anchor_session_id != self.session_id:
             if created_at is not None:

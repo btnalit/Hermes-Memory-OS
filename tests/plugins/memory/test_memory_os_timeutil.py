@@ -13,6 +13,7 @@ from plugins.memory.memory_os.timeutil import (
     age_seconds,
     parse_timestamp,
     parse_dt,
+    ensure_utc_aware,
 )
 
 
@@ -150,6 +151,26 @@ class TestAgeSeconds:
 
     def test_age_seconds_none(self):
         assert age_seconds(None) is None
+
+
+class TestEnsureUtcAware:
+    def test_naive_becomes_utc(self):
+        dt = datetime(2026, 7, 22, 12, 0, 0)
+        result = ensure_utc_aware(dt)
+        assert result.tzinfo == timezone.utc
+        assert result.year == 2026 and result.month == 7 and result.day == 22
+        assert result.hour == 12
+
+    def test_aware_returned_unchanged(self):
+        dt = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+        result = ensure_utc_aware(dt)
+        assert result is dt
+        assert result.tzinfo == timezone(timedelta(hours=8))
+
+    def test_utc_aware_returned_unchanged(self):
+        dt = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+        result = ensure_utc_aware(dt)
+        assert result is dt
 
 
 class TestAliases:

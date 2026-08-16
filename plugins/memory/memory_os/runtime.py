@@ -213,7 +213,13 @@ class MemoryOSRuntime:
                     "processed_event_ids": full_processed_ids,
                     "recent_processed_event_ids": recent_processed_ids,
                     "recent_processed_event_ids_limit": RECENT_PROCESSED_EVENT_IDS_LIMIT,
-                    "processed_event_ids_compacted": False,
+                    # Heartbeat itself never compacts/trims the ledger — it only
+                    # appends and writes the full list back out — so it must
+                    # carry forward whatever `_read_state()` reported rather than
+                    # hardcoding False. Hardcoding here made the flag structurally
+                    # incapable of ever surviving a heartbeat cycle: any future
+                    # compactor's True would be overwritten on the very next run.
+                    "processed_event_ids_compacted": bool(state.get("processed_event_ids_compacted", False)),
                 }
             )
             index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
@@ -231,6 +237,14 @@ class MemoryOSRuntime:
                 "candidate_created_count": candidate_created_count,
                 "already_processed_event_count": len([event for event in events if event.id in already_processed_ids]),
                 "total_event_count": len(events),
+                # Observability for the unbounded dedup ledger written above
+                # (full_processed_ids / "processed_event_ids" in state): its
+                # growth is otherwise only visible by opening the state file
+                # by hand. NOT the same number as processed_event_count_total —
+                # that counter skips events which already had a candidate
+                # (window-overflow dedup) but this ledger still records their
+                # ids for dedup purposes, so ledger size can exceed it.
+                "processed_event_ids_ledger_size": len(full_processed_ids),
                 "working_item_count": _working_item_count(self.store),
                 "candidate_count": len(read_candidate_queue(self.store.roots)),
                 "crystallized_record_count": approved_crystallized_record_count,
@@ -317,6 +331,7 @@ class MemoryOSRuntime:
                 "processed_event_ids": [],
                 "recent_processed_event_ids": [],
                 "processed_event_count_total": 0,
+                "processed_event_ids_compacted": False,
             }
         state = json.loads(self._state_path.read_text(encoding="utf-8"))
         # Legacy migration: if old-format processed_event_ids exists but recent_ doesn't
@@ -334,7 +349,13 @@ class MemoryOSRuntime:
             state["processed_event_ids_compacted"] = False
         state.setdefault("recent_processed_event_ids_limit", RECENT_PROCESSED_EVENT_IDS_LIMIT)
         state.setdefault("processed_event_count_total", state.get("processed_event_count", 0))
-        state["processed_event_ids_compacted"] = False
+        # Reflect reality instead of hardwiring: preserve whatever the reverse
+        # migration branch above just set (False, deliberately — the ledger was
+        # just restored) or whatever was actually persisted (e.g. True from a
+        # future compactor that trimmed processed_event_ids while keeping the
+        # key present). Forcing False here unconditionally made the flag
+        # structurally incapable of ever reporting True.
+        state.setdefault("processed_event_ids_compacted", False)
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:

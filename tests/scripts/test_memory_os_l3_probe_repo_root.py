@@ -317,3 +317,114 @@ def test_deploy_l3_probe_plan_does_not_ask_to_create_the_superseded_job(tmp_path
 
     assert "create_cron_job" not in plan.get("needs", [])
     assert all(cmd.get("operation") != "hermes cron create" for cmd in dry_run.get("commands", []))
+
+
+def test_deploy_l3_probe_helper_comparison_requires_explicit_utf8_encoding(
+    tmp_path, monkeypatch,
+):
+    """Defect 3 counterfactual: run_plan()'s helper-current check used
+    ``DEPLOY_HELPER.read_text() == SOURCE_HELPER.read_text()`` with no
+    ``encoding=`` on either call, so Python fell back to the locale's
+    preferred encoding. The real helper scripts are full of Chinese
+    comments, so on a non-UTF-8 locale this raises UnicodeDecodeError
+    instead of comparing the two files.
+
+    This test does not depend on the host's actual locale (which may well
+    already be UTF-8, making the bug non-reproducible by environment
+    alone). Instead it monkeypatches ``Path.read_text`` to raise whenever
+    it is called WITHOUT an explicit ``encoding=`` kwarg -- exactly what a
+    non-UTF-8 locale would do to the old unencoded calls -- so the test is
+    deterministic on any host.
+
+    Counterfactual: without ``encoding="utf-8"`` on both read_text() calls
+    in run_plan(), this raises UnicodeDecodeError. With the fix, run_plan()
+    returns normally with the correct helper_current verdict.
+    """
+    import pathlib
+
+    module = _load_deploy_module()
+    home = tmp_path / "home"
+
+    helper_dir = tmp_path / "helpers"
+    helper_dir.mkdir()
+    source_helper = helper_dir / "source_helper.py"
+    deploy_helper = helper_dir / "deploy_helper.py"
+    content = "# 中文注释\nprint('ok')\n"  # Chinese comment
+    source_helper.write_text(content, encoding="utf-8")
+    deploy_helper.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(module, "SOURCE_HELPER", source_helper)
+    monkeypatch.setattr(module, "DEPLOY_HELPER", deploy_helper)
+
+    real_read_text = pathlib.Path.read_text
+
+    def _locale_sensitive_read_text(self, encoding=None, errors=None):
+        if encoding is None:
+            # Stand-in for what a non-UTF-8 locale does to an unencoded
+            # read_text() call on a file containing non-ASCII bytes.
+            raise UnicodeDecodeError(
+                "ascii", b"\xe4\xb8\xad", 0, 1, "simulated non-UTF-8 locale",
+            )
+        return real_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _locale_sensitive_read_text)
+
+    plan = module.run_plan(home)  # must not raise UnicodeDecodeError
+
+    assert plan["helper_installed"] is True
+    assert plan["helper_current"] is True
+
+
+def test_l3_probe_helper_last_run_write_requires_explicit_utf8_encoding(
+    tmp_path, monkeypatch,
+):
+    """Follow-up 2 counterfactual: memory_os_l3_probe_helper.py's
+    LAST_RUN_FILE.write_text(json.dumps(...)) had no ``encoding=``, and its
+    payload includes ``stderr_truncated`` -- captured subprocess output
+    that can carry non-ASCII bytes -- so on a non-UTF-8 locale this raises
+    UnicodeEncodeError on write instead of saving the diagnostic. Same
+    defect class as Defect 3 (deploy_l3_probe.py), write side rather than
+    read side. (Checked for a matching read side: grepped the project for
+    ``l3_probe_last_result`` and found only this write site -- the
+    artifact is never read back programmatically anywhere in the repo, so
+    there is no read-side counterpart to fix.)
+
+    Deterministic on any host, same technique as the Defect 3 test:
+    monkeypatch ``Path.write_text`` to raise whenever called without an
+    explicit ``encoding=`` kwarg.
+    """
+    import pathlib
+
+    mod = _load_l3_helper()
+
+    fake_probe = tmp_path / "fake_probe.py"
+    fake_probe.write_text("print('GOVERNANCE PATH OK')\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "PROBE_SCRIPT", fake_probe)
+    last_run_file = tmp_path / "system" / "l3_probe_last_result.json"
+    monkeypatch.setattr(mod, "LAST_RUN_FILE", last_run_file)
+
+    class _FakeCompletedProcess:
+        returncode = 0
+        stdout = "GOVERNANCE PATH OK\n"
+        # Non-ASCII captured subprocess output, the realistic trigger for
+        # this bug (stderr_truncated is built directly from this).
+        stderr = "子进程输出中含有非 ASCII 字符"
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _FakeCompletedProcess())
+
+    real_write_text = pathlib.Path.write_text
+
+    def _locale_sensitive_write_text(self, data, encoding=None, errors=None, newline=None):
+        if encoding is None:
+            # Stand-in for what a non-UTF-8 locale does to an unencoded
+            # write_text() call on non-ASCII data.
+            raise UnicodeEncodeError(
+                "ascii", data, 0, 1, "simulated non-UTF-8 locale",
+            )
+        return real_write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", _locale_sensitive_write_text)
+
+    returncode = mod.main(smoke=True)  # must not raise UnicodeEncodeError
+
+    assert returncode == 0
+    assert last_run_file.exists(), "LAST_RUN_FILE must be written even with non-ASCII stderr"

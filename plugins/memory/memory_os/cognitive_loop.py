@@ -1036,6 +1036,16 @@ class CognitiveLoopRunner:
             "proposed_count": result.get("proposed_count", 0),
             "auto_active_count": result.get("auto_active_count", 0),
             "dedup_skipped": result.get("dedup_skipped", 0),
+            # D2b: outcome + llm_call_* — distinguishes "the judge genuinely
+            # found no relationships" (no_relationships_found, all calls ok)
+            # from "every LLM call failed" (llm_degraded) without re-running
+            # or reading source. See llm_edge_proposer.run_llm_proposer
+            # docstring; same 两层白名单 hazard as edge_weight_feedback above.
+            "outcome": result.get("outcome", ""),
+            "llm_call_count": result.get("llm_call_count", 0),
+            "llm_call_ok_count": result.get("llm_call_ok_count", 0),
+            "llm_call_failure_count": result.get("llm_call_failure_count", 0),
+            "llm_call_failure_reasons": result.get("llm_call_failure_reasons", {}),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
@@ -1110,6 +1120,11 @@ class CognitiveLoopRunner:
             "scanned_ref_count": result.get("scanned_ref_count", 0),
             "proposed_count": result.get("proposed_count", 0),
             "dedup_skipped": result.get("dedup_skipped", 0),
+            # write_failed_count is the counter that distinguishes "nothing
+            # to write" from "tried and failed" — Completion Is Not Output.
+            # The monitor's _edge_fields already whitelists it; this key was
+            # the missing half (dropped at this layer only).
+            "write_failed_count": result.get("write_failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
@@ -1168,6 +1183,19 @@ class CognitiveLoopRunner:
             "forget_eligible_backlog": result.get("forget_eligible_backlog", 0),
             "unresolved_hit_count": result.get("unresolved_hit_count", 0),
             "failed_count": result.get("failed_count", 0),
+            "tracked_edge_count": result.get("tracked_edge_count", 0),
+            # Cursor-alignment visibility: the outcome branch gives
+            # reinforced/forgotten/saturated precedence over
+            # "cursor_misaligned", so a misalignment on an otherwise-busy
+            # run is invisible unless these survive independently of
+            # outcome. A future graph_layer_shadow.jsonl compaction
+            # (metadata_retention.py — dry-run only today, no executor
+            # yet) is exactly the event these detect.
+            "cursor_misaligned": result.get("cursor_misaligned", False),
+            "cursor_misalignment_reason": result.get("cursor_misalignment_reason", ""),
+            "cursor_previous_line_count": result.get("cursor_previous_line_count", 0),
+            "cursor_realigned_line_count": result.get("cursor_realigned_line_count", 0),
+            "cursor_skipped_row_count": result.get("cursor_skipped_row_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
@@ -1478,8 +1506,12 @@ class CognitiveLoopRunner:
 
 def _step_status(result: dict[str, Any]) -> str:
     status = str(result.get("status", "") or "").lower()
-    if status in {"ok", "warning", "error", "deferred", "skipped", "skipped_dependency_failed", "blocked"}:
-        return "warning" if status == "deferred" else status
+    if status in {"ok", "warning", "error", "deferred", "degraded", "skipped", "skipped_dependency_failed", "blocked"}:
+        # "degraded" (e.g. llm_edge_proposer: at least one pair's LLM call
+        # failed this run) must not fall through to "ok" — the raw
+        # "degraded" value stays visible in the step's passthrough result
+        # dict; only the step-level classification maps it to "warning".
+        return "warning" if status in {"deferred", "degraded"} else status
     if result.get("output") == "[SILENT]" or result.get("reason"):
         return "warning"
     return "ok"

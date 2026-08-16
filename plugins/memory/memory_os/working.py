@@ -14,6 +14,7 @@ from .ids import new_working_id
 from .jsonl_io import locked_jsonl_file
 from .schema import WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, WorkingItem
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 
 
 ALLOWED_WORKING_KINDS = {"lingering", "emotional", "curiosity", "attention"}
@@ -195,7 +196,25 @@ class WorkingMemoryService:
                 continue
             # ── Decay from last_decayed_at (v1), fallback to updated_at (v0 compat) ──
             decay_base_str = item.last_decayed_at or item.updated_at or item.created_at
-            decay_base = datetime.fromisoformat(decay_base_str)
+            try:
+                decay_base = datetime.fromisoformat(decay_base_str)
+                decay_base = ensure_utc_aware(decay_base)
+            except (ValueError, TypeError):
+                # Malformed/unparseable stored timestamp on the heartbeat decay
+                # path — must not raise. Treat as "decayed just now" (no weight
+                # change this cycle) rather than skip the item outright: below,
+                # last_decayed_at is unconditionally re-stamped with a fresh
+                # aware value, so the record self-heals starting next cycle
+                # instead of either crashing the heartbeat or becoming
+                # permanently exempt from decay (which a bare "leave unchanged
+                # and continue" would cause, since nothing would ever fix the
+                # stored field). Recorded so a bad record is diagnosable.
+                decay_base = current
+                self._audit(
+                    "working_item_decay_base_invalid",
+                    "warning",
+                    {"item_id": item.id, "kind": kind, "decay_base_str": decay_base_str},
+                )
             elapsed_hours = max(0.0, (current - decay_base).total_seconds() / 3600.0)
             decayed_weight = item.weight * pow(0.5, elapsed_hours / effective_half_life)
             new_status = "expired" if decayed_weight < effective_expire_below else "active"
@@ -266,6 +285,7 @@ class WorkingMemoryService:
             expiry_base_str = item.expired_at or item.updated_at
             try:
                 expiry_dt = datetime.fromisoformat(expiry_base_str)
+                expiry_dt = ensure_utc_aware(expiry_dt)
             except (ValueError, TypeError):
                 # Malformed timestamp — keep the item rather than risk data loss.
                 kept.append(raw_item)

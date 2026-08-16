@@ -468,7 +468,27 @@ def run_candidate_aggregation_lane(
     # production rows, 66–98 days old, recall-excluded yet never archived).
     # read_effective_candidates costs ~61ms on production — affordable here
     # in an offline lane, never on the per-turn prefetch path.
+    #
+    # Errors accumulated BEFORE this point -- malformed candidates.jsonl rows
+    # from read_candidate_queue, or a promote-stage failure recorded by
+    # _cluster_and_promote -- disable compaction entirely; that pre-existing
+    # "any upstream error -> skip compaction" policy for those two feeders
+    # is unchanged (see test_queue_parse_error_still_skips_compaction and
+    # test_promote_stage_error_still_skips_compaction in
+    # test_candidate_aggregation_logic.py). Snapshot the count now, before
+    # the try/except below can append its own error, so the two reasons
+    # stay independently attributable in compaction_skip_reason below even
+    # though, as of 2026-08-15, all three now skip compaction the same way.
+    pre_effective_view_error_count = len(candidate_error_records)
     effective_terminal_ids: set[str] | None = None
+    archivable_terminal_ids: set[str] | None = None
+    # compact_candidate_queue's provisional_backed_candidate_ids is a
+    # REQUIRED (non-Optional) argument. It is only ever passed when
+    # compaction actually runs (see compaction_skip_reason below), so this
+    # initial empty set is never itself handed to a real archival decision
+    # -- it exists purely so the variable is always bound.
+    provisional_backed_ids: set[str] = set()
+    effective_view_failed = False
     effective_count = 0
     try:
         effective = read_effective_candidates(store)
@@ -476,7 +496,37 @@ def run_candidate_aggregation_lane(
         effective_terminal_ids = {
             item.candidate.candidate_id for item in effective if item.terminal
         }
-    except Exception as exc:  # noqa: BLE001 - view failure degrades, never breaks the lane
+        # A provisional-backed terminal candidate (its only active
+        # crystallized record is provisional=True) must NOT be archived out
+        # of the live queue: the provisional is reversible by design
+        # (resolver TTL/cap eviction, owner reject via
+        # invalidate_provisional_record) and archival has no way back. It
+        # still belongs in the FULL terminal set used for the recall-
+        # exclusion projection below -- the content is already in
+        # crystallized memory, so it must not double-surface in recall
+        # while the provisional anchor is active. Only a permanent
+        # (non-provisional) crystallized record, or a demoted/fleeting/
+        # absorbed/owner-closed state, is archivable.
+        archivable_terminal_ids = {
+            item.candidate.candidate_id
+            for item in effective
+            if item.terminal and not item.provisional_backed
+        }
+        # Excluding these ids from archivable_terminal_ids only protects
+        # them from compact_candidate_queue's terminal-ids branch. Its
+        # retention-window elif/else resolves state from triage rows alone
+        # (resolver_approved, not owner_eligible) and does not know a
+        # candidate is provisional-backed, so an aged resolver-approved
+        # provisional row was still archivable through that branch --
+        # same loss shape as the case above, reached a different way, and
+        # arguably more likely to fire since provisional TTLs can exceed
+        # retention_days. Pass the id set explicitly so
+        # compact_candidate_queue enforces the guarantee on every branch.
+        provisional_backed_ids = {
+            item.candidate.candidate_id for item in effective if item.provisional_backed
+        }
+    except Exception as exc:  # noqa: BLE001 - view failure never breaks the lane; compaction is skipped instead
+        effective_view_failed = True
         candidate_error_records.append(
             build_error_record(
                 component="candidate_aggregation",
@@ -488,11 +538,48 @@ def run_candidate_aggregation_lane(
             )
         )
 
-    compact_count = 0 if candidate_error_records else compact_candidate_queue(
+    # Whether and why compaction ran, as an explicit decision -- not a side
+    # effect of candidate_error_records' length, which was the actual defect
+    # here (2026-08-15 finding): the code used to comment that a
+    # read_effective_candidates failure "degrades to terminal_candidate_ids=
+    # None (compact's own triage-only view)", but triage-only compaction is
+    # exactly what archives a provisional-backed candidate irreversibly
+    # (Defect C) -- so degrading to it on the ONE path where we have the
+    # LEAST information about which candidates are provisional-backed was
+    # itself unsafe. When the view fails we do not know which candidates
+    # are provisional-backed; archiving under that uncertainty is
+    # unrecoverable (candidates.archive.jsonl has no production reader), so
+    # a view failure now joins the two pre-existing upstream-error sources
+    # in skipping compaction outright, rather than falling back to a
+    # triage-only view that cannot make the provisional-backed distinction
+    # at all. Not compacting just lets the live queue grow -- visible,
+    # bounded by how long the failure persists, and fully recoverable the
+    # moment the malformed record is fixed.
+    #
+    # compaction_skip_reason is the durable, closed-set answer to "why did
+    # compaction not run this tick", surfaced in the returned summary so a
+    # reader can distinguish it from "compaction ran and archived nothing"
+    # (compaction_skip_reason is None, compacted_count is a real count)
+    # without re-running anything or reading source:
+    #   None                       -- compaction ran normally.
+    #   "effective_view_unavailable" -- read_effective_candidates raised;
+    #       see candidate_effective_view_failed in error_records.
+    #   "upstream_error"           -- read_candidate_queue or
+    #       _cluster_and_promote recorded an error before the effective-view
+    #       attempt; see recent_error_codes / error_records for which.
+    if effective_view_failed:
+        compaction_skip_reason: str | None = "effective_view_unavailable"
+    elif pre_effective_view_error_count:
+        compaction_skip_reason = "upstream_error"
+    else:
+        compaction_skip_reason = None
+
+    compact_count = 0 if compaction_skip_reason else compact_candidate_queue(
         store,
         archive_path=archive,
         retention_days=7,
-        terminal_candidate_ids=effective_terminal_ids,
+        terminal_candidate_ids=archivable_terminal_ids,
+        provisional_backed_candidate_ids=provisional_backed_ids,
     )
 
     # Publish the hot-path recall exclusion projection (owner ruling
@@ -541,6 +628,12 @@ def run_candidate_aggregation_lane(
         "stale_owner_eligible_demoted_count": stale_results["demoted_count"],
         "fleeting_count": fleeting_results["fleeting_count"],
         "compacted_count": compact_count,
+        # Closed set: None (ran normally), "effective_view_unavailable"
+        # (read_effective_candidates raised), "upstream_error"
+        # (read_candidate_queue or _cluster_and_promote recorded an error
+        # first). See the comment above compaction_skip_reason's assignment
+        # for why a view failure must not fall back to compacting anyway.
+        "compaction_skip_reason": compaction_skip_reason,
         "action": "candidate_aggregation_tick",
         "status": "warning" if candidate_error_records else "ok",
         "suppressed_error_count": len(candidate_error_records),

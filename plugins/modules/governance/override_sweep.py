@@ -16,6 +16,7 @@ from plugins.memory.memory_os.knob_overrides import (
     list_active_overrides,
     revert_override,
 )
+from plugins.memory.memory_os.timeutil import ensure_utc_aware
 
 MAX_OVERRIDES = 30
 
@@ -112,7 +113,8 @@ class OverrideSweepModule:
                     continue
                 try:
                     expires_at = datetime.fromisoformat(expires_str)
-                except ValueError:
+                    expires_at = ensure_utc_aware(expires_at)
+                except (ValueError, TypeError):
                     continue
                 if expires_at <= now and override.get("state") == "active":
                     try:
@@ -250,6 +252,15 @@ def _days_until_expiry(expires_at: str) -> float:
         return float("inf")
     try:
         expires_dt = datetime.fromisoformat(expires_at)
+        # Naive (no-offset) expires_at parses without error but raises
+        # TypeError on the aware subtraction below -- not a ValueError, so
+        # the bare `except ValueError` would not catch it, and previously
+        # the naive-input path fell through to the genuinely-unparseable
+        # fallback (float("inf")), silently hiding a real near-expiry
+        # record from near_expiry_count. Normalize before subtracting,
+        # same as knob_overrides._is_expired. Genuinely unparseable input
+        # keeps the existing fail-open fallback.
+        expires_dt = ensure_utc_aware(expires_dt)
         remaining = expires_dt - datetime.now(timezone.utc)
         return remaining.total_seconds() / 86400.0
     except (ValueError, TypeError):

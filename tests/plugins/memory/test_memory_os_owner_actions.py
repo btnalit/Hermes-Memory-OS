@@ -4751,6 +4751,121 @@ def test_digest_fyi_includes_candidate_aggregation_when_available(tmp_path):
     assert aggr_item["source_module"] == "candidate_aggregation"
 
 
+# ── 2026-08-15: compaction_skip_reason wiring ───────────────────────────────
+#
+# Two explicit key-picking whitelists dropped compaction_skip_reason after it
+# was added to run_candidate_aggregation_lane's return value:
+#   layer 1 -- write_candidate_aggregation_status's `record` dict
+#             (crystallized.py, builds the ledger row written via
+#             append_governed_jsonl)
+#   layer 2 -- _candidate_aggregation_status_block's returned dict
+#             (owner_actions.py, reads the ledger back for the digest)
+# A third point (the FYI summary string builder, also in owner_actions.py)
+# renders layer 2's dict into the actual text an owner reads -- "the
+# artifact a reader actually opens" for this counterfactual. Worse than a
+# drop, a THIRD-file misreport (scripts/memory_os_candidate_aggregation_
+# lane.py's run_status/reason derivation) let a skipped compaction
+# masquerade as a healthy "no_triage_actions"/"triaged" tick, since both
+# report compacted_count=0 -- covered separately in
+# tests/scripts/test_memory_os_candidate_aggregation_lane.py, next to that
+# script's own producers.
+
+
+def test_compaction_skip_reason_survives_end_to_end_to_the_digest(tmp_path, monkeypatch):
+    """Counterfactual: compaction_skip_reason must survive from the lane's
+    REAL return value (a genuine read_effective_candidates failure, not a
+    hand-written summary dict -- Section W: build fixtures via the real
+    producer), through both whitelists, to the rendered owner-digest FYI
+    line. Each whitelist is proven independently load-bearing by reverting
+    it alone (see the two hand-revert cycles in the dispatch report) --
+    only reverting BOTH would look identical to reverting one if the test
+    only checked the final digest text, so this also asserts the
+    intermediate ledger and status-block values."""
+    import plugins.modules.governance.candidate_aggregation as aggregation
+    from plugins.memory.memory_os.crystallized import (
+        latest_candidate_aggregation_status,
+        write_candidate_aggregation_status,
+    )
+
+    store = _store(tmp_path)
+
+    def _raise_view_failure(_store):
+        raise RuntimeError("synthetic effective-view failure")
+
+    monkeypatch.setattr(aggregation, "read_effective_candidates", _raise_view_failure)
+    result = aggregation.run_candidate_aggregation_lane(store, execution_gate_envelope_id="")
+    assert result["compaction_skip_reason"] == "effective_view_unavailable", (
+        "sanity: the lane itself must produce the reason, otherwise this "
+        f"test proves nothing about the wiring. result={result}"
+    )
+
+    write_candidate_aggregation_status(store, summary=result)
+
+    ledger = latest_candidate_aggregation_status(store)
+    assert ledger is not None
+    assert ledger["compaction_skip_reason"] == "effective_view_unavailable", (
+        "layer 1 (write_candidate_aggregation_status's record whitelist, "
+        "crystallized.py) dropped compaction_skip_reason"
+    )
+
+    status = owner_review_status_report(store)
+    block = status["candidate_aggregation"]
+    assert block["compaction_skip_reason"] == "effective_view_unavailable", (
+        "layer 2 (_candidate_aggregation_status_block's returned-dict "
+        "whitelist, owner_actions.py) dropped compaction_skip_reason"
+    )
+
+    preview = owner_review_digest_preview(store)
+    fyi_items = preview.get("sections", {}).get("fyi", [])
+    aggr_item = next(
+        (it for it in fyi_items if it.get("target_id") == "candidate_aggregation"),
+        None,
+    )
+    assert aggr_item is not None
+    assert "compaction_skipped=effective_view_unavailable" in aggr_item["summary"], (
+        "the artifact a reader actually opens (the digest FYI line) does "
+        f"not surface the skip reason: {aggr_item['summary']!r}"
+    )
+
+
+def test_healthy_tick_digest_line_has_no_skip_reason_suffix(tmp_path):
+    """A healthy tick (compaction ran, nothing set compaction_skip_reason)
+    must render the byte-identical digest line as before this field
+    existed -- the skip-reason clause is appended ONLY when the reason is
+    set, never as an empty/'none' placeholder."""
+    from plugins.memory.memory_os.crystallized import write_candidate_aggregation_status
+
+    store = _store(tmp_path)
+    write_candidate_aggregation_status(
+        store,
+        summary={
+            "candidates_read": 10,
+            "pending": 2,
+            "already_triaged": 8,
+            "promoted_count": 3,
+            "rejected_demoted_count": 1,
+            "demoted_count": 2,
+            "fleeting_count": 2,
+            "compacted_count": 4,
+            # No compaction_skip_reason key at all -- matches a summary
+            # dict produced before this field existed.
+        },
+    )
+
+    preview = owner_review_digest_preview(store)
+    fyi_items = preview.get("sections", {}).get("fyi", [])
+    aggr_item = next(
+        (it for it in fyi_items if it.get("target_id") == "candidate_aggregation"),
+        None,
+    )
+    assert aggr_item is not None
+    assert aggr_item["summary"] == (
+        "聚合上次运行: promoted=3; rejected_demoted=1; demoted=2; "
+        "fleeting=2; compacted=4"
+    ), aggr_item["summary"]
+    assert "compaction_skipped" not in aggr_item["summary"]
+
+
 # ── P2 fix: _review_consequence / _review_question / _review_suggested_action ──
 # must not lie for provisional_crystallized_record / knob_override, whose
 # approval DOES change state (see owner_actions.py ~3639-3651 apply_owner_action

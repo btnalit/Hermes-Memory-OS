@@ -465,3 +465,119 @@ def test_continuity_selector_parity_with_live_selector(tmp_path):
     assert cached["seed_slots"] == live["seed_slots"]
     assert cached["max_records"] == live["max_records"]
     assert cached["schema_version"] == live["schema_version"]
+
+
+def test_continuity_selector_parity_with_bookkeeping_burst_and_tied_ts(tmp_path):
+    """Decisive parity test for the verified mirror-drift defect.
+
+    Builds ONE synthetic event set containing:
+      - one seed-eligible event per _CONTINUITY_SEED_SLOTS bucket (7 events,
+        filling all 7 seed slots and leaving exactly 1 global-fill slot open
+        under _MAX_CONTINUITY_RECORDS=8),
+      - a bookkeeping burst of 5 governance_* events (high importance, recent
+        ts, two of them sharing the exact same ts to exercise the (ts, id)
+        sort tie-break) that must be excluded from the global recency FILL
+        (but not from governance's own seed slot — that asymmetry is pinned),
+      - one ordinary lower-importance foreground conversation_turn event that
+        should win the single remaining fill slot once the burst is excluded.
+
+    Feeds the SAME events through both real producers:
+      - live: EventEnvelope objects via MemoryOSStore + continuity_selector_report
+      - mirror: the same events' .to_dict() via build_event_stats
+
+    Before the fix, the live selector excludes the governance_* burst from
+    its fill (prefetch._select_continuity_events line 3074-3078) while the
+    mirror's `remaining` had no such exclusion, so cached selected_by_source_class
+    reported governance=2/foreground=2 while live reported governance=1/
+    foreground=3 for this exact input — the disagreement this test pins.
+    """
+    from plugins.memory.memory_os.prefetch import continuity_selector_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.schema import EventEnvelope
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    now = datetime.now(timezone.utc)
+
+    def _ts(minutes_ago: float) -> str:
+        return (now - timedelta(minutes=minutes_ago)).isoformat()
+
+    events_data = [
+        # -- 7 seed-eligible events, one per bucket (age_minutes chosen so
+        #    each is the top-ranked candidate in its own source-class bucket) --
+        # (id_suffix, age_minutes, source, kind, safe_ref, importance)
+        ("seed-foreground-a", 1, "foreground", "conversation_turn", {}, 0.9),
+        ("seed-foreground-b", 2, "foreground", "conversation_turn", {}, 0.8),
+        ("seed-cron", 3, "cron_src", "cron_job",
+         {"source_module": "cron_mirror"}, 0.5),
+        ("seed-mailbox", 4, "mailbox_src", "mailbox_item",
+         {"platform": "mailbox"}, 0.5),
+        ("seed-room-family", 5, "family", "room_update", {}, 0.5),
+        ("seed-state-source", 6, "state_src", "state_change",
+         {"source_module": "state_source_mirror"}, 0.5),
+        ("seed-governance", 0.2, "governance", "proposal_review", {}, 1.0),
+        # -- bookkeeping burst: must be excluded from the global FILL only --
+        # Two share the exact same ts to exercise the (ts, id) sort tie-break.
+        ("burst-1", 0.5, "governance", "governance_resolver_approved", {}, 1.0),
+        ("burst-2-tied", 0.6, "governance", "governance_resolver_invalidated", {}, 1.0),
+        ("burst-3-tied", 0.6, "governance", "governance_resolver_approved", {}, 1.0),
+        ("burst-4", 0.7, "governance", "governance_resolver_invalidated", {}, 1.0),
+        ("burst-5", 0.8, "governance", "governance_resolver_approved", {}, 1.0),
+        # -- ordinary event that should win the single remaining fill slot
+        #    once the burst above is correctly excluded --
+        ("extra-foreground", 9, "foreground", "conversation_turn", {}, 0.4),
+    ]
+
+    # burst-2-tied and burst-3-tied share an identical ts string.
+    tied_ts = _ts(0.6)
+
+    for id_suffix, age_min, source, kind, safe_ref_extra, importance in events_data:
+        ts = tied_ts if id_suffix in ("burst-2-tied", "burst-3-tied") else _ts(age_min)
+        safe_ref = {"importance": importance, **safe_ref_extra}
+        event = EventEnvelope(
+            schema_version="memory-os.event.v0",
+            id=f"evt-{id_suffix}",
+            ts=ts,
+            profile="test",
+            source=source,
+            kind=kind,
+            summary=f"summary-{id_suffix}",
+            tags=[],
+            safe_ref=safe_ref,
+        )
+        store.append_event(event)
+
+    # Live selector (EventEnvelope path).
+    live = continuity_selector_report(store)
+
+    # Cached selector (dict path — same data, same real producer chain).
+    sorted_events = sorted(store.read_events(), key=lambda e: e.ts)
+    event_dicts = [e.to_dict() for e in sorted_events]
+    cached = build_event_stats(event_dicts).continuity_selector
+
+    assert cached["selected_total"] == live["selected_total"], (
+        f"selected_total: cached={cached['selected_total']} live={live['selected_total']}"
+    )
+    assert cached["dropped_total"] == live["dropped_total"], (
+        f"dropped_total: cached={cached['dropped_total']} live={live['dropped_total']}"
+    )
+    for field in ("selected_by_source_class", "dropped_by_source_class"):
+        cached_val = cached[field]
+        live_val = live[field]
+        for sc in set(list(cached_val) + list(live_val)):
+            c = cached_val.get(sc, 0)
+            l = live_val.get(sc, 0)
+            assert c == l, f"{field}[{sc}]: cached={c} live={l}"
+
+    # Pin the actual live-correct values so a future change to either side
+    # that breaks parity is caught even if both sides drift together.
+    assert live["selected_by_source_class"] == {
+        "foreground": 3, "cron": 1, "mailbox": 1,
+        "room_family": 1, "state_source": 1, "governance": 1,
+    }
+    assert live["dropped_by_source_class"] == {"governance": 5}
+    assert live["selected_total"] == 8
+    assert live["dropped_total"] == 5

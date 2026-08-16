@@ -141,17 +141,34 @@ def query_related_records(
         placeholders = ",".join("?" for _ in record_ids)
         rows = conn.execute(
             f"""
-            select ei2.record_id,
-                   min(ei2.entity_text) as shared_entity,
-                   max(ei2.weight) as max_weight,
-                   count(*) as overlap_count
-            from entity_index ei1
-            join entity_index ei2
-              on ei1.entity_id = ei2.entity_id
-             and ei1.record_id != ei2.record_id
-            where ei1.record_id in ({placeholders})
-            group by ei2.record_id
-            having max(ei2.weight) >= ?
+            with matches as (
+                select ei2.record_id as record_id,
+                       ei2.entity_text as entity_text,
+                       ei2.entity_class as entity_class,
+                       ei2.weight as weight
+                from entity_index ei1
+                join entity_index ei2
+                  on ei1.entity_id = ei2.entity_id
+                 and ei1.record_id != ei2.record_id
+                where ei1.record_id in ({placeholders})
+                  and ei2.weight >= ?
+            ),
+            ranked as (
+                select record_id, entity_text, entity_class, weight,
+                       row_number() over (
+                           partition by record_id
+                           order by weight desc, entity_text asc
+                       ) as rn,
+                       count(*) over (partition by record_id) as overlap_count
+                from matches
+            )
+            select record_id,
+                   entity_text as shared_entity,
+                   entity_class,
+                   weight,
+                   overlap_count
+            from ranked
+            where rn = 1
             order by overlap_count desc
             limit ?
             """,
@@ -172,20 +189,11 @@ def query_related_records(
     results: list[dict[str, Any]] = []
     for row in rows:
         shared_entity = row["shared_entity"]
-        weight = float(row["max_weight"])
-        # Derive entity_class from weight for display (match _ENTITY_CLASS_RULES bands)
-        if weight >= 0.9:
-            entity_class = "proper_noun"
-        elif weight >= 0.7:
-            entity_class = "identifier"
-        elif weight == 0.6:
-            entity_class = "ip"
-        elif weight == 0.5:
-            entity_class = "url"
-        elif weight == 0.4:
-            entity_class = "path"
-        else:
-            entity_class = "unknown"
+        # entity_class and weight are read from the SAME winning row (highest
+        # weight, entity_text tie-break) — never re-derived from independent
+        # aggregates, which could mix one entity's text with another's class.
+        entity_class = row["entity_class"]
+        weight = float(row["weight"])
         results.append({
             "related_record_id": row["record_id"],
             "shared_entity": shared_entity,

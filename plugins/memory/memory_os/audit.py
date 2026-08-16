@@ -9,6 +9,7 @@ from typing import Any
 
 from .ids import new_audit_id
 from .jsonl_io import append_jsonl_locked
+from .timeutil import ensure_utc_aware
 
 
 def _audit_monthly_path(base_audit_path: Path) -> Path:
@@ -92,6 +93,23 @@ def last_audit_age_seconds(audit_path: Path, *, now: datetime | None = None) -> 
     entries = [entry for entry in read_audit_records(audit_path) if entry.get("ts")]
     if not entries:
         return None
-    latest = max(datetime.fromisoformat(str(entry["ts"])) for entry in entries)
+    # A malformed `ts` string raises ValueError, and a mix of naive and
+    # aware `ts` values across entries raises TypeError inside max() (the
+    # bare comparison between two datetimes of differing awareness). Parse
+    # each entry individually, normalizing a naive value to UTC same as
+    # knob_overrides._is_expired, and skip entries that fail to parse at
+    # all rather than letting one malformed record crash the CLI status
+    # report for every entry.
+    parsed_ts: list[datetime] = []
+    for entry in entries:
+        try:
+            ts = datetime.fromisoformat(str(entry["ts"]))
+        except (ValueError, TypeError):
+            continue
+        ts = ensure_utc_aware(ts)
+        parsed_ts.append(ts)
+    if not parsed_ts:
+        return None
+    latest = max(parsed_ts)
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return max(0.0, (current - latest.astimezone(timezone.utc)).total_seconds())

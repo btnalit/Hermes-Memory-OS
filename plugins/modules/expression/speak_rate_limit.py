@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from plugins.memory.memory_os.timeutil import ensure_utc_aware
+
 MAX_PER_HOUR = 5
 WINDOW_SECONDS = 3600
 
@@ -48,11 +50,18 @@ def _parse_ts(ts: str) -> datetime:
 
     Returns datetime.min on any parse failure so the delivery is treated
     as ancient and never counted (safe default — avoid false rate-limit).
+    A successfully-parsed but timezone-naive value (no offset) is treated
+    as UTC rather than returned naive: this store's own writer stamps
+    aware UTC timestamps, so a naive value only reaches here via a
+    hand-edited/legacy record, and comparing it as-is against the aware
+    `cutoff` in under_speak_limit would raise TypeError instead of
+    hitting this function's own fail-open contract.
     """
     if not ts:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
         ts_clean = str(ts).replace("Z", "+00:00")
-        return datetime.fromisoformat(ts_clean)
+        parsed = datetime.fromisoformat(ts_clean)
     except (ValueError, TypeError):
         return datetime.min.replace(tzinfo=timezone.utc)
+    return ensure_utc_aware(parsed)

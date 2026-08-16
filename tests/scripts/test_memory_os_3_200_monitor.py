@@ -8650,3 +8650,244 @@ def test_r4_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
     assert surfaced["invalidated_never_hit_count"] == 5
     assert surfaced["forget_eligible_backlog"] == 7
     assert surfaced["reinforced_count"] == 1
+
+
+def test_llm_call_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """D2b 双层白名单防漂移守卫:llm_edge_proposer 的 outcome/llm_call_*
+    计数要抵达监控读者,必须先穿过 cognitive_loop 包装器的键透传、再穿过
+    采集端 _edge_fields 过滤 — 两层漏任何一层,计数对读者即不存在(与
+    上面 R4 守卫同构)。本测试用真实包装器(经真实 run_llm_proposer,
+    仅打桩模型座 _call_hermes_runtime_model)的输出喂真实监控采集器,
+    端到端断言 outcome 与四个 llm_call_* 计数存活,证明"每个 LLM 调用
+    都失败"与"判官确实未发现关系"在监控读者眼中可区分。"""
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os import llm_edge_proposer
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    index = MemoryOSIndex(roots)
+
+    for rec_id, created_at in (
+        ("cry_mon_a", "2026-06-01T10:00:00Z"),
+        ("cry_mon_b", "2026-06-01T11:00:00Z"),
+    ):
+        store.append_crystallized_record(
+            "test_llm_edge_proposer_monitor.md",
+            {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": rec_id,
+                "kind": "test",
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "test",
+                "approval_note": "test seed",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            },
+            "test crystallized record body",
+        )
+    index.rebuild_from_store(store)
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    # Every reply is empty -> every _call_llm outcome is "empty_llm_response"
+    # -> real run_llm_proposer marks the run degraded/llm_degraded.
+    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+
+    runner = CognitiveLoopRunner(store)
+    wrapper_summary = runner._llm_edge_proposer({})
+
+    report = {
+        "cycle_id": "cycle-guard-2",
+        "status": "ok",
+        "steps": [{
+            "step": "llm_edge_proposer",
+            "status": "degraded",
+            "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "reports.jsonl").write_text(
+        _json.dumps(report) + "\n", encoding="utf-8",
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    evidence = namespace["cognitive_loop_step_evidence"]()
+    surfaced = evidence["edge_step_results"]["llm_edge_proposer"]
+    assert surfaced["outcome"] == "llm_degraded"
+    assert surfaced["llm_call_count"] == 1
+    assert surfaced["llm_call_ok_count"] == 0
+    assert surfaced["llm_call_failure_count"] == 1
+    assert surfaced["llm_call_failure_reasons"] == {"empty_llm_response": 1}
+
+    # And it renders as ungraded INFO, not a new WARN/FAIL, via the real
+    # classify_snapshot path.
+    graded = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": evidence,
+    })
+    info_entry = next(
+        item for item in graded["info"] if item["code"] == "v2_graph_governance_state"
+    )
+    assert info_entry["value"]["llm_edge_proposer"]["outcome"] == "llm_degraded"
+    assert not any(item["code"].startswith("v2_graph") for item in graded["warn"])
+    assert not any(item["code"].startswith("v2_graph") for item in graded["fail"])
+
+
+def test_cursor_alignment_fields_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """Counterfactual: a ledger-cursor desync (future graph_layer_shadow.jsonl
+    compaction — metadata_retention.py is dry-run only today, no executor
+    yet) is invisible in `outcome` exactly when the run was ALSO busy
+    reinforcing/forgetting that same cycle (the outcome branch gives those
+    precedence over "cursor_misaligned") — the case an operator most needs
+    to see. tracked_edge_count and the five cursor_* fields must independently
+    survive both the cognitive_loop wrapper's whitelist and the monitor's
+    _edge_fields to reach a reader, and must render as ungraded INFO only —
+    a misaligned cursor ahead of any compaction executor is a bounded,
+    expected condition, not an incident."""
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_weight_feedback as ewf
+
+    def _fake_run(index_path, *, index=None, audit_path=None, now=None):
+        return {
+            "status": "ok",
+            "outcome": "reinforced",  # precedence hides cursor_misaligned here
+            "new_hit_record_count": 0, "reinforced_count": 0,
+            "already_saturated_count": 0, "skipped_not_injected_count": 0,
+            "forgotten_count": 3, "invalidated_never_hit_count": 1,
+            "forget_eligible_backlog": 0, "unresolved_hit_count": 0,
+            "failed_count": 0, "tracked_edge_count": 12,
+            "cursor_misaligned": True,
+            "cursor_misalignment_reason": "ledger_shorter_than_cursor",
+            "cursor_previous_line_count": 500,
+            "cursor_realigned_line_count": 480,
+            "cursor_skipped_row_count": 20,
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ewf, "run_edge_weight_feedback", _fake_run)
+    wrapper_summary = runner._edge_weight_feedback({})
+    assert wrapper_summary["outcome"] == "reinforced", (
+        "sanity: this scenario must not be distinguishable via outcome alone"
+    )
+
+    report = {
+        "cycle_id": "cycle-guard-3",
+        "status": "ok",
+        "steps": [{
+            "step": "edge_weight_feedback",
+            "status": "ok",
+            "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "reports.jsonl").write_text(
+        _json.dumps(report) + "\n", encoding="utf-8",
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    evidence = namespace["cognitive_loop_step_evidence"]()
+    surfaced = evidence["edge_step_results"]["edge_weight_feedback"]
+    assert surfaced["tracked_edge_count"] == 12
+    assert surfaced["cursor_misaligned"] is True
+    assert surfaced["cursor_misalignment_reason"] == "ledger_shorter_than_cursor"
+    assert surfaced["cursor_previous_line_count"] == 500
+    assert surfaced["cursor_realigned_line_count"] == 480
+    assert surfaced["cursor_skipped_row_count"] == 20
+
+    # Renders as ungraded INFO only — no new WARN/FAIL for a bounded,
+    # expected cursor-alignment condition.
+    graded = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": evidence,
+    })
+    info_entry = next(
+        item for item in graded["info"] if item["code"] == "v2_graph_governance_state"
+    )
+    assert info_entry["value"]["edge_weight_feedback"]["cursor_misaligned"] is True
+    assert not any(item["code"].startswith("v2_graph") for item in graded["warn"])
+    assert not any(item["code"].startswith("v2_graph") for item in graded["fail"])
+
+
+def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """Counterfactual: write_failed_count is the counter that distinguishes
+    "nothing to write" from "tried and failed" (Completion Is Not Output).
+    The monitor's _edge_fields already whitelisted it; the cognitive_loop
+    wrapper was the missing half. Must survive both layers end to end."""
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_provenance as ep
+
+    def _fake_run(index_path, *, index=None, audit_path=None):
+        return {
+            "status": "ok",
+            "outcome": "produced",
+            "record_count": 5,
+            "scanned_ref_count": 8,
+            "proposed_count": 2,
+            "dedup_skipped": 1,
+            "write_failed_count": 3,
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ep, "run_edge_provenance", _fake_run)
+    wrapper_summary = runner._edge_provenance({})
+
+    report = {
+        "cycle_id": "cycle-guard-4",
+        "status": "ok",
+        "steps": [{
+            "step": "edge_provenance",
+            "status": "ok",
+            "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "reports.jsonl").write_text(
+        _json.dumps(report) + "\n", encoding="utf-8",
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    evidence = namespace["cognitive_loop_step_evidence"]()
+    surfaced = evidence["edge_step_results"]["edge_provenance"]
+    assert surfaced["write_failed_count"] == 3

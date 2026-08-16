@@ -131,6 +131,11 @@ def is_naive(dt: datetime) -> bool:
     return dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None
 
 
+def ensure_utc_aware(dt: datetime) -> datetime:
+    """Interpret a naive datetime as UTC; return aware datetimes unchanged."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
 def safe_compare(a: datetime | None, b: datetime | None) -> int:
     """Compare two datetimes safely.
 

@@ -656,7 +656,11 @@ def run_contradiction_lane(
         }
 
     # ── 2. LLM claim extraction + contradiction judgment ──────────────
-    from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
+    from .low_clue_recall import (
+        _call_hermes_runtime_model,
+        _extract_json_object,
+        _resolve_hermes_default_runtime,
+    )
 
     # Reuse the same LLM config pattern as llm_edge_proposer
     _DEFAULT_LLM_CONFIG: dict[str, Any] = {
@@ -719,30 +723,60 @@ def run_contradiction_lane(
             ))
             continue
 
-        # Parse LLM response
+        # Parse LLM response. Converge on the project's canonical parser
+        # (_extract_json_object) for contract consistency with
+        # fact_judge.py / session_fact_extraction.py — see CLAUDE.md "LLM
+        # Integration - Reuse, Never Rebuild". A hand-rolled brace-depth
+        # counter used to live here; it broke silently whenever a claim
+        # value itself contained an unbalanced "{" (depth never returned to
+        # 0, `end` stayed -1, the pair was dropped with no signal).
+        # _extract_json_object instead takes the outermost
+        # find("{")..rfind("}") span, which does not share that failure
+        # mode. No trailing-prose fallback is added: the prompt instructs
+        # "Return ONLY a JSON object", and fact_judge.py -- the reference
+        # implementation this converges toward -- has no such fallback
+        # either.
         try:
             parsed = json.loads(response.strip())
         except json.JSONDecodeError:
-            # Extract outermost JSON object (handles nested braces in claim values)
-            start = response.find("{")
-            if start == -1:
-                continue
-            # Find matching close brace
-            depth = 0
-            end = -1
-            for _i in range(start, len(response)):
-                if response[_i] == "{":
-                    depth += 1
-                elif response[_i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = _i
-                        break
-            if end == -1:
-                continue
-            try:
-                parsed = json.loads(response[start:end + 1])
-            except json.JSONDecodeError:
+            parsed = None
+
+        if not isinstance(parsed, dict):
+            # Covers two cases with one guard: the first attempt raised
+            # (parsed is None above), or it succeeded but yielded a
+            # non-dict JSON value (a bare list/string/number) -- the same
+            # shape that crashed llm_edge_proposer._call_llm inside
+            # float(parsed.get("confidence")) before its own
+            # `if not isinstance(parsed, dict)` guard was added. Left
+            # unguarded here, the following parsed.get("claim_a") would
+            # raise AttributeError uncaught, killing this whole
+            # run_contradiction_lane call mid-loop after some pairs were
+            # already processed. _extract_json_object already returns None
+            # for a non-dict result, so this second attempt is a no-op
+            # when there is no nested object to recover.
+            parsed = _extract_json_object(response)
+            if not isinstance(parsed, dict):
+                # Backlog 14 (Completion Is Not Output), same family as the
+                # llm_empty_content case just above: a reply came back but
+                # could not be parsed as a JSON object. A bare `continue`
+                # here made a run where every reply was garbage (or
+                # validly-parsed-but-wrong-shape) indistinguishable from
+                # "genuinely no contradictions" -- give it the same typed
+                # error-record treatment as the empty-reply path. Reusing
+                # llm_parse_failed rather than a sibling code: from the
+                # monitor's perspective both are "the reply could not be
+                # turned into a claim pair," and the existing counterfactual
+                # test for the extraction-failure case already covers this
+                # error_code, so no test/monitor vocabulary drift is
+                # introduced by folding this case into it.
+                error_records.append(_build_error_record(
+                    component="llm_contradiction_lane",
+                    operation="hermes_runtime_call",
+                    error_code="llm_parse_failed",
+                    severity="warning",
+                    recoverable=True,
+                    details={"record_a": pair["a"]["id"], "record_b": pair["b"]["id"]},
+                ))
                 continue
 
         claim_a = parsed.get("claim_a") if isinstance(parsed.get("claim_a"), dict) else {}

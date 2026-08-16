@@ -14,19 +14,18 @@ from pathlib import Path
 from uuid import uuid4
 
 from .jsonl_io import locked_jsonl_file
+from .prefetch import (
+    _BOOKKEEPING_FILL_KIND_MARKERS,
+    _BRIDGE_SEED_SLOTS as _CONTINUITY_SEED_SLOTS,
+    _MAX_CONTINUITY_RECORDS,
+)
+from .timeutil import ensure_utc_aware
 
 EVENT_STATS_SCHEMA_VERSION = "memory-os.event_stats.v0"
 
-# Continuity selector constants — mirrors prefetch._BRIDGE_SEED_SLOTS / _MAX_CONTINUITY_RECORDS
-_CONTINUITY_SEED_SLOTS: dict[str, int] = {
-    "foreground": 2,
-    "cron": 1,
-    "mailbox": 1,
-    "room_family": 1,
-    "state_source": 1,
-    "governance": 1,
-}
-_MAX_CONTINUITY_RECORDS: int = 8
+# Continuity selector constants — imported from prefetch (single source of
+# truth) rather than hand-copied, so seed-slot/marker vocabulary drift
+# between the live selector and this mirror is structurally impossible.
 
 
 class EventStats:
@@ -117,6 +116,20 @@ def _dict_global_sort_key(evt: dict[str, object]) -> tuple[float, str, str]:
     return (_dict_event_importance(evt), str(evt.get("ts", "")), str(evt.get("id", "")))
 
 
+def _dict_is_bookkeeping_event_kind(evt: dict[str, object]) -> bool:
+    """Dict-based mirror of prefetch._is_bookkeeping_event_kind.
+
+    Uses the same _BOOKKEEPING_FILL_KIND_MARKERS imported from prefetch
+    (one source of truth for the marker vocabulary) applied to a dict's
+    "kind" field instead of getattr(event, "kind", "").
+    """
+    kind = str(evt.get("kind", "") or "").lower()
+    return any(
+        kind == marker or kind.startswith(marker)
+        for marker in _BOOKKEEPING_FILL_KIND_MARKERS
+    )
+
+
 def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, object]:
     """Compute continuity selector summary from sorted event dicts.
 
@@ -139,8 +152,16 @@ def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, obj
             "max_records": _MAX_CONTINUITY_RECORDS,
         }
 
-    # newest-first for seed slot selection (mirrors reverse ts sort in original)
-    events_rev: list[dict[str, object]] = list(reversed(events))
+    # newest-first for seed slot selection — mirrors prefetch's explicit
+    # sorted(source, key=lambda e: (e.ts, e.id), reverse=True). A plain
+    # list(reversed(events)) only matches that when every ts is unique;
+    # ties in ts must break the same way on both sides or the two
+    # selectors can disagree on which of two same-instant events wins.
+    events_rev: list[dict[str, object]] = sorted(
+        events,
+        key=lambda evt: (str(evt.get("ts", "")), str(evt.get("id", ""))),
+        reverse=True,
+    )
     buckets: dict[str, list[dict[str, object]]] = {sc: [] for sc in _CONTINUITY_SEED_SLOTS}
     for evt in events_rev:
         sc = _dict_source_class(evt)
@@ -161,7 +182,17 @@ def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, obj
 
     # Phase 2: fill remaining slots by (_global_sort_key, reverse=True)
     # (mirrors: sorted(remaining, key=_global_sort_key, reverse=True))
-    remaining = [evt for evt in events_rev if str(evt.get("id", "")) not in selected_ids]
+    # Bookkeeping-kind events (governance_*, state_source_*, session_fact_
+    # extracted, session_observed — see _BOOKKEEPING_FILL_KIND_MARKERS) are
+    # excluded from this global recency fill ONLY, matching
+    # prefetch._select_continuity_events line 3074-3078. The seed slots
+    # above are untouched by this exclusion — that asymmetry is a pinned
+    # design decision, not an oversight.
+    remaining = [
+        evt for evt in events_rev
+        if str(evt.get("id", "")) not in selected_ids
+        and not _dict_is_bookkeeping_event_kind(evt)
+    ]
     for evt in sorted(remaining, key=_dict_global_sort_key, reverse=True):
         if len(selected_ids) >= _MAX_CONTINUITY_RECORDS:
             break
@@ -252,8 +283,10 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
     updated_at = data.get("updated_at")
     if isinstance(updated_at, str) and updated_at:
         try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(updated_at)).total_seconds()
-        except ValueError:
+            parsed_updated_at = datetime.fromisoformat(updated_at)
+            parsed_updated_at = ensure_utc_aware(parsed_updated_at)
+            age = (datetime.now(timezone.utc) - parsed_updated_at).total_seconds()
+        except (ValueError, TypeError):
             age = float("inf")
         if age < 900:
             freshness = "fresh"

@@ -175,14 +175,19 @@ def main(smoke: bool = False) -> int:
     stderr = (result.stderr or "").strip()
     details = _parse_probe_output(stdout)
 
-    # Save last result for diagnostics
+    # Save last result for diagnostics. stderr_truncated carries captured
+    # subprocess output, which can contain non-ASCII bytes -- omitting
+    # encoding= here left this write_text() at the mercy of the locale's
+    # preferred encoding, raising UnicodeEncodeError on a non-UTF-8 locale
+    # instead of writing the diagnostic (same defect class as Defect 3's
+    # deploy_l3_probe.py fix, write side rather than read side).
     LAST_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
     LAST_RUN_FILE.write_text(json.dumps({
         "returncode": result.returncode,
         "details": details,
         "stderr_truncated": stderr[-500:] if stderr else "",
         "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
 
     # Smoke mode: always print result regardless of pass/fail
     if smoke:

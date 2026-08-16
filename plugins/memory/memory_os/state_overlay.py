@@ -19,6 +19,7 @@ from .state_overlay_schema import (
     STATE_OVERLAY_SCHEMA_VERSION,
 )
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 
 if TYPE_CHECKING:
     from .roots import MemoryOSRoots
@@ -331,9 +332,10 @@ def _read_open_threads_from_candidates(
             ts_str = str(c.get("last_updated", c.get("ts", "")))
             try:
                 ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                ts = ensure_utc_aware(ts)
+                if ts < cutoff:
+                    continue
             except (ValueError, TypeError):
-                continue
-            if ts < cutoff:
                 continue
             summary = str(c.get("summary") or c.get("body", "")[:200]).strip()
             if summary:
