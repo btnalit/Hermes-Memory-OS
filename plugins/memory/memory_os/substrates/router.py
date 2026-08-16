@@ -84,11 +84,18 @@ class SubstrateRouter:
         raw_facts: list[dict[str, Any]] = []
         fallback_triggered = True
         for provider in self.providers:
-            health = provider.health()
-            capabilities = set(_health_value(health, "capabilities", []) or [])
-            if _health_value(health, "status") != "ok" or "recall" not in capabilities:
-                continue
+            # health() is inside the same guard as recall(): one provider's
+            # bad health check must only skip that provider, never abort the
+            # whole loop -- an uncaught raise here would otherwise propagate
+            # out of recall() entirely, discarding facts already collected
+            # from providers processed earlier (including LocalArtifact, the
+            # architecture's always-primary authority) and never reaching
+            # the return below.
             try:
+                health = provider.health()
+                capabilities = set(_health_value(health, "capabilities", []) or [])
+                if _health_value(health, "status") != "ok" or "recall" not in capabilities:
+                    continue
                 provider_facts = provider.recall(query, consumer=consumer)
             except Exception:
                 continue

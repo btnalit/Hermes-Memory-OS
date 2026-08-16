@@ -14,6 +14,7 @@ downstream that scans the same shape).
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
@@ -122,3 +123,70 @@ def test_candidate_aggregation_lane_empty_tick_boundary_stays_false(tmp_path, mo
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert any_boundary_true(report["boundary"]) is False
+
+
+# ── 2026-08-15: compaction_skip_reason wiring through main() ───────────────
+#
+# main() builds two separate closed-set surfaces from the lane's result:
+# the printed cron-delivery `summary` dict (an explicit key-picking
+# whitelist that dropped compaction_skip_reason), and the run_status/reason
+# derivation for record_lane_last_run, which used to derive purely from
+# counters (promoted+demoted+fleeting+compacted). Since compacted_count is
+# 0 both when compaction ran with nothing to archive AND when it was
+# skipped, a skipped compaction misreported as "no_triage_actions"/
+# "triaged" -- byte-identical to a healthy tick. Both need the fix; this
+# test proves both from ONE real lane failure.
+
+
+def test_compaction_skip_reason_flows_through_script_summary_and_lane_last_run(
+    tmp_path, monkeypatch, capsys,
+):
+    """Invokes main() in-process (not subprocess) so
+    aggregation.read_effective_candidates can be monkeypatched to a genuine
+    failure -- the real-producer discipline used throughout this batch's
+    counterfactuals. A hand-written result dict would only prove the
+    key-picking lines exist, not that main() actually receives the field
+    from a real lane run."""
+    import scripts.memory_os_candidate_aggregation_lane as lane_script
+    import plugins.modules.governance.candidate_aggregation as aggregation
+    from plugins.memory.memory_os.lane_last_run import read_lane_last_run
+
+    _store_with_gate(tmp_path)  # writes the envelope main() will read from disk
+
+    def _raise_view_failure(_store):
+        raise RuntimeError("synthetic effective-view failure")
+
+    monkeypatch.setattr(aggregation, "read_effective_candidates", _raise_view_failure)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "memory_os_candidate_aggregation_lane.py",
+            "--hermes-home", str(tmp_path),
+            "--profile", "memoryos-test",
+            "--envelope-id", _VALID_ENVELOPE_ID,
+        ],
+    )
+
+    rc = lane_script.main()
+    assert rc == 0
+
+    printed = capsys.readouterr().out
+    summary = json.loads(printed)
+    assert summary["compaction_skip_reason"] == "effective_view_unavailable", (
+        "the script's printed cron-delivery summary dropped "
+        f"compaction_skip_reason: {summary}"
+    )
+
+    last_run = read_lane_last_run(str(tmp_path), "candidate_aggregation")
+    assert last_run is not None
+    assert last_run["status"] == "ok", (
+        "a view failure is visibility, not alerting: a view failure already "
+        "emits its own error record, and a queue that merely grows is "
+        "recoverable, so status must stay ok, not warn/fail"
+    )
+    assert last_run["reason"] == "compaction_skipped_effective_view_unavailable", (
+        "counterfactual: without the fix this reports 'no_triage_actions' "
+        "-- byte-identical to a healthy tick with nothing to compact, "
+        f"because compacted_count is 0 either way. got: {last_run}"
+    )

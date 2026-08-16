@@ -331,9 +331,11 @@ def _read_open_threads_from_candidates(
             ts_str = str(c.get("last_updated", c.get("ts", "")))
             try:
                 ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    continue
             except (ValueError, TypeError):
-                continue
-            if ts < cutoff:
                 continue
             summary = str(c.get("summary") or c.get("body", "")[:200]).strip()
             if summary:

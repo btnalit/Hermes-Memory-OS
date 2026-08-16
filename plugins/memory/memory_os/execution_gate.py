@@ -316,14 +316,42 @@ def resolve_execution_gate_permit(
             risk_class=risk_class,
         )
 
-    # Fast path: O(1) index lookup
+    # Fast path: O(1) index lookup.
+    #
+    # DELIBERATELY disabled whenever require_unused=True -- do not "fix" this
+    # by dropping the `and not require_unused` clause below. The sidecar
+    # index's completion_count is NOT authoritative for that check:
+    #
+    #  1. It is written by a write that is separate from (and not atomic
+    #     with) the journal append it derives from. complete_execution_gate_
+    #     envelope() appends the canonical "completion" record to the
+    #     journal, then -- as a second, later step -- calls
+    #     _update_gate_index() to bump the sidecar's completion_count. A
+    #     process kill between those two steps leaves the journal correctly
+    #     showing "completed" while the sidecar entry stays PRESENT but
+    #     STALE (completion_count still 0). Unlike a genuinely missing
+    #     index entry, this does not self-heal via the "index miss" full
+    #     scan below, because the entry exists and looks fine.
+    #  2. A second, independent writer of this exact sidecar file exists:
+    #     scripts/memory_os_execution_gate_runner.py::_update_sidecar_index
+    #     (the cron-wrapper permit path). It does not import or share code
+    #     with this module, so any freshness/watermark scheme added here
+    #     alone would not be honored by that writer either.
+    #
+    # tests/plugins/memory/test_memory_os_execution_gate.py::
+    # test_resolve_require_unused_rejects_canonical_completion_missing_from_sidecar
+    # pins this: a completion appended straight to the journal (bypassing
+    # the sidecar entirely) must still be caught when require_unused=True.
+    # That only holds because require_unused=True always falls through to
+    # the full-journal scan below, which reads the canonical journal
+    # directly instead of trusting the sidecar. A slow-but-correct gate
+    # beats a fast-but-weak one here (see CLAUDE.md "No Silent Failures").
     idx = _read_gate_index(roots)
     index_entry = idx.get(target)
-    if (
-        index_entry is not None
-        and index_entry.get("permit_decision") is not None
-        and not require_unused
-    ):
+    index_entry_fresh = (
+        index_entry is not None and index_entry.get("permit_decision") is not None
+    )
+    if index_entry_fresh and not require_unused:
         failed = _validate_index_entry(
             index_entry, target, lane_id, risk_class,
             require_fresh, require_unused, expected_scope, expected_scope_hash, now,
@@ -346,7 +374,15 @@ def resolve_execution_gate_permit(
             scope_match=True if expected_hash else None,
         )
 
-    # Index miss — fall back to full scan (limit=0 = no window)
+    # Index miss (or require_unused=True bypass) — fall back to full scan.
+    # limit=0 is deliberate, not an oversight: a permit or its completion
+    # record can be arbitrarily far back in the journal relative to when it
+    # is resolved (see test_old_permit_beyond_2000_window_still_resolvable /
+    # spec B.1), so windowing this read would let an old-but-valid permit
+    # read as "not found", or -- far worse -- let an old completion record
+    # fall outside the window and an already-used permit read as unused.
+    # A documented O(journal length) read here is intentional; do not
+    # "optimize" it into a windowed read.
     records = read_execution_gate_records(roots, limit=0)
     permits = [
         record
@@ -410,7 +446,21 @@ def resolve_execution_gate_permit(
         scope_match=True if expected_hash else None,
         require_fresh=require_fresh,
     )
-    _rebuild_gate_index_from_records(roots, records)
+    if not index_entry_fresh:
+        # The sidecar had no usable entry for this envelope (missing file,
+        # deleted entry, or an entry without permit_decision -- see
+        # test_index_miss_falls_back_to_full_scan). Populate it now so
+        # future resolves can use the O(1) fast path.
+        #
+        # When index_entry_fresh is True, we only reached this full scan
+        # because require_unused=True forced the bypass above (the sidecar
+        # itself was fine) -- so there is nothing stale to repair, and
+        # rebuilding the whole index here on every call is exactly the
+        # perf defect this fix removes: a lane appending N governed
+        # records under one envelope no longer rewrites
+        # execution_gate_index.json N times (see
+        # test_require_unused_success_does_not_rewrite_index).
+        _rebuild_gate_index_from_records(roots, records)
     return result
 
 

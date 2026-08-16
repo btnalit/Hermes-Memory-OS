@@ -617,6 +617,7 @@ def _build_prefetch_sections(
     events_cache = list(store.read_events())
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id, seen=seen, events=events_cache))
     _append_section(sections, "Last Session", _last_session_lines(store, session_id=session_id, seen=seen))
+    cross_session_ids: list[str] = []
     _append_section(
         sections,
         "Recent Cross-Session",
@@ -627,8 +628,11 @@ def _build_prefetch_sections(
             seen=seen,
             query=query,
             events=events_cache,
+            source_ids=cross_session_ids,
         ),
     )
+    if cross_session_ids:
+        section_source_ids["Recent Cross-Session"] = cross_session_ids
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     # Attribution (item 16a): every section class the disclosure audit treats as
     # attributable must record the canonical records it drew from, or the
@@ -727,6 +731,9 @@ def _build_prefetch_sections(
                 facade_text = facade.format_context(results, budget=800)
                 if facade_text.strip():
                     sections.append(("Recall Facade (unified)", [facade_text]))
+                    facade_ids = _recall_facade_source_ids(results)
+                    if facade_ids:
+                        section_source_ids["Recall Facade (unified)"] = facade_ids
         except Exception as exc:
             # fail-open: facade failure must not block prefetch,
             # but record bounded error for monitor visibility
@@ -743,6 +750,73 @@ def _build_prefetch_sections(
     return sections, section_source_ids
 
 
+def _recall_facade_source_ids(results: Any) -> list[str]:
+    """Per-record attribution for the Recall Facade section.
+
+    ``results`` is ``dict[str, list[RecallObject]]`` (recall_type -> objects),
+    the same shape ``facade.format_context`` renders from. Defensive against
+    non-RecallObject values on purpose: the caller is a stub-friendly facade
+    contract (see the ApplyCanaryFacade test doubles), so a malformed/partial
+    result must degrade to an empty id list rather than raise -- the
+    surrounding try/except already treats any raise here as a facade failure
+    that drops the whole section, which would be worse than merely missing
+    attribution.
+    """
+    ids: list[str] = []
+    if not isinstance(results, dict):
+        return ids
+    for objects in results.values():
+        if not isinstance(objects, list):
+            continue
+        for obj in objects:
+            ids.extend(_recall_object_canonical_ids(obj))
+    return ids
+
+
+def _recall_object_canonical_ids(obj: Any) -> list[str]:
+    """Best-effort canonical record id(s) for one facade RecallObject.
+
+    ``RecallObject.source_ref`` is stamped by the owning retriever with a
+    lane-specific prefix (``retrievers/*.py``, e.g. ``"entity_graph:<id>"``,
+    ``"fts5:<id>"``) rather than the underlying record's own canonical type --
+    passing those through verbatim would be "populated but unrecognisable" to
+    any downstream reader keyed on the canonical id vocabulary. Where the
+    retriever's own metadata identifies the underlying record, translate
+    through the same record_type -> canonical prefix table
+    ``_canonical_source_id`` already uses for the "Related Memory"
+    (graph_layer) section, so the two sections emit the same vocabulary for
+    the same underlying records:
+
+    - ``crystallized`` retrieval already stamps a canonical ``source_ref``
+      directly ("crystallized:<id>").
+    - ``entity_graph`` always resolves within ``crystallized_root``
+      (retrievers/entity_graph.py), so its ``related_record_id`` is a
+      crystallized record id.
+    - ``indexed_fts`` carries the FTS row's own ``record_type``/``record_id``
+      in metadata, already one of the canonical record types.
+
+    Lanes with no 1:1 canonical record at this layer -- state_overlay's
+    aggregate projection, temporal's synthetic markers ("temporal:current_
+    task" etc. name no JSONL record at all) -- are left unattributed here
+    rather than fabricated; a facade result drawn only from those lanes is a
+    genuine attribution gap, not a bug in this function.
+    """
+    recall_type = str(getattr(obj, "recall_type", "") or "")
+    metadata = getattr(obj, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if recall_type == "crystallized":
+        ref = str(getattr(obj, "source_ref", "") or "").strip()
+        return [ref] if ref else []
+    if recall_type == "entity_graph":
+        rid = str(metadata.get("related_record_id") or "").strip()
+        return [_canonical_source_id("crystallized_record", rid)] if rid else []
+    if recall_type == "indexed_fts":
+        record_id = str(metadata.get("record_id") or "").strip()
+        kind = str(metadata.get("kind") or "").strip()
+        return [_canonical_source_id(kind, record_id)] if record_id and kind else []
+    return []
+
+
 # Module-level so the attribution contract can be validated against it: the
 # vocabulary a checker gates on must be provable against what the producer
 # actually emits. Keeping this inside the function is what allowed the audit
@@ -755,6 +829,10 @@ SECTION_SOURCE_CLASS_BY_TITLE: dict[str, str] = {
     "Memory State Overlay": "state_overlay",
     "Continuity Bridge": "bridge",
     "Last Session": "last_session",
+    # Same class as "Recent Event Summaries": this section injects
+    # event-derived content (source-gate-passed events from other sessions),
+    # just filtered/windowed differently.
+    "Recent Cross-Session": "event",
     "Conversation Carryover": "carryover",
     "Working Memory": "working",
     "Relationship Memory": "relationship",
@@ -765,6 +843,12 @@ SECTION_SOURCE_CLASS_BY_TITLE: dict[str, str] = {
     "Recent Event Summaries": "event",
     "Related Memory": "graph_layer",
     "Diagnostic Grounding": "diagnostic",
+    # Composite across retriever lanes (crystallized/working/indexed/entity-graph/
+    # etc.), NOT a single producer's vocabulary -- distinct from every class
+    # above for the same reason "graph_layer" is distinct from "crystallized":
+    # each RecallObject already carries its own canonical source_ref (see
+    # retrievers/*.py), so per-record attribution is a direct field read.
+    "Recall Facade": "recall_facade",
 }
 
 # Returned for any title absent from the mapping above.
@@ -955,8 +1039,24 @@ def _last_continuity_freshness_signature(path: Path) -> str | None:
     try:
         from .continuity import continuity_freshness_signature
         # Tail-capped: this file is bounded by transitions, but a pre-existing
-        # long file must not turn a per-turn read into an unbounded one.
-        lines = path.read_text(encoding="utf-8").splitlines()[-20:]
+        # long file must not turn a per-turn read into an unbounded one. Seek
+        # to a bounded window from the end of the file so the READ itself
+        # (not just the line count kept after parsing) stays fixed-size
+        # regardless of total file length.
+        _TAIL_WINDOW_BYTES = 16384
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            start = max(0, size - _TAIL_WINDOW_BYTES)
+            fh.seek(start)
+            chunk = fh.read()
+        text = chunk.decode("utf-8", errors="ignore")
+        lines = text.splitlines()
+        if start > 0 and lines:
+            # The window may begin mid-line (or mid-codepoint); the leading
+            # fragment is neither a complete line nor reliably decodable.
+            lines = lines[1:]
+        lines = lines[-20:]
         for line in reversed(lines):
             if not line.strip():
                 continue
@@ -1765,6 +1865,17 @@ def _crystallized_lines(
                 if expires_str:
                     try:
                         expires_dt = datetime.fromisoformat(expires_str)
+                        # Naive (no-offset) expires_str parses without error
+                        # but raises TypeError on the aware subtraction below
+                        # -- normalize before subtracting, same as
+                        # knob_overrides._is_expired. Without this, a naive
+                        # value both under-counts days_remaining (silently
+                        # wrong owner-facing countdown) AND leaves expires_dt
+                        # naive in provisional_entries, crashing the sort at
+                        # `provisional_entries.sort(key=lambda e: e[0])` below
+                        # when compared against aware sentinel/parsed values.
+                        if expires_dt.tzinfo is None:
+                            expires_dt = expires_dt.replace(tzinfo=timezone.utc)
                         sec = (expires_dt - now).total_seconds()
                         days_remaining = max(0, int(sec / 86400))
                     except (ValueError, TypeError):
@@ -1928,8 +2039,22 @@ def _candidate_lines(
     # Same-lane publication also bounds the correction latency: an owner reject
     # stops surfacing within one candidate_aggregation cycle (<=6h).
     excluded_ids = read_candidate_recall_exclusions(store.roots)
+    # Dedup to the latest row per candidate_id -- same pattern as
+    # crystallized.read_effective_candidates: a candidate can have multiple
+    # queue rows (re-triage, updates), and without this a single candidate
+    # is scored and emitted once per row instead of once overall.
+    # excluded_ids filters terminal candidates only; it does not dedup.
+    raw_candidates = read_candidate_queue(store.roots)
+    latest_candidates_reversed: list[Any] = []
+    seen_candidate_ids: set[str] = set()
+    for candidate in reversed(raw_candidates):
+        if candidate.candidate_id in seen_candidate_ids:
+            continue
+        seen_candidate_ids.add(candidate.candidate_id)
+        latest_candidates_reversed.append(candidate)
+    latest_candidates = list(reversed(latest_candidates_reversed))
     scored: list[tuple[int, Any]] = []
-    for candidate in read_candidate_queue(store.roots):
+    for candidate in latest_candidates:
         if candidate.candidate_id in excluded_ids:
             continue
         if magic_word_match:
@@ -2749,6 +2874,12 @@ def _last_session_lines(
             continue
         try:
             ended_at = datetime.fromisoformat(str(record.get("ended_at", "")))
+            # Naive (no-offset) timestamps parse without error but raise
+            # TypeError on the aware comparison/subtraction below -- not a
+            # ValueError, so a bare `except ValueError` would not catch it.
+            # Normalize before comparing, same as knob_overrides._is_expired.
+            if ended_at.tzinfo is None:
+                ended_at = ended_at.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             continue
         if best is None or ended_at > best[0]:
@@ -2779,6 +2910,7 @@ def _recent_cross_session_lines(
     seen: set[tuple[str, str]] | None = None,
     query: str = "",
     events: list[Any] | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[str]:
     """Source-gate-passed events from recent sessions (not current).
 
@@ -2793,6 +2925,11 @@ def _recent_cross_session_lines(
 
     Each line carries a "[跨会话·待结晶]" marker so the agent knows this
     is not yet owner-confirmed memory.
+
+    ``source_ids`` is an optional out-parameter (same idiom as ``seen`` and
+    ``_working_lines``' own ``source_ids``): when provided it is filled with
+    the canonical ``event:<event_id>`` reference for every emitted line, so
+    the disclosure record can name what it drew from.
     """
     if not session_id:
         return []
@@ -2866,7 +3003,7 @@ def _recent_cross_session_lines(
     # Read events, filter to cross-session + source-gate-passed + recent
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=age_hours)
-    collected: list[tuple[datetime, str]] = []
+    collected: list[tuple[datetime, str, str]] = []
 
     for event in (events if events is not None else store.read_events()):
         eid = str(event.id).strip()
@@ -2880,6 +3017,11 @@ def _recent_cross_session_lines(
             continue
         try:
             ts = datetime.fromisoformat(str(event.ts))
+            # Naive (no-offset) event.ts parses without error but raises
+            # TypeError on the aware `cutoff` comparison below -- normalize
+            # before comparing, same as knob_overrides._is_expired.
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             continue
         if ts < cutoff:
@@ -2889,7 +3031,7 @@ def _recent_cross_session_lines(
             continue
         if seen is not None and eid:
             seen.add(("event", eid))
-        collected.append((ts, summary))
+        collected.append((ts, summary, eid))
 
     if not collected:
         return []
@@ -2904,21 +3046,23 @@ def _recent_cross_session_lines(
     if query and len(collected) > 1:
         query_tokens = _extract_query_tokens(query)
         if query_tokens:
-            scored: list[tuple[int, datetime, str]] = []
-            for ts, summary in collected:
+            scored: list[tuple[int, datetime, str, str]] = []
+            for ts, summary, eid in collected:
                 summary_lower = summary.lower()
                 score = sum(1 for token in query_tokens if token in summary_lower)
-                scored.append((score, ts, summary))
+                scored.append((score, ts, summary, eid))
             # Stable sort: higher score first, then newer first within same score
             scored.sort(key=lambda x: (-x[0], x[1]), reverse=False)
-            collected = [(ts, s) for _, ts, s in scored]
+            collected = [(ts, s, e) for _, ts, s, e in scored]
 
     lines: list[str] = []
-    for ts, summary in collected[:limit]:
+    for ts, summary, eid in collected[:limit]:
         age_h = max(1, int((now - ts).total_seconds() / 3600))
         lines.append(
             f"- [跨会话·待结晶·{age_h}h前] {_redact(summary)}"
         )
+        if source_ids is not None and eid:
+            source_ids.append(f"event:{eid}")
 
     lines.insert(0, "— 近期跨会话 (source gate 通过, 待 owner 结晶) —")
     return lines
@@ -3021,9 +3165,21 @@ def _deep_reflection_card_is_safe(card: dict[str, Any]) -> bool:
     expires_at = str(card.get("expires_at", ""))
     if expires_at:
         try:
-            if datetime.fromisoformat(expires_at) <= datetime.now(timezone.utc):
+            expires_dt = datetime.fromisoformat(expires_at)
+            # A timezone-naive value (e.g. "2026-12-31") parses without error
+            # but raises TypeError when compared against the aware `now`
+            # below -- not a ValueError, so the bare `except ValueError` did
+            # not catch it and the per-turn prefetch path crashed on an
+            # otherwise-valid naive timestamp. Same normalization as
+            # knob_overrides._is_expired: treat a naive value as UTC rather
+            # than raising. Genuinely unparseable input keeps this
+            # function's existing intent unchanged -- treated as expired
+            # (return False), not as fail-open like knob_overrides.
+            if expires_dt.tzinfo is None:
+                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            if expires_dt <= datetime.now(timezone.utc):
                 return False
-        except ValueError:
+        except (ValueError, TypeError):
             return False
     return True
 
@@ -3630,6 +3786,8 @@ def _budget_keep_priority(title: str) -> int:
         "Working Memory": 40,
         "Relationship Memory": 45,
         "Crystallized Review Candidates": 50,
+        "Recent Cross-Session": 55,  # between Candidates(50) and Crystallized(60): source-gate-passed but owner-unreviewed, fresher signal than the general review queue
+        "Recall Facade": 58,  # between Recent Cross-Session(55) and Crystallized(60): per-record attributable via source_ref, but still an apply_canary rollout so it must not yet outrank the established single-purpose sections it can duplicate
         "Crystallized Memory": 60,
         "Related Memory": 65,
         "Recent Event Summaries": 80,

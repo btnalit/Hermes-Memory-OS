@@ -27,6 +27,7 @@ Runs as a cognitive-loop step.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,17 @@ def _load_state(path) -> dict[str, Any]:
     return {}
 
 
+def _line_fingerprint(line: str) -> str:
+    """Content fingerprint for the last-consumed shadow-ledger line.
+
+    Used to detect cursor misalignment (e.g. a future compaction that
+    trims/rewrites the head of ``graph_layer_shadow.jsonl``) even in the
+    edge case where the post-compaction line count happens to still be
+    >= the old cursor — a bare line-count comparison alone would miss that.
+    """
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+
+
 def run_edge_weight_feedback(
     index_path: str,
     *,
@@ -77,6 +89,7 @@ def run_edge_weight_feedback(
     state_path = roots.memory_os_root / "system" / STATE_FILENAME
     state = _load_state(state_path)
     processed = int(state.get("processed_line_count") or 0)
+    expected_fingerprint = state.get("processed_line_fingerprint")
     last_hit: dict[str, str] = dict(state.get("edge_last_hit") or {})
     first_run_at = str(state.get("first_run_at") or "") or current.isoformat()
     # v0→v1 state 迁移:v0 只有 first_run_at(闭环首跑)。生产的 shadow 自
@@ -104,7 +117,52 @@ def run_edge_weight_feedback(
         except OSError:
             lines = []
 
-    new_lines = lines[processed:] if len(lines) > processed else []
+    # ── Cursor alignment check ──────────────────────────────────────────
+    # `processed` is a LINE-COUNT cursor into a ledger the write side
+    # (prefetch._record_graph_layer_shadow) appends to without bound and
+    # metadata_retention.py registers for future compaction planning (that
+    # planner is dry-run only today — nothing removes rows yet — but the
+    # cursor must not silently assume it never will). If the ledger is ever
+    # compacted (head rows removed/renumbered), a bare `lines[processed:]`
+    # either replays already-reinforced rows (non-idempotent: HIT_LEARNING_RATE
+    # over-reinforces on replay) or — the branch already guarded by
+    # `len(lines) > processed` — silently drops the entire unconsumed
+    # backlog and rewrites the cursor as if it had been consumed. Detect
+    # misalignment via (a) the ledger having fewer lines than the old
+    # cursor expected, or (b) the content at the old cursor position no
+    # longer matching what was last consumed (guards a same-or-larger
+    # line count after a compaction+append that coincidentally lands on
+    # the old cursor value). A missing/empty stored fingerprint (state
+    # written before this fix, or processed == 0) never triggers (b) —
+    # only (a) can fire against pre-fix state.
+    cursor_misaligned = False
+    cursor_misalignment_reason: str | None = None
+    cursor_previous_line_count = processed
+    if processed > 0:
+        if len(lines) < processed:
+            cursor_misaligned = True
+            cursor_misalignment_reason = "ledger_shorter_than_cursor"
+        elif expected_fingerprint and _line_fingerprint(lines[processed - 1]) != expected_fingerprint:
+            cursor_misaligned = True
+            cursor_misalignment_reason = "ledger_fingerprint_mismatch"
+
+    if cursor_misaligned:
+        # Do NOT reprocess from zero (non-idempotent reinforcement would
+        # over-weight already-seen edges) and do NOT trust `lines[processed:]`
+        # (those indices no longer mean what they used to). Realign the
+        # cursor to the current file and process nothing this run; the gap
+        # is reported below instead of silently disappearing into a clean
+        # "no_new_hits" outcome. `last_hit` / `first_injection_at` are left
+        # untouched — they are independent of the shadow-ledger cursor.
+        new_lines: list[str] = []
+        # Best-effort, count-based lower bound on how many previously-tracked
+        # ledger positions vanished out from under the cursor. It is a bound,
+        # not a claim about how many real injection hits were lost — some or
+        # all of that gap may have already been reinforced in a prior run.
+        cursor_skipped_row_count = max(0, processed - len(lines))
+    else:
+        new_lines = lines[processed:] if len(lines) > processed else []
+        cursor_skipped_row_count = 0
 
     try:
         conn = sqlite3.connect(index_path)
@@ -228,9 +286,22 @@ def run_edge_weight_feedback(
         "first_run_at": first_run_at,
         "first_injection_at": first_injection_at,
         "processed_line_count": len(lines),
+        "processed_line_fingerprint": _line_fingerprint(lines[-1]) if lines else None,
         "edge_last_hit": last_hit,
         "updated_at": current.isoformat(),
     }
+    if cursor_misaligned:
+        state_out["last_cursor_misalignment"] = {
+            "detected_at": current.isoformat(),
+            "reason": cursor_misalignment_reason,
+            "previous_line_count": cursor_previous_line_count,
+            "realigned_line_count": len(lines),
+            "skipped_row_count": cursor_skipped_row_count,
+        }
+    elif "last_cursor_misalignment" in state:
+        # Preserve the most recent misalignment record across aligned runs
+        # so it stays visible until the next misalignment overwrites it.
+        state_out["last_cursor_misalignment"] = state["last_cursor_misalignment"]
     try:
         _atomic_write_json(state_path, state_out)
     except Exception:
@@ -238,6 +309,10 @@ def run_edge_weight_feedback(
 
     if reinforced or forgotten or already_saturated:
         outcome = "reinforced"
+    elif cursor_misaligned:
+        # Distinct from "no_new_hits": we did NOT verify there was nothing
+        # new — the cursor could no longer be trusted, so nothing was read.
+        outcome = "cursor_misaligned"
     elif not shadow_exists:
         outcome = "no_shadow_ledger"
     elif not first_injection_at:
@@ -259,6 +334,15 @@ def run_edge_weight_feedback(
         "unresolved_hit_count": unresolved_hits,
         "failed_count": failed,
         "tracked_edge_count": len(last_hit),
+        # Cursor-alignment fields are unconditional (0/None when aligned) so
+        # monitors get a stable schema; they can be non-zero even when
+        # `outcome == "reinforced"` (forgetting still runs on a misaligned
+        # run — only the shadow-hit reinforcement stream is affected).
+        "cursor_misaligned": cursor_misaligned,
+        "cursor_misalignment_reason": cursor_misalignment_reason,
+        "cursor_previous_line_count": cursor_previous_line_count,
+        "cursor_realigned_line_count": len(lines),
+        "cursor_skipped_row_count": cursor_skipped_row_count,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
     }

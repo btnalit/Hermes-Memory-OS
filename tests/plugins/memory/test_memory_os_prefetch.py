@@ -9,7 +9,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _budget_keep_priority, _build_prefetch_sections, _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _budget_keep_priority, _build_prefetch_sections, _continuity_bridge_lines, _crystallized_lines, _deep_reflection_card_is_safe, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -811,6 +811,89 @@ def test_prefetch_ignores_deep_reflection_when_disabled_or_unsafe(tmp_path):
 
     assert "Conversation Carryover" not in context
     assert "hidden analysis" not in context
+
+
+def test_deep_reflection_card_naive_future_expiry_does_not_raise():
+    """Rule-5 sweep: datetime.fromisoformat("2026-12-31") is timezone-naive;
+    comparing it against datetime.now(timezone.utc) raises TypeError, which
+    the bare `except ValueError` does not catch, so it used to escape this
+    function on the per-turn prefetch path. A naive-but-unexpired timestamp
+    must not raise, and the card must still be treated as safe (matches the
+    aware-timestamp behavior for a future expiry).
+
+    Counterfactual: reverting to `except ValueError` alone (or dropping the
+    naive -> aware normalization) makes this raise TypeError instead of
+    returning True.
+    """
+    card = {
+        "text": "naive-expiry card should survive without raising",
+        "source_refs": ["event:evt_naive"],
+        "expires_at": "2099-01-01",
+    }
+    assert _deep_reflection_card_is_safe(card) is True
+
+
+def test_deep_reflection_card_naive_past_expiry_is_treated_as_expired():
+    """Same naive-parsing hazard, past date: before the fix this also raised
+    TypeError (the comparison itself raises regardless of which side is
+    larger); after the fix it must return False (card excluded), preserving
+    this call site's existing intent that unparseable/expired input is
+    treated as unsafe -- unlike knob_overrides._is_expired's fail-open
+    contract, this function fails closed by design.
+    """
+    card = {
+        "text": "naive-expiry card in the past",
+        "source_refs": ["event:evt_naive_past"],
+        "expires_at": "2000-01-01",
+    }
+    assert _deep_reflection_card_is_safe(card) is False
+
+
+def test_prefetch_deep_reflection_naive_future_expiry_does_not_crash_the_turn(tmp_path):
+    """End-to-end version of the two unit tests above, through the real
+    per-turn path (build_prefetch -> _deep_reflection_lines ->
+    _deep_reflection_card_is_safe), which is where the TypeError actually
+    surfaced -- unhandled, since _deep_reflection_lines does not wrap the
+    per-card safety check in its own try/except.
+    """
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=84, profile="memoryos-test"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Owner tested naive expiry handling end to end.",
+        }
+    )
+    store.append_event(event)
+    module_root = tmp_path / "system-modules" / "deep_reflection"
+    module_root.mkdir(parents=True)
+    (module_root / "config.json").write_text(
+        '{"injection_mode": "auto_bounded"}\n', encoding="utf-8",
+    )
+    (module_root / "injection").mkdir()
+    (module_root / "injection" / "current.json").write_text(
+        (
+            "{\n"
+            '  "schema_version": "hermes.deep_reflection.injection.v0",\n'
+            '  "selected_cards": [\n'
+            "    {\n"
+            f'      "source_refs": ["event:{event.id}"],\n'
+            '      "text": "Naive-expiry card content should remain visible without an error.",\n'
+            '      "expires_at": "2099-01-01",\n'
+            '      "instruction_like_hit": false,\n'
+            '      "mechanism_terms_hit": false\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    context = build_prefetch("继续刚才的聊天", budget_chars=2200, store=store, index=None)
+
+    assert "### Conversation Carryover" in context
+    assert "Naive-expiry card content should remain visible without an error" in context
 
 
 def test_provider_status_distinguishes_candidates_from_approved_crystallized_records(tmp_path):
@@ -3591,3 +3674,180 @@ def test_rrf_union_returns_membership_set_capped_at_top_n():
     assert isinstance(result, set)
     assert len(result) == 3
     assert "b" in result  # appears in both lists → highest fused score
+
+
+# ── Attribution hole: Recent Cross-Session had no source_ids parameter ─────
+
+
+def test_recent_cross_session_populates_source_ids(tmp_path):
+    """source_ids out-param must carry event:<id> refs for the disclosure audit.
+
+    Counterfactual: before this fix, _recent_cross_session_lines had no
+    source_ids parameter at all -- calling with source_ids= raises TypeError,
+    which is exactly why its disclosure row could carry no source IDs even in
+    principle (the other half of attribution item 16a for this section).
+    """
+    store = _store(tmp_path)
+    session_id = "sess_ids_current"
+    other_session_id = "sess_ids_other"
+    event_id = "evt_ids_001"
+
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        json.dumps({
+            "candidate_id": "cand_ids_001",
+            "kind": "moment",
+            "body": "test",
+            "source_event_ids": [event_id],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        profile="test",
+        source="test",
+        kind="conversation_turn",
+        summary="cross session content for source id test",
+        safe_ref={"session_id": other_session_id},
+        tags=[],
+    )
+    store.append_event(event)
+
+    source_ids: list[str] = []
+    lines = _recent_cross_session_lines(
+        store,
+        session_id=session_id,
+        source_ids=source_ids,
+    )
+    assert lines, "expected the event to surface"
+    assert source_ids == [f"event:{event_id}"]
+
+
+def test_recent_cross_session_budget_priority_is_explicit_and_ordered(tmp_path):
+    """Recent Cross-Session must not silently fall through to the shared
+    default (50) and tie with Crystallized Review Candidates under budget
+    pressure -- it needs its own, deliberately chosen rank.
+
+    Counterfactual: before this fix, _budget_keep_priority("Recent
+    Cross-Session") returned the bare default of 50, which EQUALS
+    "Crystallized Review Candidates" -- the strict ordering chain below
+    fails on that tie (50 < 50 is False).
+    """
+    assert _budget_keep_priority("Recent Cross-Session") == 55
+    assert (
+        _budget_keep_priority("Crystallized Review Candidates")
+        < _budget_keep_priority("Recent Cross-Session")
+        < _budget_keep_priority("Crystallized Memory")
+    )
+
+
+def test_candidate_lines_dedups_duplicate_queue_rows_to_latest(tmp_path):
+    """A candidate_id with multiple raw queue rows (re-triage/update) must be
+    scored and emitted at most once, using the latest row's content.
+
+    append_candidate_queue itself dedups at write time, so a duplicate row
+    is constructed directly (mirrors how a hand-edited or legacy-imported
+    queue can carry more than one row for the same candidate_id).
+
+    Counterfactual: without the latest-row-per-candidate_id dedup, both rows
+    survive the excluded_ids filter (which only removes terminal candidates,
+    not duplicates) and both get emitted -- two lines for one candidate_id.
+    """
+    from plugins.memory.memory_os.prefetch import _candidate_lines
+
+    store = _store(tmp_path)
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "candidate_id": "cand_dup_test",
+            "kind": "moment",
+            "body": "OLD_BODY_MARKER_1 stale candidate content",
+            "source_event_ids": ["evt_dup_1"],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        },
+        {
+            "candidate_id": "cand_dup_test",
+            "kind": "moment",
+            "body": "NEW_BODY_MARKER_2 latest candidate content",
+            "source_event_ids": ["evt_dup_1"],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        },
+    ]
+    candidates_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    lines = _candidate_lines(store, query="candidate 候选", seen=set(), source_ids=[])
+
+    matches = [line for line in lines if "cand_dup_test" in line]
+    assert len(matches) == 1, (
+        f"expected exactly one line for a duplicated candidate_id, got: {matches}"
+    )
+    assert "NEW_BODY_MARKER_2" in matches[0]
+    assert "OLD_BODY_MARKER_1" not in matches[0]
+
+
+def test_last_continuity_freshness_signature_read_is_bounded(tmp_path, monkeypatch):
+    """The tail read must be bounded at the I/O layer, not just at the
+    line-count-kept-after-parsing layer.
+
+    Counterfactual: the pre-fix implementation called Path.read_text() to
+    pull in the WHOLE file before slicing [-20:]. This test forbids
+    Path.read_text on the target file; the pre-fix code path would hit the
+    forbidden call, get caught by the function's fail-open `except Exception:
+    return None`, and this assertion (expecting the real signature) would
+    fail.
+    """
+    from pathlib import Path
+
+    from plugins.memory.memory_os.continuity import continuity_freshness_signature
+    from plugins.memory.memory_os.prefetch import _last_continuity_freshness_signature
+
+    path = tmp_path / "continuity_freshness.jsonl"
+    filler_record = {
+        "session_id": "filler",
+        "current_task_object_id": "filler-task",
+        "current_task_revision": 0,
+        "current_task_grade": "unknown",
+        "unknown_grade_count": 0,
+    }
+    real_record = {
+        "session_id": "s-real",
+        "current_task_object_id": "task-9",
+        "current_task_revision": 3,
+        "current_task_grade": "fresh",
+        "unknown_grade_count": 0,
+    }
+    filler_line = json.dumps(filler_record, ensure_ascii=False)
+    with path.open("w", encoding="utf-8") as fh:
+        for _ in range(20_000):  # ~2MB: far bigger than any bounded tail window
+            fh.write(filler_line + "\n")
+        fh.write(json.dumps(real_record, ensure_ascii=False) + "\n")
+
+    original_read_text = Path.read_text
+
+    def _forbid_read_text(self, *args, **kwargs):
+        if self == path:
+            raise AssertionError(
+                "read_text must not be called on the ledger -- the tail read "
+                "must be bounded at the I/O layer, not whole-file"
+            )
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _forbid_read_text)
+
+    result = _last_continuity_freshness_signature(path)
+    assert result == continuity_freshness_signature(real_record)

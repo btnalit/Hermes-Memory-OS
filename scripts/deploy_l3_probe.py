@@ -118,7 +118,7 @@ def run_plan(hermes_home: Path) -> dict[str, Any]:
     helper_current = (
         helper_installed
         and SOURCE_HELPER.is_file()
-        and DEPLOY_HELPER.read_text() == SOURCE_HELPER.read_text()
+        and DEPLOY_HELPER.read_text(encoding="utf-8") == SOURCE_HELPER.read_text(encoding="utf-8")
     ) if SOURCE_HELPER.is_file() else helper_installed
     report["helper_installed"] = helper_installed
     report["helper_current"] = helper_current

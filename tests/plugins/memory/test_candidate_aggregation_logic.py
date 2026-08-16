@@ -840,6 +840,129 @@ class TestA1Boundary:
             "error_type": "OSError",
         }
 
+    # ── Defect A: read_effective_candidates failure must not widen the
+    # pre-existing "any upstream error -> skip compaction" policy that the
+    # two feeders below (read_candidate_queue, _cluster_and_promote) rely
+    # on. These two tests pin that the policy is UNCHANGED for those
+    # feeders; the counterpart (a read_effective_candidates failure alone
+    # must still let compaction run with terminal_candidate_ids=None) lives
+    # in test_candidate_aggregation_pipeline.py, next to the fixtures
+    # (_stale_owner_eligible_candidate / _crystallize_candidate) needed to
+    # prove which terminal view actually reached compact_candidate_queue.
+
+    def test_queue_parse_error_still_skips_compaction(self, tmp_path):
+        """Counterfactual for Defect A's narrow scope: a malformed
+        candidates.jsonl row (read_candidate_queue's error_records feed at
+        run_candidate_aggregation_lane's line ~401) must still disable
+        compaction entirely. This policy predates the Defect A fix and must
+        stay unchanged -- without pinning it, a future refactor could widen
+        the read_effective_candidates exemption to cover this feeder too.
+
+        Extra teeth: compact_candidate_queue re-reads candidates.jsonl under
+        its own lock and does a raw json.loads per line with no try/except,
+        and run_candidate_aggregation_lane has no try around the compact
+        call. If this feeder's skip-compaction exemption were silently
+        widened, running compact against the still-malformed queue would not
+        just archive the wrong rows -- it would crash the lane unhandled on
+        the corrupted line.
+        """
+        from plugins.memory.memory_os.crystallized import (
+            append_candidate_queue,
+            append_candidate_triage,
+            read_candidate_queue,
+        )
+        from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
+
+        store = _store_with_gate(tmp_path)
+        archivable = _cand("cand-archivable-demoted", body="记住：这是一条已裁决的候选")
+        append_candidate_queue(store, archivable)
+        append_candidate_triage(
+            store,
+            candidate_id=archivable.candidate_id,
+            action="demote",
+            target_state="demoted",
+            reason="pre-seeded terminal fixture",
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+        queue_path = store.roots.crystallized_root / "candidates.jsonl"
+        with queue_path.open("a", encoding="utf-8") as handle:
+            handle.write("{BROKEN\n")
+
+        result = run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        assert result["status"] == "warning"
+        assert "jsonl_malformed_line" in result["recent_error_codes"]
+        assert result["compacted_count"] == 0, (
+            "line-401 (read_candidate_queue) error must still disable "
+            f"compaction entirely, got {result}"
+        )
+        live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+        assert "cand-archivable-demoted" in live_ids, (
+            "demoted row was archived despite an upstream queue-parse error "
+            "-- the pre-existing skip-compaction policy for this feeder was "
+            "silently widened"
+        )
+
+    def test_promote_stage_error_still_skips_compaction(self, tmp_path, monkeypatch):
+        """Counterfactual for Defect A's narrow scope: a promote-stage
+        failure recorded by _cluster_and_promote (provisional_write_failed,
+        run_candidate_aggregation_lane's line ~454 feeder) must still
+        disable compaction entirely -- unchanged pre-existing policy, pinned
+        the same way as test_queue_parse_error_still_skips_compaction for
+        the other feeder."""
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedMemoryService,
+            append_candidate_queue,
+            append_candidate_triage,
+            read_candidate_queue,
+        )
+        from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
+
+        store = _store_with_gate(tmp_path)
+        append_candidate_queue(
+            store,
+            _cand("cand-promote-fails-2", body="记住：每次启动必须检查失败回执二号"),
+        )
+        archivable = _cand("cand-archivable-demoted-2", body="记住：这是另一条已裁决的候选")
+        append_candidate_queue(store, archivable)
+        append_candidate_triage(
+            store,
+            candidate_id=archivable.candidate_id,
+            action="demote",
+            target_state="demoted",
+            reason="pre-seeded terminal fixture",
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        def fail_write(*args, **kwargs):
+            raise OSError("synthetic canonical write failure")
+
+        monkeypatch.setattr(CrystallizedMemoryService, "write_approved_record", fail_write)
+
+        result = run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        assert result["status"] == "warning"
+        assert any(
+            record.get("error_code") == "provisional_write_failed"
+            for record in result["error_records"]
+        )
+        assert result["compacted_count"] == 0, (
+            "line-454 (_cluster_and_promote) error must still disable "
+            f"compaction entirely, got {result}"
+        )
+        live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+        assert "cand-archivable-demoted-2" in live_ids, (
+            "demoted row was archived despite a promote-stage write failure "
+            "-- the pre-existing skip-compaction policy for this feeder was "
+            "silently widened"
+        )
+
     def test_promote_writes_triage_not_crystallized(self, tmp_path):
         """Non-resolver-eligible candidates still write triage not crystallized.
 

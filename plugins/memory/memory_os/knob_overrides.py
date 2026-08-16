@@ -672,6 +672,21 @@ def register_override(
             f"Knob '{name}' is meta=True — self-tuning of governance knobs is blocked"
         )
 
+    # expires_at: "" is the documented "no expiry" sentinel and stays valid.
+    # Anything else must be a parseable ISO-8601 timestamp -- reject a
+    # malformed value at this write boundary rather than letting it reach
+    # the store, where _is_expired's fail-open contract would silently
+    # treat it as never-expiring. Naive (no-offset) timestamps DO parse
+    # here and are accepted -- _is_expired treats them as UTC.
+    if expires_at:
+        try:
+            datetime.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise ValueError(
+                f"expires_at {expires_at!r} for knob '{name}' is not a valid "
+                f"ISO-8601 timestamp"
+            ) from exc
+
     # Allowed-list knobs: validate against allowed list
     allowed = spec.get("allowed")
     if allowed is not None:
@@ -907,11 +922,28 @@ def _is_provisional_state(record: dict[str, Any]) -> bool:
 
 
 def _is_expired(expires_str: str, now: datetime) -> bool:
-    """Check if an ISO-format expiry string is in the past."""
+    """Check if an ISO-format expiry string is in the past.
+
+    ``now`` is always timezone-aware (``datetime.now(timezone.utc)`` or an
+    aware ``_now`` override). A timezone-*naive* ``expires_str`` (e.g.
+    ``"2026-12-31"`` or ``"2026-12-31T00:00:00"``) parses without error via
+    ``fromisoformat`` but then raises ``TypeError`` on comparison against an
+    aware datetime -- this store's own writers (register_override /
+    revert_override / confirm_override) always stamp aware UTC timestamps,
+    so a naive value only reaches here via a hand-edited record on this
+    owner-facing JSONL surface, or a future caller that doesn't. Treat a
+    naive timestamp as UTC rather than letting the comparison raise. Genuine
+    parse failures keep the original fail-open contract: an override whose
+    expiry cannot be understood at all is treated as not-expired (still
+    active) rather than crashing the hot-path callers (resolve_knob /
+    resolve_knobs / list_active_overrides).
+    """
     try:
         expires_at = datetime.fromisoformat(expires_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
         return expires_at <= now
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 

@@ -466,6 +466,83 @@ def test_runtime_policy_source_caps_prevent_cron_batch_from_dominating(tmp_path)
     assert report["candidate_count"] == 1
 
 
+def test_read_state_preserves_persisted_processed_event_ids_compacted_flag(tmp_path):
+    """反事实:_read_state 之前无条件把 processed_event_ids_compacted 写死
+    False(line 337 旧代码),导致该字段结构性地永远无法报告 True — 任何
+    未来的 compactor 把它设为 True 都会在下一次读取时被抹掉。这里模拟
+    一个 processed_event_ids 仍在(非 reverse-migration 分支)但持久化了
+    compacted=True 的 state 文件,验证 _read_state 如实反映而非硬编码。"""
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    runtime = MemoryOSRuntime(store)
+    state_path = tmp_path / "memory-os" / "runtime" / "heartbeat_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.runtime_state.v0",
+                "processed_event_ids": ["evt_seed_1"],
+                "recent_processed_event_ids": ["evt_seed_1"],
+                "processed_event_count_total": 1,
+                "processed_event_ids_compacted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = runtime._read_state()
+
+    assert state["processed_event_ids_compacted"] is True
+
+
+def test_heartbeat_round_trip_preserves_processed_event_ids_compacted_flag(tmp_path):
+    """反事实(读+写两半合一):_read_state 修好但 heartbeat 写状态时(line
+    216)仍硬编码 False 的话,持久化文件里的 compacted 依旧会被抹回 False。
+    经完整 heartbeat 往返验证两半都修好。"""
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    runtime = MemoryOSRuntime(store)
+    state_path = tmp_path / "memory-os" / "runtime" / "heartbeat_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.runtime_state.v0",
+                "processed_event_ids": ["evt_seed_1"],
+                "recent_processed_event_ids": ["evt_seed_1"],
+                "processed_event_count_total": 1,
+                "processed_event_ids_compacted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime.heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["processed_event_ids_compacted"] is True
+
+
+def test_heartbeat_report_exposes_processed_event_ids_ledger_size(tmp_path):
+    """反事实:heartbeat 报告之前不暴露 processed_event_ids 全量账本的大小
+    (只能手工打开 state 文件才能看到它在无界增长)。修复前该 key 不存在,
+    直接 KeyError。"""
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="main")
+    provider.sync_turn("ledger size marker alpha", "stored alpha", session_id="session-1")
+    provider.sync_turn("ledger size marker beta", "stored beta", session_id="session-1")
+    provider.shutdown()
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+
+    first = MemoryOSRuntime(store).heartbeat()
+    assert first["processed_event_ids_ledger_size"] == 2
+
+    second = MemoryOSRuntime(store).heartbeat()
+    # Idempotent heartbeat processes 0 NEW events but the ledger still holds
+    # the full history, so ledger size must not drop back to 0.
+    assert second["processed_event_ids_ledger_size"] == 2
+
+
 # ── _index_health_counts_findings O(1) tests ──────────────────────────
 
 def test_counts_findings_healthy_when_all_match():

@@ -689,6 +689,150 @@ def test_invalidate_provisional_record_fails_for_nonexistent_record(tmp_path):
         )
 
 
+# ── Defect B: EffectiveCandidate.provisional_backed ─────────────────────
+#
+# read_effective_candidates() marks a candidate terminal as soon as ANY
+# active crystallized record carries its candidate_id -- provisional
+# included. provisional_backed distinguishes "terminal only because of an
+# active provisional anchor" (reversible; candidate_aggregation must NOT
+# archive the queue row) from "an active permanent record backs it too"
+# (archival is correct, unchanged from the 2026-08-14 fix's five
+# production rows). See candidate_aggregation.run_candidate_aggregation_lane
+# for the consumer.
+
+
+def test_read_effective_candidates_marks_provisional_only_record_as_provisional_backed(tmp_path):
+    """A candidate whose ONLY active crystallized record is provisional=True
+    must resolve terminal=True (content already crystallized -- correctly
+    excluded from recall) AND provisional_backed=True (the anchor is
+    reversible -- must not be archived out of the live queue)."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import read_effective_candidates
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-eff-prov-only",
+        kind="fact",
+        body="Provisional-only anchor.",
+        source_event_ids=["evt-eff-1"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+        created_at="2026-07-01T00:00:00Z",
+    )
+    append_candidate_queue(store, candidate)
+
+    service = CrystallizedMemoryService(store)
+    decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-07-01T00:05:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-07-08T00:00:00Z",
+    )
+    _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
+
+    by_id = {item.candidate.candidate_id: item for item in read_effective_candidates(store)}
+    view = by_id["cand-eff-prov-only"]
+    assert view.effective_state == "crystallized"
+    assert view.terminal is True
+    assert view.provisional_backed is True
+
+
+def test_read_effective_candidates_permanent_record_is_not_provisional_backed(tmp_path):
+    """Regression pin: a candidate anchored by an active PERMANENT record
+    must still resolve provisional_backed=False, so candidate_aggregation
+    keeps archiving it exactly as the 2026-08-14 fix intended (five
+    production rows, crystallized long ago, stuck in the live queue) --
+    this field must never widen archival exemption to permanent records."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import read_effective_candidates
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-eff-permanent",
+        kind="fact",
+        body="Permanent anchor.",
+        source_event_ids=["evt-eff-2"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+        created_at="2026-07-01T00:00:00Z",
+    )
+    append_candidate_queue(store, candidate)
+
+    service = CrystallizedMemoryService(store)
+    decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-07-01T00:05:00Z",
+    )
+    _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
+
+    by_id = {item.candidate.candidate_id: item for item in read_effective_candidates(store)}
+    view = by_id["cand-eff-permanent"]
+    assert view.effective_state == "crystallized"
+    assert view.terminal is True
+    assert view.provisional_backed is False
+
+
+def test_read_effective_candidates_permanent_record_wins_when_both_are_active(tmp_path):
+    """Safety direction of the provisional_backed set logic: if a candidate
+    somehow has BOTH an active provisional record and an active permanent
+    record (same candidate_id, different files), the permanent one wins --
+    provisional_backed must be False, so the row stays archivable. The
+    content is already durably crystallized; there is no reversible-only
+    anchor to protect."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import read_effective_candidates
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-eff-mixed",
+        kind="fact",
+        body="Mixed anchors.",
+        source_event_ids=["evt-eff-3"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+        created_at="2026-07-01T00:00:00Z",
+    )
+    append_candidate_queue(store, candidate)
+
+    service = CrystallizedMemoryService(store)
+    provisional_decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-07-01T00:05:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-07-08T00:00:00Z",
+    )
+    _write_approved_record(service, candidate, provisional_decision, file_name="provisional.md")
+    permanent_decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-07-01T00:10:00Z",
+    )
+    _write_approved_record(service, candidate, permanent_decision, file_name="permanent.md")
+
+    by_id = {item.candidate.candidate_id: item for item in read_effective_candidates(store)}
+    view = by_id["cand-eff-mixed"]
+    assert view.terminal is True
+    assert view.provisional_backed is False
+
+
 def test_confirm_provisional_record_removes_provisional_and_expires_at(tmp_path):
     """confirm_provisional_record must set provisional=False, clear expires_at,
     set confirmed_at/confirmed_by, restore canonical_state=active."""

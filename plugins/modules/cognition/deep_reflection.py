@@ -1625,9 +1625,12 @@ def _reject_reason(card: dict[str, Any], *, input_snapshot: dict[str, Any], now:
     if _has_identity_or_delivery_language(str(card.get("text", ""))):
         return "identity_or_delivery_language"
     try:
-        if datetime.fromisoformat(str(card.get("expires_at", ""))) <= now:
+        expires_at = datetime.fromisoformat(str(card.get("expires_at", "")))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
             return "expired"
-    except ValueError:
+    except (ValueError, TypeError):
         return "invalid_expiry"
     if not _source_refs_eligible(source_refs, input_snapshot):
         return "ineligible_source_class"

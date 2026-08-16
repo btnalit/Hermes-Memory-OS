@@ -297,6 +297,89 @@ def test_f2_injection_never_live_blocks_forgetting(tmp_path):
     assert state == "active", "no forgetting while injection has never been live"
 
 
+def test_r4_cursor_misalignment_on_ledger_truncation_does_not_reprocess(tmp_path):
+    """反事实(线计数 cursor 对 compaction-eligible 账本):账本被压缩(截断)
+    到比游标短时,必须检测出错位、落类型化原因码 + skipped 计数,且绝不能
+    从零重放(乘性强化非幂等,重放会对已强化边二次加分)。截断用真实生产者
+    产出的行的子集改写(不是手写 fixture),模拟未来 compaction 只保留尾部
+    (去掉最老的头部行)的形态。"""
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        HIT_LEARNING_RATE,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge1 = _active_edge(index, 20, weight=0.5)
+    edge2 = _active_edge(index, 21, weight=0.5)
+    _record_hit(store, edge1)
+    _record_hit(store, edge2)
+
+    first = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert first["reinforced_count"] == 2
+    assert first["cursor_misaligned"] is False
+    expected = 0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
+    weight1_before, _ = _weight_of(index, edge1["edge_id"])
+    weight2_before, _ = _weight_of(index, edge2["edge_id"])
+    assert weight1_before == pytest.approx(expected)
+    assert weight2_before == pytest.approx(expected)
+
+    # Simulate a future compaction: rewrite the ledger to a real subset of its
+    # own already-produced lines (drop the oldest/head record), not a
+    # hand-written fixture. processed cursor (2) now exceeds len(lines) (1).
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    real_lines = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(real_lines) == 2
+    shadow_path.write_text(real_lines[1] + "\n", encoding="utf-8", newline="\n")
+
+    second = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert second["outcome"] == "cursor_misaligned"
+    assert second["cursor_misaligned"] is True
+    assert second["cursor_misalignment_reason"] == "ledger_shorter_than_cursor"
+    assert second["cursor_previous_line_count"] == 2
+    assert second["cursor_realigned_line_count"] == 1
+    assert second["cursor_skipped_row_count"] == 1
+    assert second["reinforced_count"] == 0, "misaligned run must not reprocess/reinforce anything"
+
+    # Edge weights must be byte-for-byte unchanged by the truncation — no
+    # replay-from-zero double-reinforcement of edge1 or edge2.
+    weight1_after, _ = _weight_of(index, edge1["edge_id"])
+    weight2_after, _ = _weight_of(index, edge2["edge_id"])
+    assert weight1_after == pytest.approx(weight1_before)
+    assert weight2_after == pytest.approx(weight2_before)
+
+
+def test_r4_incremental_hits_after_aligned_run_reinforce_only_new_lines(tmp_path):
+    """正常增量运行不回归:第二轮追加真实新命中后,只强化新增的那一条,
+    第一轮已强化的边权重保持不变(校验 fingerprint 对齐路径本身没有偏移
+    一位的新 bug)。"""
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        HIT_LEARNING_RATE,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge1 = _active_edge(index, 22, weight=0.5)
+    edge2 = _active_edge(index, 23, weight=0.5)
+    _record_hit(store, edge1)
+
+    first = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert first["reinforced_count"] == 1
+    assert first["cursor_misaligned"] is False
+    expected1 = 0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
+    weight1, _ = _weight_of(index, edge1["edge_id"])
+    assert weight1 == pytest.approx(expected1)
+
+    _record_hit(store, edge2)
+    second = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert second["cursor_misaligned"] is False
+    assert second["reinforced_count"] == 1, "only the newly appended hit must be reinforced"
+
+    weight1_again, _ = _weight_of(index, edge1["edge_id"])
+    weight2, _ = _weight_of(index, edge2["edge_id"])
+    assert weight1_again == pytest.approx(expected1), "edge1 must not be re-reinforced on the second run"
+    assert weight2 == pytest.approx(0.5 + HIT_LEARNING_RATE * (1.0 - 0.5))
+
+
 def test_r4_forget_backlog_and_never_hit_counters(tmp_path):
     """遗忘潮可见性:eligible 超出每轮上限时 forget_eligible_backlog 暴露
     积压;从未命中即被遗忘的边计入 invalidated_never_hit_count(饿死信号)。"""

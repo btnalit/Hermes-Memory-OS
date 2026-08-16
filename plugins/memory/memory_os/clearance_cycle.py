@@ -402,7 +402,11 @@ def _judge_against_permanents(
         return ("unknown", [], checked_entity_set, invalidation_mode, "judge_unavailable")
 
     # ── Prepare LLM config ──────────────────────────────────────────────
-    from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
+    from .low_clue_recall import (
+        _call_hermes_runtime_model,
+        _extract_json_object,
+        _resolve_hermes_default_runtime,
+    )
 
     _DEFAULT_LLM_CONFIG: dict[str, Any] = {
         "enabled": True,
@@ -474,28 +478,36 @@ def _judge_against_permanents(
         if not response or not response.strip():
             continue
 
-        # Parse LLM response (robust JSON extraction)
+        # Parse LLM response (robust JSON extraction). Converge on the
+        # project's canonical parser (_extract_json_object) for contract
+        # consistency with fact_judge.py / session_fact_extraction.py — see
+        # CLAUDE.md "LLM Integration - Reuse, Never Rebuild". A hand-rolled
+        # brace-depth counter used to live here; it broke silently whenever
+        # a claim value itself contained an unbalanced "{" (depth never
+        # returned to 0, `end` stayed -1, the pair was dropped with no
+        # signal). _extract_json_object instead takes the outermost
+        # find("{")..rfind("}") span, which does not share that failure
+        # mode. No trailing-prose fallback is added: the prompt instructs
+        # "Return ONLY a JSON object", and fact_judge.py -- the reference
+        # implementation this converges toward -- has no such fallback
+        # either.
         try:
             parsed = _json.loads(response.strip())
         except _json.JSONDecodeError:
-            start = response.find("{")
-            if start == -1:
-                continue
-            depth = 0
-            end = -1
-            for _i in range(start, len(response)):
-                if response[_i] == "{":
-                    depth += 1
-                elif response[_i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = _i
-                        break
-            if end == -1:
-                continue
-            try:
-                parsed = _json.loads(response[start:end + 1])
-            except _json.JSONDecodeError:
+            parsed = None
+
+        if not isinstance(parsed, dict):
+            # Covers two cases with one guard: the first attempt raised
+            # (parsed is None above), or it succeeded but yielded a
+            # non-dict JSON value (a bare list/string/number) -- the same
+            # shape that crashed llm_edge_proposer._call_llm inside
+            # float(parsed.get("confidence")) before its own
+            # `if not isinstance(parsed, dict)` guard was added.
+            # _extract_json_object already returns None for a non-dict
+            # result, so this is a no-op when there is no nested object to
+            # recover.
+            parsed = _extract_json_object(response)
+            if not isinstance(parsed, dict):
                 continue
 
         claim_a = parsed.get("claim_a") if isinstance(parsed.get("claim_a"), dict) else {}

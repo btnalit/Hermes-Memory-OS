@@ -596,10 +596,12 @@ def _records_since(records: list[dict[str, Any]], *, hours: int) -> list[dict[st
     for record in records:
         try:
             created_at = datetime.fromisoformat(str(record.get("created_at", "")).replace("Z", "+00:00"))
-        except ValueError:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if created_at >= cutoff:
+                result.append(record)
+        except (ValueError, TypeError):
             continue
-        if created_at >= cutoff:
-            result.append(record)
     return result
 
 

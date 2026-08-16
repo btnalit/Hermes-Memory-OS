@@ -67,6 +67,7 @@ ATTRIBUTABLE_SOURCE_CLASSES = frozenset({
     "event",          # event:<event_id>
     "indexed",        # <record_type>:<record_id> from the FTS index
     "graph_layer",    # <record_type>:<record_id> reached by graph traversal
+    "recall_facade",  # composite retriever-facade recall; each object's own source_ref
 })
 
 # Deliberately NOT attributable, one reason per class. These are derived or

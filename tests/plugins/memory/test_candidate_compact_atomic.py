@@ -77,7 +77,7 @@ def test_compact_archive_append_failure_keeps_main_candidates(tmp_path, monkeypa
     )
 
     with pytest.raises(RuntimeError, match="simulated archive write failure"):
-        compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+        compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     assert candidates_path.read_text() == original_content
     assert not archive_path.exists() or archive_path.stat().st_size == 0
@@ -96,7 +96,7 @@ def test_compact_writes_conservation_ok_audit(tmp_path):
     append_candidate_queue(store, stale)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     assert archived_count >= 1
 
@@ -140,7 +140,7 @@ def test_compact_malformed_line_does_not_replace(tmp_path):
 
     # compact should raise (JSONDecodeError) on the malformed line
     with pytest.raises((json.JSONDecodeError, Exception)):
-        compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+        compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     # Original content is still present in the file
     current = candidates_path.read_text()
@@ -157,7 +157,7 @@ def test_concurrent_append_waits_for_compact_lock(tmp_path):
     append_candidate_queue(store, stale)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     assert count >= 1
 
@@ -182,7 +182,7 @@ def test_compact_skips_duplicate_candidate_ids_in_archive(tmp_path):
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
 
     # First compact: stale goes to archive, active stays empty
-    count1 = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    count1 = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
     assert count1 == 1
 
     # Re-add the same stale candidate (simulating it re-entered queue)
@@ -190,7 +190,7 @@ def test_compact_skips_duplicate_candidate_ids_in_archive(tmp_path):
     append_candidate_queue(store, stale2)
 
     # Second compact: should compact the stale candidate but dedup in archive
-    count2 = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    count2 = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
     assert count2 == 1  # still archived from active
 
     # Archive should have exactly 1 entry (dedup kicked in)
@@ -217,12 +217,12 @@ def test_compact_dedup_writes_audit_record(tmp_path):
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
 
     # First compact
-    compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     # Re-add and compact again
     stale2 = _make_candidate(candidate_id="stale-dedup-audit", age_days=14, bridge_state="fleeting")
     append_candidate_queue(store, stale2)
-    compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     audit_records = read_audit_records(store.roots.audit_path)
     dedup_audits = [
@@ -241,7 +241,7 @@ def test_compact_no_dedup_audit_when_no_duplicates(tmp_path):
     append_candidate_queue(store, stale)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     audit_records = read_audit_records(store.roots.audit_path)
     dedup_audits = [
@@ -262,7 +262,7 @@ def test_compact_dedup_different_candidates_not_affected(tmp_path):
     append_candidate_queue(store, stale_b)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     assert count == 2
     archive_records = [
@@ -283,7 +283,7 @@ def test_compact_dedup_malformed_archive_lines_ignored(tmp_path):
     stale = _make_candidate(candidate_id="stale-after-malformed", age_days=14, bridge_state="fleeting")
     append_candidate_queue(store, stale)
 
-    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    count = compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
     assert count == 1  # should succeed despite malformed archive line
 
     # Parse archive lines individually — skip malformed (as production dedup does)
@@ -309,12 +309,12 @@ def test_counterfactual_compact_without_dedup_would_duplicate(tmp_path):
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
 
     # First compact
-    compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     # Re-add and compact again
     stale2 = _make_candidate(candidate_id="stale-cf", age_days=14, bridge_state="fleeting")
     append_candidate_queue(store, stale2)
-    compact_candidate_queue(store, archive_path=archive_path, retention_days=1)
+    compact_candidate_queue(store, archive_path=archive_path, retention_days=1, provisional_backed_candidate_ids=set())
 
     # With dedup, archive should have exactly 1 entry for stale-cf
     archive_records = [
@@ -338,7 +338,9 @@ def test_compact_without_archive_path_uses_default_and_preserves_stale(tmp_path)
     append_candidate_queue(store, active)
 
     # Call WITHOUT archive_path — must use safe default, not drop stale
-    count = compact_candidate_queue(store, retention_days=1)
+    count = compact_candidate_queue(
+        store, retention_days=1, provisional_backed_candidate_ids=set(),
+    )
     assert count == 1  # stale-default-path archived
 
     # Main file should only have the active candidate
@@ -367,7 +369,9 @@ def test_counterfactual_archive_path_none_drops_data(tmp_path):
 
     # Explicit None must still get a safe default (not drop data)
     # Note: after Fix 2, None → derived default, so this is safe
-    count = compact_candidate_queue(store, archive_path=None, retention_days=1)
+    count = compact_candidate_queue(
+        store, archive_path=None, retention_days=1, provisional_backed_candidate_ids=set(),
+    )
     assert count == 1
 
     # Verify stale was archived, not lost
@@ -404,7 +408,7 @@ def test_compact_archives_young_demoted_candidate(tmp_path):
     append_candidate_queue(store, young_absorbed)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7)
+    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7, provisional_backed_candidate_ids=set())
 
     assert archived_count == 2
     remaining = read_candidate_queue(store)
@@ -428,7 +432,7 @@ def test_compact_keeps_young_owner_eligible_archives_young_fleeting(tmp_path):
     append_candidate_queue(store, young_fleeting)
 
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
-    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7)
+    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7, provisional_backed_candidate_ids=set())
 
     # fleeting is now terminal, so 1 gets archived
     assert archived_count == 1

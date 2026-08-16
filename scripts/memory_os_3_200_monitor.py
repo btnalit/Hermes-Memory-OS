@@ -7305,6 +7305,18 @@ def cognitive_loop_step_evidence():
       "already_saturated_count", "skipped_not_injected_count",
       "invalidated_never_hit_count", "forget_eligible_backlog",
       "unresolved_hit_count", "duration_ms", "error",
+      # D2b: llm_edge_proposer per-run call tally — distinguishes "judge
+      # found no relationships" from "every LLM call failed" (see outcome
+      # above, already generic across edge steps).
+      "llm_call_count", "llm_call_ok_count", "llm_call_failure_count",
+      "llm_call_failure_reasons",
+      # edge_weight_feedback cursor-alignment visibility: a ledger-cursor
+      # desync (future graph_layer_shadow.jsonl compaction) goes dark in
+      # `outcome` whenever the run also reinforced/forgot edges that same
+      # cycle (outcome gives those precedence) — these survive that case.
+      "tracked_edge_count", "cursor_misaligned", "cursor_misalignment_reason",
+      "cursor_previous_line_count", "cursor_realigned_line_count",
+      "cursor_skipped_row_count",
     )
     edge_step_results = {}
     for step in steps:

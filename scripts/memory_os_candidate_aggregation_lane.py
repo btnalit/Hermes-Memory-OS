@@ -116,6 +116,7 @@ def main() -> int:
         "demoted_count": result["demoted_count"],
         "fleeting_count": result["fleeting_count"],
         "compacted_count": result["compacted_count"],
+        "compaction_skip_reason": result["compaction_skip_reason"],
         "actual_crystallized_approval": result["actual_crystallized_approval"],
         "status": "ok" if not result.get("error") else "error",
     }
@@ -126,8 +127,22 @@ def main() -> int:
         int(result.get(key) or 0)
         for key in ("promoted_count", "demoted_count", "fleeting_count", "compacted_count")
     )
+    compaction_skip_reason = str(result.get("compaction_skip_reason") or "")
     if result.get("error"):
         run_status, reason = "error", "lane_failed"
+    elif compaction_skip_reason == "effective_view_unavailable":
+        # Visibility, not alerting: status stays "ok" -- a view failure
+        # already emits its own error record, and the live queue merely
+        # growing is recoverable. But compacted_count is 0 here exactly
+        # like a healthy tick with nothing to archive, so the counter-only
+        # branches below (no_candidates/nothing_pending/no_triage_actions/
+        # triaged) cannot tell them apart -- "compaction ran and archived
+        # nothing" is a materially different fact from "compaction was not
+        # attempted", so this reason is checked before those regardless of
+        # whether other triage happened this tick.
+        run_status, reason = "ok", "compaction_skipped_effective_view_unavailable"
+    elif compaction_skip_reason == "upstream_error":
+        run_status, reason = "ok", "compaction_skipped_upstream_error"
     elif int(result.get("candidates_read") or 0) == 0:
         run_status, reason = "ok", "no_candidates"
     elif int(result.get("pending") or 0) == 0:

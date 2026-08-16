@@ -2012,10 +2012,16 @@ def _run_expired_working_migration(
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_days = (now - ts).total_seconds() / 86400
         except (ValueError, TypeError):
+            # Malformed/unparseable timestamp -- this migration deletes
+            # expired items, so keep the item rather than risk deleting
+            # something that was not actually expired (same conservative
+            # direction as cleanup_expired_working.py / prune_expired_items).
             surviving.append(item)
             continue
-        age_days = (now - ts).total_seconds() / 86400
         if age_days > 7:
             removed += 1
             continue

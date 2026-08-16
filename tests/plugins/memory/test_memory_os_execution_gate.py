@@ -786,6 +786,254 @@ class TestGateIndex:
         assert result is not None
         assert result["reason"] == "execution_gate_lane_mismatch"
 
+    # ── Perf fix: success-path index rebuild removed ──────────────────
+
+    def test_require_unused_success_does_not_rewrite_index(self, tmp_path, monkeypatch):
+        """Perf fix: N successful require_unused=True resolutions against an
+        already-fresh sidecar entry must not scale index rewrites with N.
+
+        Counterfactual: before this fix, resolve_execution_gate_permit()
+        called _rebuild_gate_index_from_records() unconditionally on every
+        successful full-scan resolution. require_unused=True always takes
+        that full-scan path (see the fast-path comment), so N sequential
+        append_governed_jsonl() calls under one envelope rewrote
+        execution_gate_index.json N times -- the verified perf defect this
+        fix removes.
+        """
+        import plugins.memory.memory_os.execution_gate as execution_gate
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        permit = start_execution_gate_envelope(
+            store,
+            lane_id="cost-test-lane",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={"key": "value"},
+            boundary={},
+        )
+        envelope_id = permit["execution_gate_envelope_id"]
+
+        rebuild_calls: list[int] = []
+        real_rebuild = execution_gate._rebuild_gate_index_from_records
+
+        def counting_rebuild(roots_arg, records_arg):
+            rebuild_calls.append(1)
+            return real_rebuild(roots_arg, records_arg)
+
+        monkeypatch.setattr(execution_gate, "_rebuild_gate_index_from_records", counting_rebuild)
+
+        for _ in range(50):
+            result = execution_gate.resolve_execution_gate_permit(
+                roots,
+                envelope_id=envelope_id,
+                lane_id="cost-test-lane",
+                risk_class="bounded_reversible_queue",
+                require_fresh=True,
+                require_unused=True,
+                expected_scope_hash=execution_gate_scope_hash({"key": "value"}),
+            )
+            assert result["status"] == "valid", result
+
+        assert len(rebuild_calls) == 0, (
+            f"expected 0 index rebuilds across 50 require_unused=True resolutions "
+            f"against an already-fresh sidecar entry (non-scaling); got {len(rebuild_calls)}"
+        )
+
+    def test_not_found_and_conflict_resolutions_still_rebuild_index(self, tmp_path, monkeypatch):
+        """Regression guard: removing the success-path rebuild must not touch
+        the two genuine-staleness rebuild paths (not found / conflict).
+        """
+        import plugins.memory.memory_os.execution_gate as execution_gate
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        rebuild_calls: list[int] = []
+        real_rebuild = execution_gate._rebuild_gate_index_from_records
+
+        def counting_rebuild(roots_arg, records_arg):
+            rebuild_calls.append(1)
+            return real_rebuild(roots_arg, records_arg)
+
+        monkeypatch.setattr(execution_gate, "_rebuild_gate_index_from_records", counting_rebuild)
+
+        # not found: no permit record exists for this envelope id at all.
+        result = execution_gate.resolve_execution_gate_permit(
+            roots,
+            envelope_id="xgate_does_not_exist",
+            lane_id="whatever",
+            risk_class="whatever",
+        )
+        assert result["status"] == "invalid"
+        assert result["reason"] == "execution_gate_permit_not_found"
+        assert len(rebuild_calls) == 1, "not-found resolution must still rebuild the index"
+
+        # conflict: two permit records for the same envelope id, written
+        # straight to the journal so the sidecar has no entry for it either.
+        conflict_id = "xgate_conflict_test"
+        dup_permit = {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": conflict_id,
+            "created_at": "2026-08-01T00:00:00Z",
+            "expires_at": "2030-08-01T01:00:00Z",
+            "lane_id": "dup-lane",
+            "risk_class": "bounded_reversible_queue",
+            "permit_decision": "allowed",
+        }
+        with execution_gate_records_path(roots).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dup_permit) + "\n")
+            handle.write(json.dumps(dup_permit) + "\n")
+
+        result = execution_gate.resolve_execution_gate_permit(
+            roots,
+            envelope_id=conflict_id,
+            lane_id="dup-lane",
+            risk_class="bounded_reversible_queue",
+        )
+        assert result["status"] == "invalid"
+        assert result["reason"] == "execution_gate_permit_conflict"
+        assert len(rebuild_calls) == 2, "conflict resolution must still rebuild the index"
+
+    def test_index_miss_success_still_rebuilds_index(self, tmp_path):
+        """Regression guard for test_index_miss_falls_back_to_full_scan's
+        contract: a success resolved via full scan because the sidecar
+        entry was genuinely missing (not because of a require_unused=True
+        bypass) must still populate the index, preserving self-healing.
+        """
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        permit = start_execution_gate_envelope(
+            store,
+            lane_id="self-heal-lane",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={},
+            boundary={},
+        )
+        envelope_id = permit["execution_gate_envelope_id"]
+
+        from plugins.memory.memory_os.execution_gate import _gate_index_path, _read_gate_index
+
+        _gate_index_path(roots).unlink()
+        assert envelope_id not in _read_gate_index(roots)
+
+        result = resolve_execution_gate_permit(
+            roots,
+            envelope_id=envelope_id,
+            lane_id="self-heal-lane",
+            risk_class="bounded_reversible_queue",
+        )
+        assert result["status"] == "valid"
+        assert envelope_id in _read_gate_index(roots), (
+            "index should self-heal (be repopulated) after a success resolved "
+            "via full scan due to a genuine index miss"
+        )
+
+    # ── Invariant: require_unused=True must never validate a used permit ──
+
+    def test_require_unused_invariant_never_validates_completed_permit(self, tmp_path):
+        """Invariant (must hold under both ways a completion can reach the
+        journal): a permit that has already been completed must NEVER
+        validate when require_unused=True.
+
+        Case A: completion recorded through the real API
+        (complete_execution_gate_envelope) -- the sidecar index DOES
+        correctly show completion_count > 0.
+
+        Case B: completion appended straight to the canonical journal,
+        bypassing the sidecar update entirely -- simulates the crash
+        window documented in resolve_execution_gate_permit, where the
+        sidecar entry exists but is stale. This is the same scenario as
+        test_resolve_require_unused_rejects_canonical_completion_missing_
+        from_sidecar; it is repeated here, paired with Case A, as the
+        single invariant test both cases must jointly satisfy.
+
+        Both cases exercise the same code route today (the full-journal
+        fallback, since require_unused=True unconditionally disables the
+        O(1) index fast path) -- but are asserted independently so a
+        future change to that gate cannot silently reintroduce the hole
+        for either case.
+        """
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+        store.initialize()
+
+        # Case A: sidecar index correctly reflects the completion.
+        permit_a = start_execution_gate_envelope(
+            store,
+            lane_id="invariant-lane-a",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={},
+            boundary={},
+        )
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=permit_a["execution_gate_envelope_id"],
+            lane_id="invariant-lane-a",
+            execution_status="completed",
+        )
+        result_a = resolve_execution_gate_permit(
+            store.roots,
+            envelope_id=permit_a["execution_gate_envelope_id"],
+            lane_id="invariant-lane-a",
+            risk_class="bounded_reversible_queue",
+            require_unused=True,
+        )
+        assert result_a["status"] == "invalid"
+        assert result_a["reason"] == "execution_gate_permit_already_completed"
+
+        # Case B: sidecar index does NOT know about the completion.
+        permit_b = start_execution_gate_envelope(
+            store,
+            lane_id="invariant-lane-b",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={},
+            boundary={},
+        )
+        bypass_completion = {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "completion",
+            "execution_gate_envelope_id": permit_b["execution_gate_envelope_id"],
+            "created_at": "2026-08-01T00:00:00Z",
+            "lane_id": "invariant-lane-b",
+            "execution_status": "completed",
+        }
+        with execution_gate_records_path(store.roots).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(bypass_completion) + "\n")
+
+        from plugins.memory.memory_os.execution_gate import _read_gate_index
+
+        idx = _read_gate_index(store.roots)
+        assert idx[permit_b["execution_gate_envelope_id"]].get("completion_count", 0) == 0, (
+            "test setup invariant: sidecar must NOT know about the bypass completion"
+        )
+
+        result_b = resolve_execution_gate_permit(
+            store.roots,
+            envelope_id=permit_b["execution_gate_envelope_id"],
+            lane_id="invariant-lane-b",
+            risk_class="bounded_reversible_queue",
+            require_unused=True,
+        )
+        assert result_b["status"] == "invalid"
+        assert result_b["reason"] == "execution_gate_permit_already_completed"
+
 
 # ── resolve_trigger_class() tests ────────────────────────────────────────────
 

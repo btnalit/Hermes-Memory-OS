@@ -463,8 +463,350 @@ def test_compact_without_terminal_view_keeps_triage_only_behavior(tmp_path):
     store = _store_with_gate(tmp_path)
     _stale_owner_eligible_candidate(store, "cand-triage-only", days_old=60)
 
-    archived = compact_candidate_queue(store)
+    archived = compact_candidate_queue(store, provisional_backed_candidate_ids=set())
 
     live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
     assert "cand-triage-only" in live_ids
     assert archived == 0
+
+
+# ── Defect A counterpart, REVISED 2026-08-15: a read_effective_candidates
+# failure must NOT run compaction. Reversed from the original Defect A fix,
+# which degraded to terminal_candidate_ids=None (compact's own triage-only
+# view) on a view failure. Defect C then established that triage-only
+# compaction is exactly what archives a provisional-backed candidate
+# irreversibly -- so degrading to it on the one path where we have the
+# LEAST information about which candidates are provisional-backed was
+# itself unsafe. A view failure now joins the two pre-existing
+# upstream-error sources (read_candidate_queue, _cluster_and_promote,
+# pinned separately in test_candidate_aggregation_logic.py) in skipping
+# compaction outright: not compacting just lets the live queue grow --
+# visible, bounded, and fully recoverable once the malformed record is
+# fixed -- versus archiving under uncertainty, which is not recoverable
+# (candidates.archive.jsonl has no production reader).
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_effective_view_failure_skips_compaction_and_records_the_reason(tmp_path, monkeypatch):
+    """Counterfactual for the 2026-08-15 reversal: a read_effective_candidates
+    failure must skip compact_candidate_queue entirely -- not run it with
+    terminal_candidate_ids=None -- and the lane must record WHY via the
+    closed-set compaction_skip_reason field, distinguishable from both "ran
+    and archived nothing" (compaction_skip_reason is None) and the two
+    pre-existing upstream-error sources.
+
+    Two fixtures make the "compaction did not run at all" proof precise:
+
+      - a pre-seeded `demoted` triage row -- would be archived by compact's
+        own triage-only view if compaction ran (as it does in
+        test_compact_without_terminal_view_keeps_triage_only_behavior's
+        sibling case), so its survival here proves compaction did not run,
+        not merely that it archived nothing for some other reason.
+      - a crystallized ghost (permanently crystallized, stale owner_eligible
+        triage, same shape as test_actively_crystallized_row_is_archived_by_
+        the_full_terminal_view above) -- would ALSO be archived if
+        compaction ran (via the full terminal view), so it must survive too.
+
+    Patches aggregation.read_effective_candidates (the name bound inside the
+    candidate_aggregation module at import time), not
+    crystallized.read_effective_candidates -- the lane imports the symbol by
+    name, so patching the source module would not reach it.
+    """
+    import plugins.modules.governance.candidate_aggregation as aggregation
+    from plugins.memory.memory_os.crystallized import (
+        append_candidate_queue,
+        append_candidate_triage,
+        read_candidate_queue,
+    )
+
+    store = _store_with_gate(tmp_path)
+
+    demoted = _candidate("cand-demoted-fixture", body="记住：这是一条已裁决的候选")
+    append_candidate_queue(store, demoted)
+    append_candidate_triage(
+        store,
+        candidate_id="cand-demoted-fixture",
+        action="demote",
+        target_state="demoted",
+        reason="pre-seeded terminal fixture",
+        execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    ghost = _stale_owner_eligible_candidate(store, "cand-ghost-view-fail", days_old=60)
+    _crystallize_candidate(store, ghost, provisional=False)
+
+    def _raise_view_failure(_store):
+        raise RuntimeError("synthetic effective-view failure")
+
+    monkeypatch.setattr(aggregation, "read_effective_candidates", _raise_view_failure)
+
+    result = aggregation.run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    assert result["status"] == "warning"
+    assert "candidate_effective_view_failed" in result["recent_error_codes"]
+    assert result["recall_exclusion_count"] == -1, (
+        "a view failure must not silently republish recall exclusions"
+    )
+    assert result["compacted_count"] == 0, (
+        "compaction must NOT run on a view failure -- archiving under "
+        "uncertainty about which candidates are provisional-backed is "
+        "unrecoverable, unlike a queue that merely grows"
+    )
+    assert result["compaction_skip_reason"] == "effective_view_unavailable", (
+        "the reason must be durable and distinguishable from the two "
+        f"pre-existing upstream-error sources, got {result['compaction_skip_reason']!r}"
+    )
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-demoted-fixture" in live_ids, (
+        "demoted row was archived -- compaction ran despite the view "
+        "failure, which is exactly the unsafe fallback this test guards "
+        "against"
+    )
+    assert "cand-ghost-view-fail" in live_ids, (
+        "crystallized-ghost row was archived -- compaction ran despite the "
+        "view failure"
+    )
+
+
+# ── Defect B: provisional-backed terminality must not be archivable ────────
+#
+# Verified chain: any active crystallized record (provisional included)
+# marks a candidate terminal in read_effective_candidates. Before this fix,
+# candidate_aggregation passed that FULL terminal set straight to
+# compact_candidate_queue, so a resolver-approved provisional candidate got
+# archived out of the live queue on the same or a later tick. Once
+# provisional_sweep later invalidates the provisional (TTL/cap eviction),
+# the candidate is in NEITHER the live queue NOR active crystallized memory
+# -- candidates.archive.jsonl has no production reader, so there is no
+# automatic path back. The fix: EffectiveCandidate.provisional_backed marks
+# "terminal only because of an active provisional record, no active
+# permanent record backs it", and the lane excludes those ids from the set
+# it hands to compact_candidate_queue while still including them in the
+# FULL set it publishes to write_candidate_recall_exclusions (the content is
+# already in crystallized memory, so it must not double-surface in recall).
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_provisional_backed_terminal_row_is_not_archived(tmp_path):
+    """Counterfactual for Defect B: a provisional-backed terminal candidate
+    must stay in the live queue -- archival is one-way, and the provisional
+    anchor is reversible by design (resolver TTL/cap eviction, owner
+    reject). It IS excluded from recall (content already crystallized).
+
+    Deliberately the provisional=True mirror of
+    test_actively_crystallized_row_is_archived_by_the_full_terminal_view
+    above (same _stale_owner_eligible_candidate baseline, same days_old=60,
+    same owner_eligible triage state) so the only variable is the
+    provisional flag -- isolating exactly what changed."""
+    from plugins.memory.memory_os.crystallized import (
+        read_candidate_queue,
+        read_candidate_recall_exclusions,
+    )
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _stale_owner_eligible_candidate(store, "cand-prov-backed", days_old=60)
+    _crystallize_candidate(store, candidate, provisional=True)
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    # Not re-promoted, not stale-swept (shielded by the active provisional
+    # record, same pre-filter as the permanent case):
+    assert result["stale_owner_eligible_demoted_count"] == 0, result
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-prov-backed" in live_ids, (
+        "provisional-backed row was archived -- the provisional anchor is "
+        "reversible, archival is not"
+    )
+    assert "cand-prov-backed" in read_candidate_recall_exclusions(store.roots), (
+        "a provisional-backed candidate must still be excluded from recall "
+        "-- its content is already in crystallized memory"
+    )
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_invalidated_provisional_lets_the_pipeline_reach_the_candidate_again(tmp_path):
+    """Counterfactual for Defect B's reversal half: once the provisional
+    anchor is invalidated through the REAL API
+    (invalidate_provisional_record with resolver_ttl_expired -- the same
+    call provisional_sweep makes), the candidate must resurface as
+    non-terminal so the pipeline can reach it again. Mirrors
+    test_evicted_provisional_no_longer_shields_the_queue_row above (which
+    uses revoke_record with resolver_cap_evicted); this uses the TTL-expiry
+    path the acceptance criteria calls out explicitly."""
+    from plugins.memory.memory_os.crystallized import (
+        read_candidate_queue,
+        read_effective_candidates,
+    )
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _stale_owner_eligible_candidate(store, "cand-prov-expires", days_old=20)
+    service, record_id = _crystallize_candidate(store, candidate, provisional=True)
+
+    # While the provisional is active, the row stays but is terminal.
+    pre_effective = {
+        item.candidate.candidate_id: item for item in read_effective_candidates(store)
+    }
+    assert pre_effective["cand-prov-expires"].terminal is True
+    assert pre_effective["cand-prov-expires"].provisional_backed is True
+
+    service.invalidate_provisional_record(
+        record_id, reason="resolver_ttl_expired", invalidated_by="provisional_sweep",
+    )
+
+    post_effective = {
+        item.candidate.candidate_id: item for item in read_effective_candidates(store)
+    }
+    assert post_effective["cand-prov-expires"].terminal is False, (
+        "candidate must resurface as non-terminal once its only anchor is "
+        "invalidated"
+    )
+
+    # The pipeline can now act on it again (stale sweep reaches it, since
+    # it is no longer shielded by an active crystallized record).
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+    assert result["stale_owner_eligible_demoted_count"] == 1, result
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-prov-expires" not in live_ids, (
+        "resurfaced candidate should now be reachable and demoted/compacted "
+        "by the stale sweep, not stuck"
+    )
+
+
+# ── Defect C (coordinator follow-up, 2026-08-15): the retention-window
+# elif/else branch inside compact_candidate_queue resolves state from triage
+# rows alone (resolve_candidate_effective_state) and has no idea a candidate
+# is provisional-backed. Excluding a provisional-backed id from
+# archivable_terminal_ids (Defect B's fix) only protects it from the FIRST
+# branch of compact_candidate_queue; a resolver-approved provisional
+# candidate whose triage state is "resolver_approved" (not "owner_eligible")
+# still ages out through the retention-window branch once its row passes
+# retention_days -- the same loss shape as Defect B, reached a different
+# way, and arguably more likely since provisional TTLs can exceed
+# retention_days. The fix: compact_candidate_queue takes an explicit
+# provisional_backed_candidate_ids set and keeps those rows active
+# UNCONDITIONALLY, checked first, ahead of every other branch.
+#
+# Deliberately uses "resolver_approved" triage (not the "owner_eligible"
+# baseline every earlier fixture in this file used) -- owner_eligible's
+# first-clause exemption already made it immune to the age branch, which is
+# exactly what left this branch untested.
+
+
+def _resolver_approved_aged_candidate(store, candidate_id, *, days_old):
+    """Real-producer setup mirroring _cluster_and_promote's own
+    resolver-approve triage write (target_state='resolver_approved'), aged
+    past retention_days. bridge_state is set to a non-default value so the
+    raw-bridge_state filter in _cluster_and_promote's candidates_for_promote
+    (c.bridge_state in ("", "inner_drive_candidate")) excludes it from being
+    re-clustered on a later lane run -- isolating the retention/demote
+    branches this test targets from an unrelated promote-stage race."""
+    from datetime import timedelta
+
+    from plugins.memory.memory_os.crystallized import (
+        append_candidate_queue,
+        append_candidate_triage,
+    )
+
+    now = datetime.now(timezone.utc)
+    created = (now - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
+    candidate = _candidate(
+        candidate_id,
+        body="记住：Memory-OS 的部署配置讨论,关键词富集必然成簇的建造期元讨论。",
+        bridge_state="resolver_approved",
+        created_at=created,
+    )
+    append_candidate_queue(store, candidate)
+    append_candidate_triage(
+        store,
+        candidate_id=candidate_id,
+        action="promote",
+        target_state="resolver_approved",
+        reason="cluster match (test fixture, resolver approved)",
+        cluster_key="moment:记住",
+        cluster_size=2,
+        execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        now=now - timedelta(days=days_old),
+    )
+    return candidate
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_provisional_backed_resolver_approved_row_survives_retention_window_archival(tmp_path):
+    """Counterfactual for Defect C: a provisional-backed candidate whose
+    triage state is resolver_approved (not owner_eligible) and whose row is
+    aged past retention_days must still survive compaction. Without
+    provisional_backed_candidate_ids reaching compact_candidate_queue, this
+    row falls through the terminal-ids branch (correctly excluded by Defect
+    B) straight into the retention-window elif/else, which does not know it
+    is provisional-backed and archives it once age >= retention_days.
+
+    Then invalidates the provisional through the REAL API
+    (invalidate_provisional_record, resolver_ttl_expired) and shows the
+    pipeline can still reach and act on the candidate afterward."""
+    from plugins.memory.memory_os.crystallized import (
+        read_candidate_queue,
+        read_candidate_recall_exclusions,
+        read_effective_candidates,
+    )
+    from plugins.modules.governance.candidate_aggregation import (
+        run_candidate_aggregation_lane,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _resolver_approved_aged_candidate(
+        store, "cand-resolver-approved-aged", days_old=20,
+    )
+    service, record_id = _crystallize_candidate(store, candidate, provisional=True)
+
+    result = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-resolver-approved-aged" in live_ids, (
+        "provisional-backed row with resolver_approved triage, aged past "
+        "retention_days, was archived through the retention-window branch "
+        "-- the reversibility guarantee was not enforced on every branch "
+        f"of compact_candidate_queue. result={result}"
+    )
+    assert "cand-resolver-approved-aged" in read_candidate_recall_exclusions(store.roots), (
+        "a provisional-backed candidate must still be excluded from recall"
+    )
+
+    # Reversal half: once the provisional anchor is invalidated through the
+    # real API, the candidate must resurface as non-terminal...
+    service.invalidate_provisional_record(
+        record_id, reason="resolver_ttl_expired", invalidated_by="provisional_sweep",
+    )
+    post_effective = {
+        item.candidate.candidate_id: item for item in read_effective_candidates(store)
+    }
+    assert post_effective["cand-resolver-approved-aged"].terminal is False, (
+        "candidate must resurface as non-terminal once its only anchor is "
+        "invalidated"
+    )
+
+    # ...and the pipeline must be able to reach and act on it again (no
+    # longer shielded by an active crystallized record, it is now old
+    # enough for the general aged-demote sweep to close it).
+    result2 = run_candidate_aggregation_lane(
+        store, execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+    )
+    assert result2["demoted_count"] >= 1, result2
+    live_ids_after = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-resolver-approved-aged" not in live_ids_after, (
+        "resurfaced candidate should now be reachable and demoted/compacted "
+        "by the general aged sweep, not stuck"
+    )

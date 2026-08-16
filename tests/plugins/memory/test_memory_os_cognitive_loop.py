@@ -939,3 +939,143 @@ def test_edge_weight_feedback_wrapper_passes_through_r4_counters(tmp_path, monke
     assert summary["forget_eligible_backlog"] == 7
     assert summary["reinforced_count"] == 1
     assert summary["outcome"] == "reinforced"
+
+
+def test_edge_weight_feedback_wrapper_passes_through_cursor_alignment_fields(tmp_path, monkeypatch):
+    """Counterfactual: the outcome branch gives reinforced/forgotten/
+    saturated precedence over "cursor_misaligned", so a ledger-cursor
+    desync (future graph_layer_shadow.jsonl compaction — metadata_retention
+    is dry-run only today, no executor yet) goes dark in `outcome` exactly
+    when the run was ALSO busy reinforcing/forgetting that same cycle —
+    the case an operator most needs to see. tracked_edge_count and the five
+    cursor_* diagnostic fields must survive the wrapper's whitelist
+    independently of outcome."""
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_weight_feedback as ewf
+
+    def _fake_run(index_path, *, index=None, audit_path=None, now=None):
+        return {
+            "status": "ok",
+            # outcome == "reinforced" (forgetting/reinforcement took
+            # precedence) even though this run's cursor WAS misaligned.
+            "outcome": "reinforced",
+            "new_hit_record_count": 0,
+            "reinforced_count": 0,
+            "already_saturated_count": 0,
+            "skipped_not_injected_count": 0,
+            "forgotten_count": 3,
+            "invalidated_never_hit_count": 1,
+            "forget_eligible_backlog": 0,
+            "unresolved_hit_count": 0,
+            "failed_count": 0,
+            "tracked_edge_count": 12,
+            "cursor_misaligned": True,
+            "cursor_misalignment_reason": "ledger_shorter_than_cursor",
+            "cursor_previous_line_count": 500,
+            "cursor_realigned_line_count": 480,
+            "cursor_skipped_row_count": 20,
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ewf, "run_edge_weight_feedback", _fake_run)
+    summary = runner._edge_weight_feedback({})
+    assert summary["outcome"] == "reinforced", (
+        "sanity: outcome alone must NOT be the only signal for this scenario"
+    )
+    assert summary["tracked_edge_count"] == 12
+    assert summary["cursor_misaligned"] is True
+    assert summary["cursor_misalignment_reason"] == "ledger_shorter_than_cursor"
+    assert summary["cursor_previous_line_count"] == 500
+    assert summary["cursor_realigned_line_count"] == 480
+    assert summary["cursor_skipped_row_count"] == 20
+
+
+def test_edge_provenance_wrapper_passes_through_write_failed_count(tmp_path, monkeypatch):
+    """Counterfactual: write_failed_count is the counter that distinguishes
+    "nothing to write" from "tried and failed" (Completion Is Not Output).
+    The monitor's _edge_fields already whitelists it; before this fix the
+    cognitive_loop wrapper never picked it off run_edge_provenance's
+    summary, so it reached no reader."""
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    import plugins.memory.memory_os.edge_provenance as ep
+
+    def _fake_run(index_path, *, index=None, audit_path=None):
+        return {
+            "status": "ok",
+            "outcome": "produced",
+            "record_count": 5,
+            "scanned_ref_count": 8,
+            "proposed_count": 2,
+            "dedup_skipped": 1,
+            "write_failed_count": 3,
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(ep, "run_edge_provenance", _fake_run)
+    summary = runner._edge_provenance({})
+    assert summary["write_failed_count"] == 3
+
+
+def test_llm_edge_proposer_wrapper_propagates_outcome_and_call_counters(tmp_path, monkeypatch):
+    """D2b counterfactual: before this fix, the step wrapper's whitelist
+    picked neither ``outcome`` nor any ``llm_call_*`` key off
+    run_llm_proposer's summary, so a run where every LLM call failed was
+    byte-identical in the cognitive-loop report to one that legitimately
+    found no relationships (both showed pair_count>0, proposed_count=0).
+
+    Drives the REAL producer (run_llm_proposer via the real _llm_edge_proposer
+    wrapper) through a monkeypatched model seam (_call_hermes_runtime_model
+    returning "") — not a hand-built summary dict — per the project's rule
+    that hand fixtures let counterfactuals pass vacuously."""
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os import llm_edge_proposer
+
+    store = _init_store(tmp_path)
+    index = MemoryOSIndex(store.roots)
+
+    for rec_id, created_at in (
+        ("cry_llm_a", "2026-06-01T10:00:00Z"),
+        ("cry_llm_b", "2026-06-01T11:00:00Z"),
+    ):
+        store.append_crystallized_record(
+            "test_llm_edge_proposer_wrapper.md",
+            {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": rec_id,
+                "kind": "test",
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "test",
+                "approval_note": "test seed",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            },
+            "test crystallized record body",
+        )
+    index.rebuild_from_store(store)
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    # Every LLM reply is empty -> every _call_llm outcome is
+    # "empty_llm_response" -> the run is degraded, not "no relationships".
+    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+
+    runner = CognitiveLoopRunner(store)
+    summary = runner._llm_edge_proposer({})
+
+    assert summary["status"] == "degraded"
+    assert summary["outcome"] == "llm_degraded"
+    assert summary["llm_call_count"] == 1
+    assert summary["llm_call_ok_count"] == 0
+    assert summary["llm_call_failure_count"] == 1
+    assert summary["llm_call_failure_reasons"] == {"empty_llm_response": 1}

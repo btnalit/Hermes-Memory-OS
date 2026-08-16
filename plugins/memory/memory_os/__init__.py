@@ -1560,8 +1560,10 @@ class MemoryOSProvider(MemoryProvider):
             created_at = datetime.fromisoformat(
                 str(record.get("source_at") or "").replace("Z", "+00:00")
             )
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
-            pass
+            created_at = None
         anchor_session_id = str(record.get("session_id") or "")
         if anchor_session_id and anchor_session_id != self.session_id:
             if created_at is not None:

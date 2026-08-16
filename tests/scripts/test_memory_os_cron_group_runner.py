@@ -210,6 +210,48 @@ def test_calendar_member_waits_for_its_anchor(tmp_path, stub_helpers):
     assert before_anchor["members"][0]["reason"] == "before_calendar_anchor"
 
 
+def test_is_due_calendar_anchor_normalizes_now_to_utc(tmp_path):
+    """Defect 4 counterfactual: _is_due's calendar branch must compare the
+    anchor against a UTC-normalized `now`, not `now`'s raw wall-clock
+    hour/minute.
+
+    The date check (`last_started.astimezone(utc).date() >= now.astimezone
+    (utc).date()`) was already UTC-normalized, but the anchor-minutes
+    check right below it used raw `now.hour * 60 + now.minute`. Production
+    always calls this with `datetime.now(timezone.utc)`, so the bug is
+    latent there -- it is only reachable through the documented
+    testing-only `--now` override, which is why this test drives `_is_due`
+    directly with a non-UTC-aware `now` rather than through the CLI.
+
+    Counterfactual: anchor = 06:00 UTC. now = 2026-07-30T03:00 in UTC-8,
+    which is 2026-07-30T11:00Z -- five hours PAST the anchor. Without the
+    fix, the raw local hour (3) is compared against the anchor (360
+    minutes) and wrongly reports "before_calendar_anchor". With the fix,
+    the UTC-equivalent hour (11) is compared and correctly reports
+    "calendar_day_due" -- matching the verdict for the UTC-equivalent
+    instant passed directly.
+    """
+    runner = _load_group_runner()
+    tz_minus8 = timezone(timedelta(hours=-8))
+    now_local = datetime(2026, 7, 30, 3, 0, tzinfo=tz_minus8)  # == 2026-07-30T11:00:00Z
+    now_utc_equivalent = now_local.astimezone(timezone.utc)
+
+    spec = {"due_policy": "calendar", "calendar_anchor": "06:00"}
+    # Ran the previous UTC day, so the "already_ran_today" branch does not
+    # fire before reaching the anchor comparison under test.
+    entry = {"last_started_at": "2026-07-29T10:00:00Z"}
+
+    due_local, reason_local = runner._is_due(spec, entry, now=now_local, force=False)
+    due_utc, reason_utc = runner._is_due(spec, entry, now=now_utc_equivalent, force=False)
+
+    assert (due_utc, reason_utc) == (True, "calendar_day_due")
+    assert (due_local, reason_local) == (due_utc, reason_utc), (
+        f"a non-UTC-aware `now` must produce the same verdict as its UTC-"
+        f"equivalent instant, got local={(due_local, reason_local)!r} "
+        f"utc={(due_utc, reason_utc)!r}"
+    )
+
+
 def test_owner_disabled_lane_is_skipped(tmp_path, stub_helpers):
     """Per-lane disable replaces the per-job disable owners lost to grouping."""
     runner = _load_group_runner()

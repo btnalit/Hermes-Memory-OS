@@ -55,13 +55,24 @@ def _contains_record_ref(body: str, record_id: str) -> bool:
 
 
 def _parse_iso(ts: str) -> datetime | None:
-    """Parse an ISO timestamp string, best-effort."""
+    """Parse an ISO timestamp string, best-effort.
+
+    Naive (no-offset) timestamps parse without error but, if left naive,
+    raise TypeError when subtracted from another parsed value of differing
+    awareness in `_detect_relation`'s temporal-proximity check (two
+    crystallized records whose `created_at` differ in naive/aware-ness).
+    Normalize to UTC here, same as knob_overrides._is_expired, so every
+    value this helper returns is safely comparable.
+    """
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        parsed = datetime.fromisoformat(ts)
     except (ValueError, TypeError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _detect_relation(

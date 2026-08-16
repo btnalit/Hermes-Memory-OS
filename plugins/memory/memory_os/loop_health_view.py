@@ -90,9 +90,12 @@ _FRESHNESS_CADENCE_MULTIPLIER = 3
 
 def _parse_recorded_at(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def build_loop_health_view(

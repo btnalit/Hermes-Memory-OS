@@ -687,6 +687,313 @@ class TestQueryRelatedRecordsWithWeight:
             assert "weight" in rel, f"related record missing weight: {rel}"
 
 
+# ── Code-review fix: shared_entity/entity_class/weight provenance and
+#    min_weight join-level filtering (query_related_records) ───────────
+#
+# W9 restricts the *default* extract_entities() call (used by both
+# refresh_entity_index and index.py's _index_entities) to INDEXABLE_ENTITY_
+# CLASSES = {"proper_noun"}, so a production entity_index table today only
+# ever contains proper_noun/0.9 rows.  To build a real multi-class fixture
+# — required to exercise the mis-provenance bug at all — these tests widen
+# the module-level INDEXABLE_ENTITY_CLASSES to entity_extractor's own
+# REFERENCE_DETECTION_CLASSES (the same constant __init__.py already uses
+# for detection-style callers) for the duration of the test only, then run
+# the real refresh_entity_index producer unmodified.  classify_entity()
+# still assigns the real class/weight for every entity text; only which
+# classes are allowed through the index gate is widened.
+
+
+def _enable_reference_detection_classes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Widen the index-worthiness gate so refresh_entity_index indexes
+    path/url/uuid/ip/identifier entities too, not just proper_noun.
+
+    This does not change classify_entity()'s real (class, weight) mapping —
+    only which classes extract_entities() lets through into entity_index.
+    """
+    from plugins.memory.memory_os.entity_extractor import REFERENCE_DETECTION_CLASSES
+
+    monkeypatch.setattr(
+        "plugins.memory.memory_os.entity_extractor.INDEXABLE_ENTITY_CLASSES",
+        REFERENCE_DETECTION_CLASSES,
+    )
+
+
+class TestQueryRelatedRecordsProvenance:
+    """Counterfactuals for two verified defects in query_related_records:
+
+    1. min(entity_text) / max(weight) were independent aggregates over the
+       same GROUP BY and could describe two different entities; entity_class
+       was re-derived from the resulting weight via hardcoded float bands
+       instead of being read from the authoritative column.
+    2. min_weight was applied via `having max(weight) >= ?`, which filters
+       GROUPS (whole records), not the entities that make up overlap_count —
+       so low-weight entities could still inflate overlap_count and rank.
+    """
+
+    def test_shared_entity_class_and_weight_describe_the_same_entity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defect 1 counterfactual: a record sharing both a low-weight path
+        entity and a high-weight proper_noun entity must return a row whose
+        shared_entity/entity_class/weight all describe ONE entity — the
+        highest-weight one — not a min(text)+max(weight) chimera.
+
+        Without the fix: min(entity_text) picks a path (paths sort first —
+        '/' < any letter), max(weight) picks the proper_noun's 0.9, and the
+        weight-band derivation reports "proper_noun" for a shared_entity
+        string that is actually a path. The returned row lies about which
+        entity earned that class and weight.
+        """
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        _enable_reference_detection_classes(monkeypatch)
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-provenance-1")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {
+                "id": "anchor",
+                "body": (
+                    "Reviewed /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json along with "
+                    "Zeta Corp and Alpha One and Beta Two."
+                ),
+            },
+            {
+                "id": "rec_a",
+                "body": (
+                    "Audit of /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json plus Zeta Corp notes."
+                ),
+            },
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        related = query_related_records(db_path, ["anchor"], min_weight=0.0)
+        rows_for_a = [r for r in related if r["related_record_id"] == "rec_a"]
+        assert len(rows_for_a) == 1, f"expected exactly one row for rec_a: {related}"
+        row = rows_for_a[0]
+
+        # The four shared paths (weight 0.4) must not win provenance over
+        # the shared proper_noun (weight 0.9) — the row must describe the
+        # highest-weight shared entity, consistently.
+        assert row["shared_entity"] == "Zeta Corp", (
+            f"shared_entity should be the highest-weight shared entity, got: {row}"
+        )
+        assert row["entity_class"] == "proper_noun", (
+            f"entity_class must describe the SAME entity as shared_entity: {row}"
+        )
+        assert row["weight"] == 0.9, f"weight must match the winning entity: {row}"
+        # All five shared entities (4 paths + 1 proper_noun) still counted
+        # at min_weight=0.0 — this test is about provenance, not filtering.
+        assert row["overlap_count"] == 5, f"unexpected overlap_count: {row}"
+
+        # Independent verification: the real classifier agrees with what
+        # query_related_records reported for the entity it named.
+        from plugins.memory.memory_os.entity_extractor import classify_entity
+
+        assert classify_entity(row["shared_entity"]) == (row["entity_class"], row["weight"])
+
+    def test_entity_class_read_from_column_not_weight_band(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defect 1 counterfactual: entity_class must come from the stored
+        column, not be re-derived from weight via hardcoded float bands.
+
+        uuid (weight 0.5) and url (weight 0.5) collide in the old band
+        table — both hit the `weight == 0.5` branch, which always reported
+        "url". A record sharing only a uuid must be reported as "uuid".
+        """
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        _enable_reference_detection_classes(monkeypatch)
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-provenance-2")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "anchor", "body": "Ticket ref 550e8400-e29b-41d4-a716-446655440000 filed."},
+            {"id": "rec_c", "body": "Follow-up for ticket 550e8400-e29b-41d4-a716-446655440000 pending."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        related = query_related_records(db_path, ["anchor"], min_weight=0.0)
+        rows_for_c = [r for r in related if r["related_record_id"] == "rec_c"]
+        assert len(rows_for_c) == 1, f"expected exactly one row for rec_c: {related}"
+        row = rows_for_c[0]
+
+        assert row["weight"] == 0.5
+        assert row["entity_class"] == "uuid", (
+            "entity_class must be read from the stored column (uuid), not "
+            f"re-derived from the weight==0.5 band (which said url): {row}"
+        )
+
+    def test_min_weight_filters_entities_not_whole_groups(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defect 2 counterfactual: min_weight must exclude low-weight
+        entities from the JOIN (and thus from overlap_count), not merely
+        gate whole groups via HAVING max(weight) >= threshold.
+
+        rec_a shares 4 low-weight (0.4) paths + 1 high-weight (0.9) proper
+        noun with the anchor (5 total). rec_b shares only 2 high-weight
+        (0.9) proper nouns (2 total). At min_weight=0.5 the old HAVING
+        clause let rec_a through with overlap_count=5 (inflated by the four
+        sub-threshold paths) and ranked it above rec_b's overlap_count=2 —
+        exactly backwards, since rec_a's genuinely-qualifying overlap is
+        only 1.
+        """
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        _enable_reference_detection_classes(monkeypatch)
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-provenance-3")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {
+                "id": "anchor",
+                "body": (
+                    "Reviewed /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json along with "
+                    "Zeta Corp and Alpha One and Beta Two."
+                ),
+            },
+            {
+                "id": "rec_a",
+                "body": (
+                    "Audit of /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json plus Zeta Corp notes."
+                ),
+            },
+            {"id": "rec_b", "body": "Meeting notes: Alpha One and Beta Two discussed rollout."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        related = query_related_records(db_path, ["anchor"], min_weight=0.5)
+        by_record = {r["related_record_id"]: r for r in related}
+
+        assert by_record["rec_a"]["overlap_count"] == 1, (
+            f"low-weight paths must not inflate overlap_count: {by_record['rec_a']}"
+        )
+        assert by_record["rec_b"]["overlap_count"] == 2, by_record["rec_b"]
+
+        # Ranking must reflect genuinely-qualifying overlap: rec_b (2) ahead
+        # of rec_a (1), not rec_a ahead on its inflated pre-filter count of 5.
+        ranked_ids = [r["related_record_id"] for r in related]
+        assert ranked_ids.index("rec_b") < ranked_ids.index("rec_a"), (
+            f"rec_b should outrank rec_a once low-weight entities are "
+            f"excluded from overlap_count: {related}"
+        )
+
+    def test_production_caller_min_weight_ranking_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Severity check: the only production caller (entity_graph.py,
+        min_weight=0.3) sits below every real class weight (min is path at
+        0.4), so the WHERE-vs-HAVING distinction is a no-op at that
+        threshold — no entity is ever excluded either way. Same fixture as
+        the min_weight=0.5 counterfactual above, but at the real call-site
+        threshold: overlap_count and ranking must match the pre-fix values
+        (rec_a=5 ahead of rec_b=2), proving the fix does not change today's
+        production ranking.
+        """
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        _enable_reference_detection_classes(monkeypatch)
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-provenance-4")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {
+                "id": "anchor",
+                "body": (
+                    "Reviewed /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json along with "
+                    "Zeta Corp and Alpha One and Beta Two."
+                ),
+            },
+            {
+                "id": "rec_a",
+                "body": (
+                    "Audit of /opt/hermes/a.json /opt/hermes/b.json "
+                    "/opt/hermes/c.json /opt/hermes/d.json plus Zeta Corp notes."
+                ),
+            },
+            {"id": "rec_b", "body": "Meeting notes: Alpha One and Beta Two discussed rollout."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        related = query_related_records(db_path, ["anchor"], min_weight=0.3)
+        by_record = {r["related_record_id"]: r for r in related}
+
+        assert by_record["rec_a"]["overlap_count"] == 5, by_record["rec_a"]
+        assert by_record["rec_b"]["overlap_count"] == 2, by_record["rec_b"]
+        ranked_ids = [r["related_record_id"] for r in related]
+        assert ranked_ids.index("rec_a") < ranked_ids.index("rec_b"), (
+            f"at the real call-site min_weight=0.3, ranking must be unchanged: {related}"
+        )
+
+    def test_query_related_records_fails_open_on_missing_weight_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """Preserve the existing fail-open contract: a table lacking
+        entity_class/weight (pre-migration schema, not self-healed via
+        refresh_entity_index's ALTER) must degrade to [] rather than raise,
+        with a durable warning log — not silently swallowed either.
+        """
+        from plugins.memory.memory_os.entity_index import query_related_records
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-provenance-5")
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """
+                create table entity_index (
+                    entity_id text not null,
+                    entity_text text not null,
+                    record_id text not null,
+                    role text not null,
+                    proposed_by text not null default 'structural',
+                    created_at text not null,
+                    primary key (entity_id, record_id, role)
+                )
+                """
+            )
+            conn.execute(
+                "insert into entity_index (entity_id, entity_text, record_id, role,"
+                " proposed_by, created_at) values ('e1', 'Alice Bob', 'anchor', 'mention',"
+                " 'structural', '2026-01-01T00:00:00Z')"
+            )
+            conn.execute(
+                "insert into entity_index (entity_id, entity_text, record_id, role,"
+                " proposed_by, created_at) values ('e1', 'Alice Bob', 'rec_other', 'mention',"
+                " 'structural', '2026-01-01T00:00:00Z')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        related = query_related_records(db_path, ["anchor"], min_weight=0.0)
+        assert related == [], f"missing-column schema must degrade to [], got: {related}"
+
+
 # ── Analysis-doc M2: index.py rebuild/sync must not drift from the
 #    entity_index producer schema (class/weight columns) ────────────────
 

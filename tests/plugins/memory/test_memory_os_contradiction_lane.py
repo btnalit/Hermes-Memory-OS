@@ -329,35 +329,71 @@ class TestCounterfactuals:
         assert _claims_contradict(a, c) is False
 
 
-def test_nested_json_extraction_from_llm_output() -> None:
-    """Regex fallback handles nested claim objects in markdown-wrapped LLM output."""
-    from plugins.memory.memory_os.llm_contradiction_lane import CLAIM_EXTRACTION_PROMPT
-    # Simulate LLM returning JSON wrapped in markdown
-    response = '''```json
-{
-  "claim_a": {"subject": "auth", "predicate": "uses", "object": "JWT", "confidence": 0.9},
-  "claim_b": {"subject": "auth", "predicate": "uses", "object": "OAuth", "confidence": 0.85}
-}
-```'''
-    import json as _json
-    try:
-        _json.loads(response.strip())
-    except _json.JSONDecodeError:
-        # This is the path under test — should extract the nested JSON
-        start = response.find("{")
-        assert start != -1
-        depth = 0
-        end = -1
-        for i in range(start, len(response)):
-            if response[i] == "{": depth += 1
-            elif response[i] == "}":
-                depth -= 1
-                if depth == 0: end = i; break
-        assert end != -1, "balanced-brace parser should find matching close brace"
-        extracted = response[start:end + 1]
-        parsed = _json.loads(extracted)
-        assert parsed["claim_a"]["subject"] == "auth"
-        assert parsed["claim_b"]["object"] == "OAuth"
+def test_nested_json_extraction_from_markdown_fenced_llm_output(tmp_path: Path) -> None:
+    """Markdown-fenced JSON (```json ... ```) is the most common real LLM
+    reply shape and is exactly what triggers the extraction fallback: the
+    fence makes the first json.loads(response.strip()) fail, so the
+    fallback must recover the object.
+
+    This used to be a self-contained unit test that hand-duplicated the
+    old brace-depth-counter algorithm inline and asserted against that
+    local copy -- it never called into production code, so it kept
+    "passing" even after the depth counter was deleted from
+    llm_contradiction_lane.py in favor of _extract_json_object (Defect 1).
+    Rewritten to drive the real production entry point
+    (run_contradiction_lane, via a mocked _call_hermes_runtime_model) so a
+    regression in the actual parser would be caught here.
+
+    _extract_json_object's outermost find("{")..rfind("}") span handles
+    this case cleanly: the closing ``` fence contains no "}", so rfind
+    lands on the JSON object's own closing brace.
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_fenced_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_fenced_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    fenced_reply = (
+        '```json\n'
+        '{\n'
+        '  "claim_a": {"subject": "auth", "predicate": "uses", "object": "JWT", "confidence": 0.9},\n'
+        '  "claim_b": {"subject": "auth", "predicate": "uses", "object": "OAuth", "confidence": 0.85}\n'
+        '}\n'
+        '```'
+    )
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value=fenced_reply,
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(
+            store, embedder=_mock_embedder(), roots=roots, dry_run=True,
+        )
+
+    assert result["contradictions_found"] == 1, (
+        f"markdown-fenced JSON reply must still be parsed and judged, got {result}"
+    )
+    parse_failures = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_parse_failed"
+    ]
+    assert not parse_failures, (
+        f"a valid fenced reply must not be recorded as a parse failure: {parse_failures}"
+    )
 
 
 def test_error_record_on_judge_check_failure(monkeypatch, tmp_path: Path) -> None:
@@ -1002,3 +1038,175 @@ def test_empty_llm_reply_is_recorded_not_silently_skipped(tmp_path: Path) -> Non
         "quiet one via error_records"
     )
     assert empty_records[0]["component"] == "llm_contradiction_lane"
+
+
+def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(
+    tmp_path: Path,
+) -> None:
+    """Defect 1 counterfactual (contradiction lane).
+
+    The old hand-rolled brace-depth counter treated every "{" character as
+    a structural token, including one that appears inside a JSON string
+    value. When a claim's "object" field itself contained an unescaped
+    "{", the counter's depth never returned to 0, `end` stayed -1, and the
+    pair was dropped with no signal -- even though the reply was otherwise
+    perfectly valid JSON. _extract_json_object instead takes the outermost
+    find("{")..rfind("}") span and does not share that failure mode.
+
+    Counterfactual: without the fix, the reply below (prefixed with prose
+    so the first json.loads() attempt fails, forcing the extraction path)
+    is dropped -> contradictions_found stays 0. With the fix, the reply
+    parses and the two differing objects are a real contradiction ->
+    contradictions_found == 1 (dry_run=True records the finding without
+    needing an edge writer).
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_brace_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_brace_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    malformed_reply = (
+        "Here is the result: "
+        '{"claim_a": {"subject": "config", "predicate": "sets", '
+        '"object": "path with { unmatched brace", "confidence": 0.9}, '
+        '"claim_b": {"subject": "config", "predicate": "sets", '
+        '"object": "a different value", "confidence": 0.9}}'
+    )
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value=malformed_reply,
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(
+            store, embedder=_mock_embedder(), roots=roots, dry_run=True,
+        )
+
+    assert result["contradictions_found"] == 1, (
+        f"unbalanced-brace claim value must still be parsed and judged, got {result}"
+    )
+    parse_failures = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_parse_failed"
+    ]
+    assert not parse_failures, (
+        f"a valid (if brace-tricky) reply must not be recorded as a parse failure: {parse_failures}"
+    )
+
+
+def test_garbage_llm_reply_is_recorded_not_silently_skipped(tmp_path: Path) -> None:
+    """Defect 2 counterfactual (contradiction lane).
+
+    The empty-reply path (see test above) already records a typed
+    llm_empty_content error record, but the parse-failure paths right
+    below it (a reply that came back non-empty but is not extractable as a
+    JSON object) just `continue`d silently. A run where every reply was
+    unparseable garbage was therefore indistinguishable from "genuinely no
+    contradictions" using the run's artifacts alone.
+
+    Counterfactual: without the fix, error_records contains no
+    llm_parse_failed entry and the report reads as a clean quiet run.
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_garbage_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_garbage_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value="Sorry, I cannot help with that request.",
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
+
+    assert result["contradictions_found"] == 0
+    parse_failures = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_parse_failed"
+    ]
+    assert parse_failures, (
+        "an all-unparseable-reply run must be distinguishable from a "
+        "genuinely quiet one via error_records"
+    )
+    assert parse_failures[0]["component"] == "llm_contradiction_lane"
+
+
+def test_non_dict_json_reply_is_recorded_not_a_crash(tmp_path: Path) -> None:
+    """Follow-up 1 counterfactual (contradiction lane).
+
+    A first-attempt json.loads() success does not guarantee a dict result:
+    a bare JSON array/string/number is valid JSON. Before this fix, the
+    very next line (parsed.get("claim_a")) had no dict guard, so a
+    non-dict reply raised AttributeError uncaught -- killing
+    run_contradiction_lane mid-loop (after any earlier pairs in the batch
+    had already been processed) instead of being recorded and skipped.
+    Same defect class fixed elsewhere in this batch in
+    llm_edge_proposer._call_llm (its `if not isinstance(parsed, dict)`
+    guard, added there for exactly this reply shape, is the reference for
+    this fix).
+
+    Counterfactual: without the fix, run_contradiction_lane raises
+    AttributeError. With the fix, it returns normally with an
+    llm_parse_failed error record and no contradictions found.
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_nondict_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_nondict_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value="[1, 2, 3]",
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
+
+    assert result["contradictions_found"] == 0
+    parse_failures = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_parse_failed"
+    ]
+    assert parse_failures, (
+        "a non-dict-but-valid-JSON reply must be recorded, not silently "
+        "dropped or allowed to crash the lane"
+    )
+    assert parse_failures[0]["component"] == "llm_contradiction_lane"

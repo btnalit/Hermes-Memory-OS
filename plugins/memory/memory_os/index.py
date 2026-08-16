@@ -79,8 +79,15 @@ class MemoryOSIndex:
             )
             if _embedder_available:
                 _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
+                _embedding_preservation: dict[str, Any] = {"outcome": "embedder_available"}
             elif self.roots.index_path.exists():
-                _copy_embeddings_from_live(conn, self.roots.index_path)
+                _embedding_preservation = _copy_embeddings_from_live(conn, self.roots.index_path)
+            else:
+                _embedding_preservation = {
+                    "outcome": "no_live_index",
+                    "live_row_count": 0,
+                    "copied_row_count": 0,
+                }
             _index_audit_entries(conn, self.roots.audit_path)
             _index_edges(conn, self.roots)
             if _entity_index_enabled(store):
@@ -102,8 +109,36 @@ class MemoryOSIndex:
             action="index_rebuild",
             status="ok",
             target=str(self.roots.index_path),
-            details={},
+            details={"embedding_preservation": _embedding_preservation},
         )
+        if _embedding_preservation.get("outcome") == "copy_failed":
+            # Fail-open by design (see _copy_embeddings_from_live): the
+            # rebuild above already completed and shipped. This is the
+            # loud record that a silent embedding wipe would otherwise be
+            # indistinguishable from a healthy rebuild — the "No Silent
+            # Failures" bounded error record, same shape as the
+            # entity_index knob-resolution failure above.
+            from .jsonl_io import build_error_record as _build_error_record
+
+            _error_record = _build_error_record(
+                component="sqlite",
+                operation="copy_embeddings_from_live",
+                error_code="EMBEDDINGS_COPY_FROM_LIVE_FAILED",
+                severity="warning",
+                recoverable=True,
+                details={
+                    "error": str(_embedding_preservation.get("error", "")),
+                    "live_row_count": _embedding_preservation.get("live_row_count", 0),
+                    "copied_row_count": _embedding_preservation.get("copied_row_count", 0),
+                },
+            )
+            append_audit(
+                self.roots.audit_path,
+                action="index_rebuild_embeddings_copy_failed",
+                status="warning",
+                target=str(self.roots.index_path),
+                details={"error_record": _error_record},
+            )
 
     def try_rebuild_from_store(self, store: MemoryOSStore) -> bool:
         try:
@@ -735,22 +770,108 @@ def _clear_table(conn: sqlite3.Connection, table: str) -> None:
     conn.execute(f"delete from {table}")
 
 
-def _copy_embeddings_from_live(staging_conn: sqlite3.Connection, live_path: Path) -> None:
+def _copy_embeddings_from_live(staging_conn: sqlite3.Connection, live_path: Path) -> dict[str, Any]:
     """Copy memory_embeddings from the live index into a staging DB.
 
     Used by rebuild_from_store to preserve embeddings across a rebuild
     when the embedder is not available (P0.2-class guard — prevents
     silent embedding wipe).
+
+    Fail-open by design: any sqlite3.Error here (live index locked,
+    corrupt, or missing its table) must never abort the rebuild — the
+    staging DB always ships. What changes with this contract is that the
+    outcome is now reported through a CLOSED set of reason codes instead
+    of a bare `pass`, so a caller can tell "live had rows, staging has
+    zero" (a silent wipe) from "live genuinely had nothing to copy"
+    (idle/healthy) without re-running anything:
+
+      - "no_live_index": live_path does not exist.
+      - "live_table_missing": live DB attached but has no
+        memory_embeddings table (e.g. pre-embeddings schema).
+      - "copy_failed": ATTACH or the copy raised sqlite3.Error (locked,
+        corrupt, etc.) — live_row_count reflects what was readable
+        before the failure, if any.
+      - "copied": copy completed; live_row_count/copied_row_count are
+        counted independently (before/after) so a short copy is visible.
     """
+    if not live_path.exists():
+        return {"outcome": "no_live_index", "live_row_count": 0, "copied_row_count": 0}
+
+    attached = False
+    live_row_count = 0
     try:
-        staging_conn.execute(f"ATTACH DATABASE '{live_path}' AS live")
+        staging_conn.execute("ATTACH DATABASE ? AS live", (str(live_path),))
+        attached = True
+        table_exists = staging_conn.execute(
+            "select 1 from live.sqlite_master where type = 'table' and name = 'memory_embeddings'"
+        ).fetchone()
+        if not table_exists:
+            return {"outcome": "live_table_missing", "live_row_count": 0, "copied_row_count": 0}
+        live_row_count = staging_conn.execute(
+            "select count(*) from live.memory_embeddings"
+        ).fetchone()[0]
         staging_conn.execute(
             "INSERT INTO main.memory_embeddings "
             "SELECT * FROM live.memory_embeddings"
         )
-        staging_conn.execute("DETACH live")
+        copied_row_count = staging_conn.execute(
+            "select count(*) from main.memory_embeddings"
+        ).fetchone()[0]
+        return {
+            "outcome": "copied",
+            "live_row_count": live_row_count,
+            "copied_row_count": copied_row_count,
+        }
+    except sqlite3.Error as exc:
+        # fail-open: live index may be locked or corrupt — the rebuild
+        # must still complete; the loss is reported, not swallowed.
+        # live_row_count may still be 0 here if ATTACH itself raised
+        # before the in-transaction count could run — fall back to an
+        # independent direct connection so a wipe (live had rows) stays
+        # distinguishable from an idle rebuild (live had none) even when
+        # the ATTACH-based path never got far enough to count anything.
+        if live_row_count == 0:
+            live_row_count = _best_effort_live_embedding_count(live_path)
+        return {
+            "outcome": "copy_failed",
+            "live_row_count": live_row_count,
+            "copied_row_count": 0,
+            "error": str(exc),
+        }
+    finally:
+        if attached:
+            try:
+                staging_conn.execute("DETACH live")
+            except sqlite3.Error:
+                pass
+
+
+def _best_effort_live_embedding_count(live_path: Path) -> int:
+    """Independently probe how many rows live.memory_embeddings has.
+
+    Used only on the copy_failed path in _copy_embeddings_from_live, via a
+    fresh direct connection (not the staging conn's failed ATTACH), so the
+    audit can still report a nonzero live_row_count when the ATTACH-based
+    copy itself is what failed (e.g. a lock held only against ATTACH).
+    Best-effort: if this probe also fails, 0 is returned rather than
+    raising — the caller already has a copy_failed outcome to report.
+    """
+    try:
+        probe_conn = sqlite3.connect(str(live_path))
     except sqlite3.Error:
-        pass  # fail-open: live index may not exist, be locked, or be corrupt
+        return 0
+    try:
+        table_exists = probe_conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'memory_embeddings'"
+        ).fetchone()
+        if not table_exists:
+            return 0
+        row = probe_conn.execute("select count(*) from memory_embeddings").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        probe_conn.close()
 
 
 def _index_events(conn: sqlite3.Connection, store: MemoryOSStore) -> None:

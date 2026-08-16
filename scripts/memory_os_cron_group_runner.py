@@ -246,9 +246,19 @@ def _is_due(spec: dict[str, Any], entry: dict[str, Any], *, now: datetime, force
     policy = str(spec.get("due_policy") or "interval")
     if policy == "calendar":
         anchor_minutes = _anchor_minutes(str(spec.get("calendar_anchor") or "00:00"))
-        if last_started.astimezone(timezone.utc).date() >= now.astimezone(timezone.utc).date():
+        # Normalize `now` to UTC once and reuse it for both the date and the
+        # anchor-minutes comparison. Production always calls this with a
+        # UTC `now` (datetime.now(timezone.utc) at both call sites), but a
+        # non-UTC-aware `now` (only reachable via the documented
+        # testing-only --now override) previously compared its raw
+        # wall-clock hour/minute against a UTC anchor while the date check
+        # two lines above was already UTC-normalized -- a mixed-timezone
+        # comparison that could report "before_calendar_anchor" past the
+        # anchor, or vice versa.
+        now_utc = now.astimezone(timezone.utc)
+        if last_started.astimezone(timezone.utc).date() >= now_utc.date():
             return False, "already_ran_today"
-        if (now.hour * 60 + now.minute) < anchor_minutes:
+        if (now_utc.hour * 60 + now_utc.minute) < anchor_minutes:
             return False, "before_calendar_anchor"
         return True, "calendar_day_due"
     try:
