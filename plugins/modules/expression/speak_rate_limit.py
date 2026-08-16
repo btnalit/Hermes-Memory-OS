@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from plugins.memory.memory_os.timeutil import ensure_utc_aware
+
 MAX_PER_HOUR = 5
 WINDOW_SECONDS = 3600
 
@@ -62,6 +64,4 @@ def _parse_ts(ts: str) -> datetime:
         parsed = datetime.fromisoformat(ts_clean)
     except (ValueError, TypeError):
         return datetime.min.replace(tzinfo=timezone.utc)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return ensure_utc_aware(parsed)

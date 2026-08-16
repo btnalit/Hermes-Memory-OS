@@ -14,6 +14,7 @@ from .ids import new_working_id
 from .jsonl_io import locked_jsonl_file
 from .schema import WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, WorkingItem
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 
 
 ALLOWED_WORKING_KINDS = {"lingering", "emotional", "curiosity", "attention"}
@@ -197,8 +198,7 @@ class WorkingMemoryService:
             decay_base_str = item.last_decayed_at or item.updated_at or item.created_at
             try:
                 decay_base = datetime.fromisoformat(decay_base_str)
-                if decay_base.tzinfo is None:
-                    decay_base = decay_base.replace(tzinfo=timezone.utc)
+                decay_base = ensure_utc_aware(decay_base)
             except (ValueError, TypeError):
                 # Malformed/unparseable stored timestamp on the heartbeat decay
                 # path — must not raise. Treat as "decayed just now" (no weight
@@ -285,8 +285,7 @@ class WorkingMemoryService:
             expiry_base_str = item.expired_at or item.updated_at
             try:
                 expiry_dt = datetime.fromisoformat(expiry_base_str)
-                if expiry_dt.tzinfo is None:
-                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                expiry_dt = ensure_utc_aware(expiry_dt)
             except (ValueError, TypeError):
                 # Malformed timestamp — keep the item rather than risk data loss.
                 kept.append(raw_item)

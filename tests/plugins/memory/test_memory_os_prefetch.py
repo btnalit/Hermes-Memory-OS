@@ -99,6 +99,70 @@ def test_prefetch_records_substrate_shadow_recall_without_injecting_fact_or_quer
     assert ledger_record["substrate_snapshot_id"] == "hindsight:bank:v1"
 
 
+def test_prefetch_records_shadow_row_when_all_providers_fail_with_zero_facts(tmp_path):
+    store = _store(tmp_path)
+
+    build_prefetch(
+        "ALL_PROVIDERS_FAILED_QUERY",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        substrate_recall_report={
+            "schema_version": "memory-os.substrate_recall.v0",
+            "query_class": "shadow",
+            "selected_provider": "deterministic_fallback",
+            "facts": [],
+            "authoritative": False,
+            "external_authoritative_count": 0,
+            "local_first_authority_preserved": True,
+            "recall_llm_triggered": False,
+            "fallback_triggered": True,
+            "provider_error_count": 2,
+            "provider_errors": [
+                {"provider": "hindsight", "stage": "health", "error_type": "RuntimeError"},
+                {"provider": "hindsight", "stage": "recall", "error_type": "TimeoutError"},
+            ],
+        },
+    )
+
+    shadow_path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+    assert shadow_path.exists(), "an all-providers-failed turn must leave evidence even with zero facts"
+    shadow_record = json.loads(shadow_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert shadow_record["fact_count"] == 0
+    assert shadow_record["provider_error_count"] == 2
+    assert shadow_record["provider_errors"] == [
+        {"provider": "hindsight", "stage": "health", "error_type": "RuntimeError"},
+        {"provider": "hindsight", "stage": "recall", "error_type": "TimeoutError"},
+    ]
+
+
+def test_prefetch_writes_no_shadow_row_for_quiet_turn(tmp_path):
+    store = _store(tmp_path)
+
+    build_prefetch(
+        "QUIET_TURN_QUERY",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        substrate_recall_report={
+            "schema_version": "memory-os.substrate_recall.v0",
+            "query_class": "shadow",
+            "selected_provider": "deterministic_fallback",
+            "facts": [],
+            "authoritative": False,
+            "external_authoritative_count": 0,
+            "local_first_authority_preserved": True,
+            "recall_llm_triggered": False,
+            "fallback_triggered": True,
+            "provider_error_count": 0,
+            "provider_errors": [],
+        },
+    )
+
+    shadow_path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+    assert not shadow_path.exists()
+
+
 def test_prefetch_injects_active_substrate_recall_as_advisory_context(tmp_path):
     store = _store(tmp_path)
 
@@ -2125,6 +2189,123 @@ def test_recent_cross_session_respects_max_items_cap(tmp_path):
     # With 8 events and knob default 5, we expect 5 items + header.
     assert len(lines) == 6, f"Expected 6 lines (header + 5 items), got {len(lines)}: {lines}"
     assert any("跨会话·待结晶" in line for line in lines)
+
+
+def test_recent_cross_session_query_ranking_keeps_newest_within_tied_score(tmp_path):
+    """Query-aware ranking must be newer-first within a tied score tier.
+
+    `collected` is pre-sorted newest-first before scoring. The comment on
+    the ranking sort says "higher score first, then newer first within same
+    score" -- the sort key must actually deliver that, not silently reverse
+    the tie-break to oldest-first.
+
+    Three events (ONE/TWO/THREE) share the same nonzero token-overlap score
+    against the query, at three different timestamps; a fourth (FOUR) has a
+    strictly lower score. This asserts three things:
+      1. Higher score sorts before lower score.
+      2. Within the tied trio, newer sorts before older (ONE < TWO < THREE).
+      3. With a knob-forced max_items=2, truncation keeps the two NEWEST of
+         the tied trio (ONE, TWO) -- not the two oldest, which is what the
+         pre-fix reversed tie-break would keep.
+
+    The no-query path (pure timestamp order, ignoring score) is asserted
+    unchanged, to prove the fix is scoped to the query-ranking branch only.
+    """
+    store = _store(tmp_path)
+    current_session_id = "sess_tie_current"
+    other_session_id = "sess_tie_other"
+    query = "rollout window capacity plan"
+
+    events = [
+        # (event_id, tag, hours_ago, summary)
+        ("evt_tie_one", "ONE_NEWEST_TAG", 1, f"rollout window capacity update ONE_NEWEST_TAG"),
+        ("evt_tie_two", "TWO_MID_TAG", 3, f"rollout window capacity notes TWO_MID_TAG"),
+        ("evt_tie_three", "THREE_OLDEST_TAG", 6, f"rollout window capacity summary THREE_OLDEST_TAG"),
+        ("evt_tie_four", "FOUR_LOW_TAG", 2, f"rollout only mention FOUR_LOW_TAG"),
+    ]
+
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_json = ""
+    for eid, _tag, hours_ago, summary in events:
+        candidate_json += json.dumps({
+            "candidate_id": f"cand_{eid}",
+            "kind": "moment",
+            "body": "test",
+            "source_event_ids": [eid],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n"
+        store.append_event(EventEnvelope(
+            schema_version=EVENT_SCHEMA_VERSION,
+            id=eid,
+            ts=(datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(),
+            profile="test",
+            source="test",
+            kind="conversation_turn",
+            summary=summary,
+            safe_ref={"session_id": other_session_id},
+            tags=[],
+        ))
+    candidates_path.write_text(candidate_json, encoding="utf-8")
+
+    # ── Query-aware ranking: score tier first, newest-first within tie ──
+    lines_query = _recent_cross_session_lines(
+        store,
+        session_id=current_session_id,
+        query=query,
+    )
+    idx_one = next(i for i, l in enumerate(lines_query) if "ONE_NEWEST_TAG" in l)
+    idx_two = next(i for i, l in enumerate(lines_query) if "TWO_MID_TAG" in l)
+    idx_three = next(i for i, l in enumerate(lines_query) if "THREE_OLDEST_TAG" in l)
+    idx_four = next(i for i, l in enumerate(lines_query) if "FOUR_LOW_TAG" in l)
+    assert idx_one < idx_two < idx_three, (
+        f"Tied-score events must be newest-first (ONE < TWO < THREE), got: {lines_query}"
+    )
+    assert idx_three < idx_four, (
+        f"Lower-score event must sort after the tied higher-score tier, got: {lines_query}"
+    )
+
+    # ── No-query path unchanged: pure newest-first by timestamp ─────────
+    lines_no_query = _recent_cross_session_lines(
+        store,
+        session_id=current_session_id,
+        query="",
+    )
+    tag_order = [
+        next(tag for _eid, tag, _h, _s in events if tag in line)
+        for line in lines_no_query
+        if any(tag in line for _eid, tag, _h, _s in events)
+    ]
+    assert tag_order == ["ONE_NEWEST_TAG", "FOUR_LOW_TAG", "TWO_MID_TAG", "THREE_OLDEST_TAG"], (
+        f"No-query path must stay strict newest-first by ts, got: {tag_order}"
+    )
+
+    # ── Truncation: force max_items=2 via knob override, tied trio only ──
+    override_path = store.roots.memory_os_root / "system" / "knob_overrides.jsonl"
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path.write_text(
+        json.dumps({
+            "knob": "recent_cross_session_max_items",
+            "override_value": 2,
+            "state": "confirmed",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    lines_truncated = _recent_cross_session_lines(
+        store,
+        session_id=current_session_id,
+        query=query,
+    )
+    joined = "\n".join(lines_truncated)
+    assert "ONE_NEWEST_TAG" in joined and "TWO_MID_TAG" in joined, (
+        f"Truncation must keep the two NEWEST of the tied trio, got: {lines_truncated}"
+    )
+    assert "THREE_OLDEST_TAG" not in joined and "FOUR_LOW_TAG" not in joined, (
+        f"Truncation must drop the oldest tied event and the lower-score event, "
+        f"got: {lines_truncated}"
+    )
 
 
 def test_cross_session_dedup_prevents_duplicate_injection(tmp_path):

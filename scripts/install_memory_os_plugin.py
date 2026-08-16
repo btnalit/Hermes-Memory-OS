@@ -1989,6 +1989,7 @@ def _run_expired_working_migration(
 ) -> dict[str, object]:
     """One-time migration: remove expired working items older than 7 days."""
     from datetime import datetime, timezone
+    from plugins.memory.memory_os.timeutil import ensure_utc_aware
     working_path = hermes_home / "memory-os" / "working" / "lingering.json"
     if not working_path.exists():
         return {"status": "no_working_file", "reason": "lingering.json not found"}
@@ -2012,8 +2013,7 @@ def _run_expired_working_migration(
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ensure_utc_aware(ts)
             age_days = (now - ts).total_seconds() / 86400
         except (ValueError, TypeError):
             # Malformed/unparseable timestamp -- this migration deletes

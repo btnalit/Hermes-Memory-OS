@@ -1506,8 +1506,12 @@ class CognitiveLoopRunner:
 
 def _step_status(result: dict[str, Any]) -> str:
     status = str(result.get("status", "") or "").lower()
-    if status in {"ok", "warning", "error", "deferred", "skipped", "skipped_dependency_failed", "blocked"}:
-        return "warning" if status == "deferred" else status
+    if status in {"ok", "warning", "error", "deferred", "degraded", "skipped", "skipped_dependency_failed", "blocked"}:
+        # "degraded" (e.g. llm_edge_proposer: at least one pair's LLM call
+        # failed this run) must not fall through to "ok" — the raw
+        # "degraded" value stays visible in the step's passthrough result
+        # dict; only the step-level classification maps it to "warning".
+        return "warning" if status in {"deferred", "degraded"} else status
     if result.get("output") == "[SILENT]" or result.get("reason"):
         return "warning"
     return "ok"

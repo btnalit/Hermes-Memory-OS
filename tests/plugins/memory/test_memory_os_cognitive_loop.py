@@ -1079,3 +1079,66 @@ def test_llm_edge_proposer_wrapper_propagates_outcome_and_call_counters(tmp_path
     assert summary["llm_call_ok_count"] == 0
     assert summary["llm_call_failure_count"] == 1
     assert summary["llm_call_failure_reasons"] == {"empty_llm_response": 1}
+
+
+def test_llm_edge_proposer_degraded_status_maps_to_warning_at_step_level(tmp_path, monkeypatch):
+    """Counterfactual for the "degraded" step-status blind spot: the
+    producer above correctly returns status="degraded" when every LLM call
+    fails, but _step_status's vocabulary was closed over {ok, warning,
+    error, deferred, skipped, skipped_dependency_failed, blocked} and the
+    degraded summary carries neither an "output"=="[SILENT]" nor a
+    truthy "reason" key -- so the fall-through branch classified the
+    step (and therefore the cycle) as "ok" on the exact all-calls-failed
+    run this fix exists to expose.
+
+    Drives the REAL _run_step path (not the inner dict) so the assertion
+    is on the same step-level classification that feeds _cycle_status and
+    the persisted report.
+    """
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os import llm_edge_proposer
+
+    store = _init_store(tmp_path)
+    index = MemoryOSIndex(store.roots)
+
+    for rec_id, created_at in (
+        ("cry_llm_c", "2026-06-01T10:00:00Z"),
+        ("cry_llm_d", "2026-06-01T11:00:00Z"),
+    ):
+        store.append_crystallized_record(
+            "test_llm_edge_proposer_step_status.md",
+            {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": rec_id,
+                "kind": "test",
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "test",
+                "approval_note": "test seed",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            },
+            "test crystallized record body",
+        )
+    index.rebuild_from_store(store)
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    # Every LLM reply is empty -> every _call_llm outcome is
+    # "empty_llm_response" -> the run is degraded, not "no relationships".
+    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+
+    runner = CognitiveLoopRunner(store)
+    step = runner._run_step("llm_edge_proposer", runner._llm_edge_proposer, {})
+
+    # The inner passthrough dict keeps the raw producer status untouched...
+    assert step["result"]["status"] == "degraded"
+    # ...but the step-level classification that _cycle_status/the report
+    # consume must not lie "ok" through an all-calls-failed run.
+    assert step["status"] == "warning"

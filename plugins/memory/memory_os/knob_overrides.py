@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from .roots import MemoryOSRoots
+from .timeutil import ensure_utc_aware
 
 # ── Dedup sentinel — must be a unique object that cannot appear in JSON ──
 _SENTINEL = object()
@@ -940,8 +941,7 @@ def _is_expired(expires_str: str, now: datetime) -> bool:
     """
     try:
         expires_at = datetime.fromisoformat(expires_str)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = ensure_utc_aware(expires_at)
         return expires_at <= now
     except (ValueError, TypeError):
         return False

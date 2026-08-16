@@ -810,3 +810,105 @@ def test_provisional_backed_resolver_approved_row_survives_retention_window_arch
         "resurfaced candidate should now be reachable and demoted/compacted "
         "by the general aged sweep, not stuck"
     )
+
+
+# ── Defect D (coordinator pre-merge review, 2026-08-15): Defect C's fix
+# protects a resolver_approved row from the retention-window branch only
+# while the caller passes an accurate provisional_backed_candidate_ids set.
+# invalidate_provisional_record (called by provisional_sweep on TTL/cap
+# eviction) mutates ONLY the crystallized record's frontmatter -- it appends
+# NO triage row. So the tick immediately after eviction: the candidate is no
+# longer provisional_backed (record inactive) AND its latest triage row still
+# says "resolver_approved" (not "owner_eligible", frozen from promotion
+# time) -- neither exemption clause in the retention-window elif applied,
+# and the row fell into the else branch and archived once aged past
+# retention_days. Same loss shape as Defect C, at the eviction transition
+# the guard exists to close. Fix: the retention-window elif treats
+# resolver_approved as sticky, exactly like owner_eligible.
+#
+# The decisive counterfactual below calls compact_candidate_queue directly
+# (not through run_candidate_aggregation_lane) with
+# provisional_backed_candidate_ids=set() -- exactly what candidate_aggregation
+# itself would compute post-invalidation -- to isolate the retention-window
+# elif/else branch this fix targets from _demote_aged's general aged-demote
+# sweep, which (depending on whether the candidate's bridge_state still
+# qualifies it for re-clustering) may or may not get a turn before compact
+# runs in the full pipeline. The function-level contract must hold on its
+# own regardless of what the current sole caller's stage ordering happens to
+# paper over.
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_resolver_approved_row_survives_compact_after_provisional_invalidated(tmp_path):
+    """DECISIVE counterfactual for Defect D: once invalidate_provisional_record
+    evicts the ONLY crystallized anchor for a resolver_approved candidate,
+    compact_candidate_queue's retention-window elif -- which resolves
+    effective state from triage rows alone and has no idea the candidate WAS
+    provisional-backed -- must not archive the row purely because it aged
+    past retention_days with a frozen resolver_approved triage state."""
+    from plugins.memory.memory_os.crystallized import (
+        compact_candidate_queue,
+        read_candidate_queue,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _resolver_approved_aged_candidate(
+        store, "cand-sticky-resolver-approved", days_old=20,
+    )
+    service, record_id = _crystallize_candidate(store, candidate, provisional=True)
+
+    service.invalidate_provisional_record(
+        record_id, reason="resolver_ttl_expired", invalidated_by="provisional_sweep",
+    )
+
+    archived_count = compact_candidate_queue(
+        store, retention_days=7, provisional_backed_candidate_ids=set(),
+    )
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-sticky-resolver-approved" in live_ids, (
+        "resolver_approved row was archived one tick after its provisional "
+        f"anchor was evicted -- archived_count={archived_count}"
+    )
+
+
+@pytest.mark.usefixtures("crystallized_test_write_authority")
+def test_resolver_approved_confirmed_permanent_still_archived_by_terminal_branch(tmp_path):
+    """Regression guard for Defect D's fix: the new resolver_approved
+    stickiness must NOT resurrect a candidate whose provisional was
+    confirmed to a PERMANENT crystallized record. terminal_candidate_ids
+    (checked before the retention-window elif) must still win."""
+    from plugins.memory.memory_os.crystallized import (
+        compact_candidate_queue,
+        read_candidate_queue,
+        read_effective_candidates,
+    )
+
+    store = _store_with_gate(tmp_path)
+    candidate = _resolver_approved_aged_candidate(
+        store, "cand-confirmed-permanent", days_old=20,
+    )
+    _crystallize_candidate(store, candidate, provisional=False)
+
+    effective = read_effective_candidates(store)
+    terminal_ids = {
+        item.candidate.candidate_id for item in effective
+        if item.terminal and not item.provisional_backed
+    }
+    assert "cand-confirmed-permanent" in terminal_ids, (
+        "test setup: a permanently-crystallized candidate must resolve "
+        "terminal and not provisional_backed"
+    )
+
+    archived_count = compact_candidate_queue(
+        store,
+        retention_days=7,
+        terminal_candidate_ids=terminal_ids,
+        provisional_backed_candidate_ids=set(),
+    )
+
+    live_ids = {c.candidate_id for c in read_candidate_queue(store.roots)}
+    assert "cand-confirmed-permanent" not in live_ids, (
+        "sticky resolver_approved must not override the terminal branch for "
+        f"a permanently-confirmed candidate -- archived_count={archived_count}"
+    )

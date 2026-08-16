@@ -35,6 +35,7 @@ from typing import Any
 
 from .cron_registry import LANE_LAST_RUN_EVIDENCE, MEMORY_OS_CRON_LANES
 from .lane_last_run import read_lane_last_run
+from .timeutil import ensure_utc_aware
 
 LOOP_HEALTH_VIEW_SCHEMA_VERSION = "memory-os.loop_health_view.v0"
 
@@ -93,9 +94,7 @@ def _parse_recorded_at(value: str) -> datetime | None:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return ensure_utc_aware(parsed)
 
 
 def build_loop_health_view(

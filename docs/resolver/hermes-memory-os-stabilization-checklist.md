@@ -4060,6 +4060,77 @@ CLI 参数直接报错。全仓库 **94 个 `fromisoformat` 调用点 / 53 个�
 **测试数：3408 → 3521 passed（+113），13 skipped，0 failed。** 四道门全绿，
 `git diff --check` 干净，34 源文件 + 24 测试文件，15 个包零越界。
 
+## CX — CW 批次的合入前独立评审：10 项发现，8 修 2 拒（2026-08-15）
+
+开 PR 前对分支全量 diff 跑了一轮独立 /code-review（high）。10 项发现全部先对源码
+逐条验证，8 项修复、2 项有据拒绝。**评审抓到了 CW 自己引入或未闭合的真缺陷**，
+证明"修复批次也要被评审"不是仪式。
+
+### 修复的 8 项
+
+- **驱逐转换丢失（最重）**：CW 的 provisional-backed 守卫在**驱逐一 tick 后失效**——
+  `invalidate_provisional_record` 只改 frontmatter 不写 triage 行，effective 冻结在
+  `resolver_approved`，年龄分支照样归档；守卫参数集从当前视图算，驱逐后不再含该
+  候选。修复：retention 分支把 `resolver_approved` 置为 sticky（同 `owner_eligible`）。
+  不朽性已排除：`_demote_aged` 通用清扫 3 天 TTL 会 demote 它 → 正常归档；已确认
+  聚合 lane 三个提升路径只写 `resolver_approved` 一个字面量；terminal 分支先于
+  sticky 检查，确认转正的候选仍归档（回归测试钉住）。
+- **`degraded` 落穿成 `ok`**：CW 给 `run_llm_proposer` 加的 `status="degraded"` 不在
+  `_step_status` 封闭词表，summary 又无 `output`/`reason` 键 → 落到 `return "ok"`——
+  step/cycle 层在"全部调用失败"的运行上恰好报健康，正是该修复要暴露的场景。原测试
+  直调 wrapper 断言内层 dict，绕过了 `_step_status`，故套件抓不到。修复：映射
+  `degraded → warning`（同 `deferred`），原始值仍在透传 dict 里可见。**预期行为
+  变化**：LLM 间歇失败的主机上 `cognitive_loop.last_status` 会开始出现 `warning`
+  （共享 seam 实测 27.5% 空回复率）——之前是假 `ok`，不是回归。监控端
+  `{"ok","warning"}` 均为 presence-pass，不会 FAIL。
+- **指纹分支跳过数恒 0**：`max(0, processed - len(lines))` 在只于
+  `len(lines) >= processed` 时触发的 fingerprint-mismatch 分支里恒为 0，而该分支
+  丢弃整个前向积压——为量化静默丢失而生的字段在它存在的两个场景之一里报 0。
+  改为按分支计算（mismatch → `len(lines) - processed`），两处均注明是界不是精确值。
+- **撕裂读误判**：读方无锁 `read_text()` 可能读到写了一半的尾行，指纹记在残行上 →
+  下轮误报 mismatch → 丢弃两轮之间的全部真实行。已核实写方单次 `write()` 带 `\n`
+  （`append_jsonl_locked`），修复：非换行终止的尾行对本轮不可见，指纹永远算在
+  完整行上。
+- **跨会话同分档最旧优先**：`key=(-score, ts)` 在同分档内 ts 升序，与上一行注释
+  "newer first"直接矛盾，截断时保最旧弃最新。改为只按分数稳定排序（`collected`
+  已是最新优先预序）。反测复现了 6h 前事件排在 1h 前事件之前。
+- **router 静默吞掉 provider 异常**：CW 把 `health()` 移进 try 修了中断问题，但
+  加宽了静默吞噬——异常 provider 与合法 disabled 的 provider 同貌。修复：分阶段
+  try（`stage="health"|"recall"`），报告带 `provider_error_count` + 有界
+  `provider_errors`（cap 8，只记异常类型名，热路径无 I/O）。
+- **接线到读者（CW 形状第 5 次）**：上述计数被两层挡住——
+  `_record_substrate_shadow_recall` 的 `if not facts: return` 让**全 provider 失败
+  的轮次一行都不写**（恰是计数存在的场景），键选择字典与 `cli._hindsight_substrate_
+  monitor` 又各丢一次。修复：无 facts 但有错误也写行（安静轮仍不写）、两层键选
+  补齐、监控端确认对新键惰性。逐层单独回退各自失败。
+- **timeutil 收敛**：CW 三轮扫描手贴了 25 份相同归一化惯用语，而仓库早有
+  `timeutil.py`（docstring 明言应从它导入）。新增 `ensure_utc_aware()`，25 个
+  分支引入点全部收敛（与 diff 逐一对账），解析/异常结构/各点失败方向不动；
+  `cli.diff_report` 有意保留内联（reject-naive 语义不同）。timeutil 仍为叶子，
+  0 环。**这撤销了 CW 待办里"收敛需独立评估"的保留**——该保留把解析回退
+  （逐点不同，保留）与归一化行（统一，可收敛）混为一谈。
+
+另加一个特征测试钉住解析器收敛的已知取舍（`{JSON} 尾随散文含 }` 形状现在会被
+丢弃并记 `llm_parse_failed`）：它开始失败就意味着有人改了解析语义，须重新决策。
+
+### 有据拒绝的 2 项
+
+- **event_stats 排序反测空洞 + 双排序**：评审正确指出 `(ts,id)` tie-break 修复
+  revert 后全套件仍绿。但 CW 已记录该修复经 20000 次差分模糊测试证明**当前
+  不可观测**（所有消费者重排序或序无关聚合）；伪造白盒失败测试违背批次原则。
+  性能主张亦不成立：Timsort 对近乎有序输入 ~O(n)。评审建议的"把复合键上移到
+  runtime 排序"会改变 owner 面向的 `recent_event_summaries` 顺序语义——不该
+  合入前夹带，如需要应独立立项。
+- **（同上一项的后半）** 保持 selector 内显式排序（正确性文档价值），接受
+  反测不可构造为已记录的例外。
+
+### 评审中另获的观察（记录不修）
+
+`host_capability_probe` 与心跳报告无顶层 `status` 键，同样落穿 `_step_status`
+成 `ok`——前者的能力状态经 `capability_contract` 等其他路径可见，后者失败即抛
+（由 `_run_step` 捕获记 error），均非 CW 引入；根因是"缺键"而非"越界值"，
+需要时独立处理。
+
 ## 待办
 
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
@@ -4067,12 +4138,12 @@ CLI 参数直接报错。全仓库 **94 个 `fromisoformat` 调用点 / 53 个�
 不是白名单丢弃，故 CW.4 的接线修不到它）。后果：该 lane 写失败与"没边可提"在任何
 读者处都同貌。需独立立项——加计数要连带决定 `status` 降级语义。
 
-**`timeutil.py` 已存在却几乎无人用（CW 登记，2026-08-15）。**
-仓库里早有 `parse_utc`/`safe_compare`/`age_seconds` 三个正确实现，但仅 3 个文件采用；
-约 25 处（含 CW 本轮新修的若干）各自内联重复同一套归一逻辑。当前状态**正确**，但这
-正是本项目反复付出代价的"同一词汇多份拷贝"漂移形状。收敛需独立评估：批量替换的回归
-面不小，且各点的失败方向**不统一**（删除类保留、decay 类自愈、CLI 报错），不能无脑
-套同一个 helper。
+**`timeutil.py` 存量内联归一化点的收敛（CW 登记，CX 部分闭合，2026-08-15）。**
+CX 已新增 `ensure_utc_aware()` 并把 CW 分支引入的全部 25 个点收敛完毕（各点解析
+结构与失败方向不动）。剩余的是 `origin/main` 上**既有**的 clean-because-already-
+normalized 内联点（CW.6 分类表里约十余处）——当前正确，收敛只是防漂移。改它们
+会碰未被本批测试覆盖的老代码路径，留待有正当理由触碰那些文件时顺带收敛，不单独
+起批次。
 
 **图谱遗忘潮预期落点：2026-10-06 前后（CJ 登记,2026-08-07）。**
 first_injection_at=2026-08-07 起算 60 天,过密图谱（refines 为主,重归一后
@@ -6356,3 +6427,10 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   保留不变量只削成本（50→0 次索引重写）、两轮 Rule-5 时间戳扫描 23 处（含两处
   prefetch 热路径与真正的 working_cleanup cron lane），94 个 fromisoformat 调用点
   全部分类；全量 3408→3521 passed（+113）/13 skipped，四门全绿。
+
+- `85fa2e4..（CX，本节）`：CW 批次合入前独立评审 10 项发现——修 8（驱逐转换
+  丢失 sticky 化、degraded 落穿 `_step_status`、指纹分支跳过数恒 0、撕裂读
+  误判指纹、跨会话同分档最旧优先、router 吞 provider 异常、substrate 错误
+  计数三层接线含 `if not facts` 早退、timeutil 25 点收敛）拒 2（event_stats
+  排序反测经模糊测试证明不可构造、双排序 Timsort 下不成立）；
+  另钉解析器取舍特征测试。

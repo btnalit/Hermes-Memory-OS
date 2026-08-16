@@ -35,6 +35,7 @@ from .memory_sources import (
     normalize_memory_sources_config,
 )
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 
 
 HEADER = "## Memory-OS Context"
@@ -899,13 +900,21 @@ def _record_substrate_shadow_recall(
     report: dict[str, Any],
 ) -> None:
     facts = report.get("facts") if isinstance(report.get("facts"), list) else []
-    if not facts:
+    provider_error_count = int(report.get("provider_error_count") or 0)
+    # An all-providers-failed turn produces zero facts but must still leave
+    # evidence -- see SubstrateRouter.recall's provider_error_count /
+    # provider_errors (substrates/router.py). Without this, the exact case
+    # the counters exist for (every provider raised) writes no shadow row at
+    # all. A genuinely quiet turn -- no facts AND no provider errors -- still
+    # returns early: no row.
+    if not facts and not provider_error_count:
         return
     path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         return  # fail-open: shadow loss must not break prefetch
+    provider_errors = report.get("provider_errors")
     record = {
         "schema_version": "memory-os.substrate_recall_shadow.v0",
         # The field name is load-bearing: metadata_retention._record_created_at
@@ -923,6 +932,10 @@ def _record_substrate_shadow_recall(
         "local_first_authority_preserved": bool(report.get("local_first_authority_preserved")),
         "recall_llm_triggered": bool(report.get("recall_llm_triggered")),
         "fallback_triggered": bool(report.get("fallback_triggered")),
+        "provider_error_count": provider_error_count,
+        # Pass through as-is -- SubstrateRouter.recall already bounds this to
+        # MAX_PROVIDER_ERROR_RECORDS (8) entries.
+        "provider_errors": provider_errors if isinstance(provider_errors, list) else [],
     }
     try:
         from .jsonl_io import append_jsonl_locked
@@ -1874,8 +1887,7 @@ def _crystallized_lines(
                         # naive in provisional_entries, crashing the sort at
                         # `provisional_entries.sort(key=lambda e: e[0])` below
                         # when compared against aware sentinel/parsed values.
-                        if expires_dt.tzinfo is None:
-                            expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                        expires_dt = ensure_utc_aware(expires_dt)
                         sec = (expires_dt - now).total_seconds()
                         days_remaining = max(0, int(sec / 86400))
                     except (ValueError, TypeError):
@@ -2878,8 +2890,7 @@ def _last_session_lines(
             # TypeError on the aware comparison/subtraction below -- not a
             # ValueError, so a bare `except ValueError` would not catch it.
             # Normalize before comparing, same as knob_overrides._is_expired.
-            if ended_at.tzinfo is None:
-                ended_at = ended_at.replace(tzinfo=timezone.utc)
+            ended_at = ensure_utc_aware(ended_at)
         except (ValueError, TypeError):
             continue
         if best is None or ended_at > best[0]:
@@ -3020,8 +3031,7 @@ def _recent_cross_session_lines(
             # Naive (no-offset) event.ts parses without error but raises
             # TypeError on the aware `cutoff` comparison below -- normalize
             # before comparing, same as knob_overrides._is_expired.
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ensure_utc_aware(ts)
         except (ValueError, TypeError):
             continue
         if ts < cutoff:
@@ -3051,8 +3061,13 @@ def _recent_cross_session_lines(
                 summary_lower = summary.lower()
                 score = sum(1 for token in query_tokens if token in summary_lower)
                 scored.append((score, ts, summary, eid))
-            # Stable sort: higher score first, then newer first within same score
-            scored.sort(key=lambda x: (-x[0], x[1]), reverse=False)
+            # Stable sort: higher score first, then newer first within same score.
+            # `collected` is already newest-first (sorted above), and Python's
+            # sort is stable, so sorting by score alone preserves that
+            # newest-first order within each tied score tier -- do not also
+            # sort by timestamp here, which would reverse the tie-break to
+            # oldest-first.
+            scored.sort(key=lambda x: -x[0])
             collected = [(ts, s, e) for _, ts, s, e in scored]
 
     lines: list[str] = []
@@ -3175,8 +3190,7 @@ def _deep_reflection_card_is_safe(card: dict[str, Any]) -> bool:
             # than raising. Genuinely unparseable input keeps this
             # function's existing intent unchanged -- treated as expired
             # (return False), not as fail-open like knob_overrides.
-            if expires_dt.tzinfo is None:
-                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            expires_dt = ensure_utc_aware(expires_dt)
             if expires_dt <= datetime.now(timezone.utc):
                 return False
         except (ValueError, TypeError):

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from plugins.memory.memory_os.inner_drive import classify_event_for_inner_drive
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.timeutil import ensure_utc_aware
 from plugins.memory.memory_os.working import WorkingMemoryService
 
 
@@ -1626,8 +1627,7 @@ def _reject_reason(card: dict[str, Any], *, input_snapshot: dict[str, Any], now:
         return "identity_or_delivery_language"
     try:
         expires_at = datetime.fromisoformat(str(card.get("expires_at", "")))
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = ensure_utc_aware(expires_at)
         if expires_at <= now:
             return "expired"
     except (ValueError, TypeError):

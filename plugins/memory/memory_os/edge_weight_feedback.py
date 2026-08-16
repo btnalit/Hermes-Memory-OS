@@ -113,9 +113,25 @@ def run_edge_weight_feedback(
     lines: list[str] = []
     if shadow_exists:
         try:
-            lines = shadow_path.read_text(encoding="utf-8").splitlines()
+            raw_text = shadow_path.read_text(encoding="utf-8")
         except OSError:
-            lines = []
+            raw_text = ""
+        lines = raw_text.splitlines()
+        # The per-turn prefetch writer (_record_graph_layer_shadow ->
+        # jsonl_io.append_jsonl_locked) appends one full line + "\n" in a
+        # single handle.write() under a sidecar lock, so every DURABLE
+        # ledger line always ends with "\n". This reader takes no lock on
+        # the hot ledger, so it can race a write in progress and observe a
+        # torn (partially-written) last line with no trailing newline.
+        # Treat only newline-terminated lines as durable: drop a
+        # non-terminated tail element before it is counted, sliced, or
+        # fingerprinted. A partial line is simply invisible to this run and
+        # will be consumed next run once the writer finishes it -- this is
+        # what keeps the fingerprint always computed over a complete line
+        # and prevents a torn read from producing a false
+        # `ledger_fingerprint_mismatch` next run.
+        if raw_text and not raw_text.endswith("\n"):
+            lines = lines[:-1]
 
     # ── Cursor alignment check ──────────────────────────────────────────
     # `processed` is a LINE-COUNT cursor into a ledger the write side
@@ -155,11 +171,25 @@ def run_edge_weight_feedback(
         # "no_new_hits" outcome. `last_hit` / `first_injection_at` are left
         # untouched — they are independent of the shadow-ledger cursor.
         new_lines: list[str] = []
-        # Best-effort, count-based lower bound on how many previously-tracked
-        # ledger positions vanished out from under the cursor. It is a bound,
-        # not a claim about how many real injection hits were lost — some or
-        # all of that gap may have already been reinforced in a prior run.
-        cursor_skipped_row_count = max(0, processed - len(lines))
+        if cursor_misalignment_reason == "ledger_shorter_than_cursor":
+            # Best-effort, count-based lower bound on how many
+            # previously-tracked ledger positions vanished out from under
+            # the cursor. It is a bound, not a claim about how many real
+            # injection hits were lost — some or all of that gap may have
+            # already been reinforced in a prior run.
+            cursor_skipped_row_count = max(0, processed - len(lines))
+        else:
+            # "ledger_fingerprint_mismatch": the ledger is same-or-larger
+            # than the old cursor but its content diverged (a
+            # compaction+append that coincidentally lands the new length at
+            # or past the old cursor value). `new_lines` above was dropped
+            # in full, so the unconsumed forward backlog is everything from
+            # `len(lines) - processed` onward. This is also only a bound,
+            # not an exact count: how much of the renumbered prefix
+            # (positions [0, processed)) was truly already-consumed content
+            # versus newly-shifted content is unknowable from a line count
+            # alone.
+            cursor_skipped_row_count = max(0, len(lines) - processed)
     else:
         new_lines = lines[processed:] if len(lines) > processed else []
         cursor_skipped_row_count = 0

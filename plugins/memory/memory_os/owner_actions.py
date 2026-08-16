@@ -53,6 +53,7 @@ from .jsonl_io import (
     locked_jsonl_file,
 )
 from .store import MemoryOSStore
+from .timeutil import ensure_utc_aware
 from .review_content_safety import (
     contains_transcript_marker as _shared_contains_transcript_marker,
     looks_like_raw_review_content as _shared_looks_like_raw_review_content,
@@ -5311,8 +5312,7 @@ def _provisional_crystallized_review_items(store: MemoryOSStore, closed: set[str
                 # owner digest. Normalize before subtracting, same as
                 # knob_overrides._is_expired. Genuinely unparseable input
                 # keeps the existing fail-open default (999 / "fyi").
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                expires_at = ensure_utc_aware(expires_at)
                 remaining_seconds = (expires_at - now).total_seconds()
                 remaining_days = max(0, int(remaining_seconds / 86400))
             except (ValueError, TypeError):
@@ -5396,8 +5396,7 @@ def _provisional_knob_override_review_items(store: MemoryOSStore, closed: set[st
         if expires_str:
             try:
                 expires_dt = datetime.fromisoformat(expires_str)
-                if expires_dt.tzinfo is None:
-                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                expires_dt = ensure_utc_aware(expires_dt)
                 remaining = expires_dt - datetime.now(timezone.utc)
                 days_left = f"{max(0, remaining.days)}d"
             except (ValueError, TypeError):

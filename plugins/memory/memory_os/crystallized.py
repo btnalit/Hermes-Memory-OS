@@ -1803,16 +1803,32 @@ def compact_candidate_queue(
     below resolves state from triage rows alone
     (``resolve_candidate_effective_state``), which has no idea a candidate
     is provisional-backed. A resolver-approved provisional candidate whose
-    triage state is ``resolver_approved`` (not ``owner_eligible``) ages out
-    through that branch once its row passes ``retention_days`` —
-    independent of ``terminal_candidate_ids`` — with the same loss shape as
-    the 2026-08-14 hole: once the provisional is later invalidated (TTL/cap
-    eviction, owner reject), the candidate is in neither the live queue nor
-    active crystallized memory, and ``candidates.archive.jsonl`` has no
-    production reader. Any id in this set is kept active UNCONDITIONALLY —
-    checked first, ahead of every other branch including
-    ``terminal_candidate_ids`` itself, so the guarantee does not depend on
-    every caller constructing ``terminal_candidate_ids`` correctly.
+    triage state is ``resolver_approved`` (not ``owner_eligible``) — once
+    its row passes ``retention_days`` and its provisional anchor is later
+    invalidated (TTL/cap eviction, owner reject) — is no longer in
+    ``provisional_backed_candidate_ids`` (the record is inactive) and has
+    the same loss shape as the 2026-08-14 hole: ``invalidate_provisional_
+    record`` mutates only the crystallized record's frontmatter and appends
+    no triage row, so ``resolve_candidate_effective_state`` still returns
+    the frozen ``resolver_approved`` written at promotion time, and without
+    a further exemption the candidate would be in neither the live queue
+    nor active crystallized memory (``candidates.archive.jsonl`` has no
+    production reader). Pre-merge fix (2026-08-15): the retention-window
+    ``elif`` below now treats ``resolver_approved`` as sticky, exactly like
+    ``owner_eligible`` — a resolver-approved row is never archived by the
+    AGE branch regardless of how long ago its anchor was evicted. This does
+    NOT make the row immortal: once the general aged-demote sweep
+    (``candidate_aggregation._demote_aged``, unaffected by this parameter)
+    eventually writes a ``demoted`` triage row for it, ``resolve_candidate_
+    effective_state`` returns ``demoted`` and the row archives normally on
+    the next tick — either through ``terminal_candidate_ids`` (when the
+    caller supplies the full effective view) or through the ``else`` branch
+    here. Any id in ``provisional_backed_candidate_ids`` is kept active
+    UNCONDITIONALLY — checked first, ahead of every other branch including
+    ``terminal_candidate_ids`` itself, so that guarantee does not depend on
+    every caller constructing ``terminal_candidate_ids`` correctly; the
+    ``resolver_approved`` stickiness below is the narrower, second guarantee
+    that covers the gap between eviction and the next demote sweep.
 
     Invariant enforced by requiring this argument: a candidate can be
     archived ONLY if the caller has affirmatively said it is not
@@ -1832,6 +1848,10 @@ def compact_candidate_queue(
       - it is provisional-backed (see above) -- unconditionally, regardless
         of triage state or age
       - effective state resolves to owner_eligible (owner needs to see it)
+      - effective state resolves to resolver_approved (sticky, same as
+        owner_eligible -- see above; survives an evicted provisional anchor
+        until the general aged-demote sweep writes a demoted/absorbed/
+        fleeting triage row for it)
       - effective state is NOT demoted/absorbed AND created_age < retention_days
 
     Demoted/absorbed candidates are resolved outcomes and are ALWAYS archived
@@ -1890,11 +1910,18 @@ def compact_candidate_queue(
             age = _candidate_age_seconds(cand.created_at, now)
 
             # Active (stays in main file) if the owner still needs to see it,
-            # OR it is within the retention window AND not a resolved outcome.
-            # Demoted/fleeting/absorbed are resolved — always archive them so
-            # they stop cluttering the live queue (previously only archived
-            # once aged past retention_days, leaving young demoted/fleeting/
-            # absorbed in active).
+            # OR the row's latest triage is a resolver-approve that has not
+            # been overwritten by a newer triage action (sticky like
+            # owner_eligible — see the docstring's "resolver_approved is
+            # sticky" note: this is the retention-branch half of the
+            # provisional_backed_candidate_ids reversibility guarantee, for
+            # the window between provisional eviction and the general
+            # aged-demote sweep actually writing a demoted/absorbed/fleeting
+            # triage row), OR it is within the retention window AND not a
+            # resolved outcome. Demoted/fleeting/absorbed are resolved —
+            # always archive them so they stop cluttering the live queue
+            # (previously only archived once aged past retention_days,
+            # leaving young demoted/fleeting/absorbed in active).
             if cand.candidate_id in provisional_backed_candidate_ids:
                 # Reversibility guarantee, checked first and unconditionally:
                 # a provisional-backed candidate's only crystallized anchor
@@ -1910,7 +1937,7 @@ def compact_candidate_queue(
                 # latest triage row does not — archive it now.
                 archived.append(line_stripped)
                 archived_count += 1
-            elif effective == "owner_eligible" or (
+            elif effective in ("owner_eligible", "resolver_approved") or (
                 effective not in ("demoted", "fleeting", "absorbed") and age < retention_days * 86400
             ):
                 active.append(line_stripped)

@@ -1210,3 +1210,88 @@ def test_non_dict_json_reply_is_recorded_not_a_crash(tmp_path: Path) -> None:
         "dropped or allowed to crash the lane"
     )
     assert parse_failures[0]["component"] == "llm_contradiction_lane"
+
+
+def test_valid_json_with_trailing_prose_brace_is_dropped_not_parsed(tmp_path: Path) -> None:
+    """Characterization test -- pins a DELIBERATE, ACCEPTED limitation.
+
+    This branch converged the contradiction lane and llm_edge_proposer onto
+    the project's canonical parser, _extract_json_object (low_clue_recall.py:
+    outermost find("{")..rfind("}") span), replacing a hand-rolled brace-depth
+    counter. That convergence is strictly weaker for one reply shape: valid
+    JSON followed by trailing prose that itself contains a "}" character.
+    find("{")..rfind("}") anchors on the LAST "}" in the whole reply, so it
+    spans past the JSON object's real closing brace into the trailing prose,
+    producing a substring that is not valid JSON -- json.loads then raises,
+    and the pair is dropped with an llm_parse_failed error record instead of
+    being parsed.
+
+    This is NOT a bug to fix. It is the documented tradeoff of converging on
+    fact_judge.py's reference parser (see CLAUDE.md "LLM Integration - Reuse,
+    Never Rebuild" and the comment at the parse site in
+    llm_contradiction_lane.py): the prompt demands "Return ONLY a JSON
+    object", so a compliant reply never has trailing prose, and no
+    trailing-prose fallback is added because the reference implementation has
+    none either. A brace-depth counter would recover this specific shape, but
+    reintroducing one was rejected in this batch precisely because it has its
+    own, worse failure mode (an unbalanced "{" inside a claim's own string
+    value hangs depth at nonzero forever -- see
+    test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object
+    directly above, which pins the case _extract_json_object exists to fix).
+
+    This test only PINS current, accepted behavior for the trailing-prose
+    shape. If it starts failing, someone changed parser semantics (e.g. added
+    a trailing-prose fallback or reintroduced brace-depth tracking) and must
+    re-decide the tradeoff explicitly -- not "fix" this test to match.
+    """
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_trailing_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_trailing_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    # A valid JSON object immediately followed by trailing prose that itself
+    # contains a "}" -- rfind("}") lands on the trailing prose's brace, not
+    # the JSON object's real closing brace, so the extracted span is not
+    # valid JSON.
+    reply_with_trailing_prose = (
+        '{"claim_a": {"subject": "delivery", "predicate": "scheduled_for", '
+        '"object": "monday", "confidence": 0.9}, '
+        '"claim_b": {"subject": "delivery", "predicate": "scheduled_for", '
+        '"object": "tuesday", "confidence": 0.9}} '
+        "Filed under ticket {42}"
+    )
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+        return_value=reply_with_trailing_prose,
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
+
+    assert result["contradictions_found"] == 0, (
+        "current (accepted) behavior: trailing prose after the JSON object "
+        "defeats find('{')..rfind('}') extraction, so the otherwise-valid "
+        "pair is dropped rather than parsed"
+    )
+    parse_failures = [
+        record for record in result["error_records"]
+        if record.get("error_code") == "llm_parse_failed"
+    ]
+    assert parse_failures, (
+        "the dropped pair must still be recorded via the typed "
+        "llm_parse_failed error record, not silently skipped"
+    )
+    assert parse_failures[0]["component"] == "llm_contradiction_lane"

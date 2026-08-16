@@ -380,6 +380,134 @@ def test_r4_incremental_hits_after_aligned_run_reinforce_only_new_lines(tmp_path
     assert weight2 == pytest.approx(0.5 + HIT_LEARNING_RATE * (1.0 - 0.5))
 
 
+def test_r4_cursor_misalignment_fingerprint_mismatch_reports_nonzero_skipped_count(tmp_path):
+    """反事实(内容指纹错位分支的 skipped 计数不得恒为 0):当账本被压缩后
+    又追加,使 len(lines) >= processed 但游标位置的内容已变(fingerprint
+    不匹配分支),该分支把整条前向未消费 backlog 丢弃(new_lines=[]),但
+    修复缺席时 `max(0, processed - len(lines))` 在此分支恒为 0 —— 专门为
+    量化这次丢失新增的字段在它存在的两种情况之一里必然报零。"""
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        HIT_LEARNING_RATE,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge1 = _active_edge(index, 40, weight=0.5)
+    edge2 = _active_edge(index, 41, weight=0.5)
+    _record_hit(store, edge1)
+    _record_hit(store, edge2)
+
+    first = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert first["reinforced_count"] == 2
+    assert first["cursor_misaligned"] is False
+    expected = 0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
+    weight1_before, _ = _weight_of(index, edge1["edge_id"])
+    weight2_before, _ = _weight_of(index, edge2["edge_id"])
+    assert weight1_before == pytest.approx(expected)
+    assert weight2_before == pytest.approx(expected)
+
+    # Simulate a future compaction+append: drop the oldest/head record
+    # (real line 0) but keep the real line 1, then append two MORE real
+    # hits via the real producer. processed cursor (2) now points at the
+    # SECOND position of a ledger that is longer than before (len=3 >=
+    # processed=2) -- content-based mismatch, not the shorter-ledger case.
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    real_lines = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(real_lines) == 2
+    shadow_path.write_text(real_lines[1] + "\n", encoding="utf-8", newline="\n")
+    edge3 = _active_edge(index, 42, weight=0.5)
+    edge4 = _active_edge(index, 43, weight=0.5)
+    _record_hit(store, edge3)
+    _record_hit(store, edge4)
+    post_compaction_lines = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(post_compaction_lines) == 3, "compaction+append must land len(lines) >= processed"
+
+    second = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert second["outcome"] == "cursor_misaligned"
+    assert second["cursor_misaligned"] is True
+    assert second["cursor_misalignment_reason"] == "ledger_fingerprint_mismatch"
+    assert second["cursor_previous_line_count"] == 2
+    assert second["cursor_realigned_line_count"] == 3
+    assert second["cursor_skipped_row_count"] == 1, (
+        "len(lines) - processed = 3 - 2 = 1 (nonzero): the fingerprint-mismatch "
+        "branch drops new_lines=[] entirely and must not report a zero loss"
+    )
+    assert second["reinforced_count"] == 0, "misaligned run must not reprocess/reinforce anything"
+
+    # Edge weights must be byte-for-byte unchanged by the compaction+append —
+    # no replay-from-zero double-reinforcement.
+    weight1_after, _ = _weight_of(index, edge1["edge_id"])
+    weight2_after, _ = _weight_of(index, edge2["edge_id"])
+    assert weight1_after == pytest.approx(weight1_before)
+    assert weight2_after == pytest.approx(weight2_before)
+
+
+def test_r4_torn_last_line_is_not_counted_and_completes_next_run(tmp_path):
+    """并发反事实(读写竞态下的假错位):per-turn prefetch 写手在没有读锁的
+    账本上追加(append_jsonl_locked 单次 handle.write() 写整行+\\n,但读侧
+    `run_edge_weight_feedback` 不持锁),读侧可能在一次 write() 完成前捕获
+    到被截断、无尾随换行符的最后一行。修复缺席时该半行会被计入
+    processed_line_count 且对它取 fingerprint;下一轮该行补全后内容变化 →
+    fingerprint 不匹配 → 假 ledger_fingerprint_mismatch → 丢弃两次运行之间
+    追加的所有新行(含真正的新命中)。"""
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        HIT_LEARNING_RATE,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge1 = _active_edge(index, 50, weight=0.5)
+    edge2 = _active_edge(index, 51, weight=0.5)
+
+    # Both rows built via the real producer first, so their exact serialized
+    # form is captured -- only the torn-write SIMULATION below appends raw
+    # bytes, standing in for a reader racing an in-progress writer append.
+    _record_hit(store, edge1)
+    _record_hit(store, edge2)
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    full_lines = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(full_lines) == 2
+    complete_line0, complete_line1 = full_lines
+    torn_line1 = complete_line1[: len(complete_line1) - 5]  # drop tail bytes
+
+    # Rewrite the ledger to what a torn write of line 1 would leave behind:
+    # line 0 complete (with its trailing \n), line 1 truncated with NO
+    # trailing \n -- exactly what a reader can observe mid-`handle.write()`
+    # of a real append, since that write is not lock-visible to this reader.
+    with shadow_path.open("wb") as fh:
+        fh.write((complete_line0 + "\n" + torn_line1).encode("utf-8"))
+
+    first = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert first["cursor_misaligned"] is False, "cold start (processed==0) must never misalign"
+    assert first["new_hit_record_count"] == 1, "the torn line must be invisible this run"
+    assert first["reinforced_count"] == 1
+
+    expected = 0.5 + HIT_LEARNING_RATE * (1.0 - 0.5)
+    weight1, _ = _weight_of(index, edge1["edge_id"])
+    assert weight1 == pytest.approx(expected)
+    weight2, _ = _weight_of(index, edge2["edge_id"])
+    assert weight2 == pytest.approx(0.5), "torn line must not be reinforced yet"
+
+    # Complete the torn line (the writer's write() finishes) and append one
+    # brand-new full row via the real producer.
+    edge3 = _active_edge(index, 52, weight=0.5)
+    with shadow_path.open("ab") as fh:
+        fh.write((complete_line1[len(torn_line1):] + "\n").encode("utf-8"))
+    _record_hit(store, edge3)
+
+    second = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert second["cursor_misaligned"] is False, (
+        "the now-completed line must fingerprint-match what this run actually "
+        "consumed last time -- no false ledger_fingerprint_mismatch"
+    )
+    assert second["reinforced_count"] == 2, "completed edge2 line + new edge3 line, each exactly once"
+
+    weight2_after, _ = _weight_of(index, edge2["edge_id"])
+    assert weight2_after == pytest.approx(expected), "edge2 reinforced exactly once, not twice"
+    weight3, _ = _weight_of(index, edge3["edge_id"])
+    assert weight3 == pytest.approx(expected)
+
+
 def test_r4_forget_backlog_and_never_hit_counters(tmp_path):
     """遗忘潮可见性:eligible 超出每轮上限时 forget_eligible_backlog 暴露
     积压;从未命中即被遗忘的边计入 invalidated_never_hit_count(饿死信号)。"""

@@ -9,6 +9,7 @@ from typing import Any
 
 from .ids import new_audit_id
 from .jsonl_io import append_jsonl_locked
+from .timeutil import ensure_utc_aware
 
 
 def _audit_monthly_path(base_audit_path: Path) -> Path:
@@ -105,8 +106,7 @@ def last_audit_age_seconds(audit_path: Path, *, now: datetime | None = None) -> 
             ts = datetime.fromisoformat(str(entry["ts"]))
         except (ValueError, TypeError):
             continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        ts = ensure_utc_aware(ts)
         parsed_ts.append(ts)
     if not parsed_ts:
         return None

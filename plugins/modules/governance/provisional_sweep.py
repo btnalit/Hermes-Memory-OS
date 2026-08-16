@@ -16,6 +16,7 @@ from typing import Any
 
 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.timeutil import ensure_utc_aware
 
 
 def provisional_sweep_manifest() -> dict[str, Any]:
@@ -92,8 +93,7 @@ class ProvisionalSweepModule:
                 continue
             try:
                 expires_at = datetime.fromisoformat(expires_str)
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                expires_at = ensure_utc_aware(expires_at)
             except (ValueError, TypeError):
                 continue
             if expires_at <= now:
@@ -268,8 +268,7 @@ def _days_until_expiry(expires_at: str) -> float:
         # record from near_expiry_count. Normalize before subtracting,
         # same as knob_overrides._is_expired. Genuinely unparseable input
         # keeps the existing fail-open fallback.
-        if expires_dt.tzinfo is None:
-            expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+        expires_dt = ensure_utc_aware(expires_dt)
         remaining = expires_dt - datetime.now(timezone.utc)
         return remaining.total_seconds() / 86400.0
     except (ValueError, TypeError):
@@ -299,8 +298,7 @@ def find_expiring_provisional(
             continue
         try:
             expires_at = datetime.fromisoformat(expires_str)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            expires_at = ensure_utc_aware(expires_at)
         except (ValueError, TypeError):
             continue
         if expires_at <= threshold and expires_at > now:

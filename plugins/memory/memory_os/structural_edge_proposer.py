@@ -23,6 +23,7 @@ from typing import Any
 
 from .audit import append_audit
 from .edge_weights import birth_weight
+from .timeutil import ensure_utc_aware
 
 
 # Dice coefficient threshold for body-text similarity — above this the pair
@@ -70,9 +71,7 @@ def _parse_iso(ts: str) -> datetime | None:
         parsed = datetime.fromisoformat(ts)
     except (ValueError, TypeError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return ensure_utc_aware(parsed)
 
 
 def _detect_relation(

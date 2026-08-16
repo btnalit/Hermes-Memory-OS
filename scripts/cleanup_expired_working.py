@@ -28,10 +28,14 @@ else:
 
 try:
     from plugins.memory.memory_os.lane_last_run import record_lane_last_run
+    from plugins.memory.memory_os.timeutil import ensure_utc_aware
 except ModuleNotFoundError:  # pragma: no cover - plugin tree unavailable
     def record_lane_last_run(*_args, **_kwargs) -> bool:  # type: ignore[misc]
         sys.stderr.write("lane_last_run unavailable: plugin tree not importable\n")
         return False
+
+    def ensure_utc_aware(dt: datetime) -> datetime:  # type: ignore[misc]
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 RETENTION_DAYS = 7
 _LANE_ID = "working_cleanup"
@@ -73,8 +77,7 @@ def main(hermes_home: str | None = None) -> int:
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ensure_utc_aware(ts)
             age_days = (now - ts).total_seconds() / 86400
         except (ValueError, TypeError):
             # Malformed/unparseable stored timestamp -- this lane DELETES

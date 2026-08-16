@@ -683,6 +683,8 @@ def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:
         **projection_fields,
         "local_first_authority_preserved": shadow.get("local_first_authority_preserved") if shadow else None,
         "external_authoritative_count": int(shadow.get("external_authoritative_count") or 0) if shadow else 0,
+        "provider_error_count": int(shadow.get("provider_error_count") or 0) if shadow else 0,
+        "provider_errors": shadow.get("provider_errors") if shadow and isinstance(shadow.get("provider_errors"), list) else [],
     }
 
 

@@ -19,6 +19,7 @@ from .prefetch import (
     _BRIDGE_SEED_SLOTS as _CONTINUITY_SEED_SLOTS,
     _MAX_CONTINUITY_RECORDS,
 )
+from .timeutil import ensure_utc_aware
 
 EVENT_STATS_SCHEMA_VERSION = "memory-os.event_stats.v0"
 
@@ -283,8 +284,7 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
     if isinstance(updated_at, str) and updated_at:
         try:
             parsed_updated_at = datetime.fromisoformat(updated_at)
-            if parsed_updated_at.tzinfo is None:
-                parsed_updated_at = parsed_updated_at.replace(tzinfo=timezone.utc)
+            parsed_updated_at = ensure_utc_aware(parsed_updated_at)
             age = (datetime.now(timezone.utc) - parsed_updated_at).total_seconds()
         except (ValueError, TypeError):
             age = float("inf")
