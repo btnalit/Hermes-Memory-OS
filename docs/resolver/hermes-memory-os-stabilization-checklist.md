@@ -6891,3 +6891,14 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   （CLAUDE.md 记载的无探测器静默失败）与 unit 文件未注册 systemd，均 warning、
   均按面设条件、systemctl 不可用即无样本不发。#4 lane preset 按 owner 裁定驳回，
   无相关代码。全量 3547→3559 passed（+12）/13 skipped，四门全绿。
+- `d4bd89b`：DA — 外部 agent 五条建议核查（2 伪报 / 1 改法不可实现 / 2 属实）后的三批修复。
+  CJK 分词族缺陷两处：`crystallization_gate` 的 FTS 查询按索引 `fts_tokenizer` 分派
+  （生产为 trigram，**双字实测 0 命中**，故发字符三元组），`recall_arbitration.
+  _token_jaccard` 改双类分词（非 CJK 段逐位不变）——此前中文改写句 jaccard 恒 0.0，
+  L3/L4 对中日韩**结构性不可达**。去重语义并入 matrix 取得纪元边界且代码从 matrix 取默认值；
+  影子账本 v2 同批上线（`evaluate_observation_window` 不看 schema_version，分两批会混纪元），
+  加 per-reason 封闭词表 + unknown 桶 + `ambiguous_pair_count` + `claim_keyed_input_count`，
+  并给这条 lane 接上**首个生产读者**（monitor INFO，故意不评级）。两次 revert 实测反事实，
+  其中批 B 第一版夹具"仅差标点"是空洞的（标点在旧正则本就是分隔符）——已换语气词变体并记入教训。
+  部署须重启 gateway（provider 侧进程内缓存），纪元重置使 451/96 条旧观测 invalidated 为预期。
+  全量 3559→3583 passed（+24）/13 skipped，四门全绿。
