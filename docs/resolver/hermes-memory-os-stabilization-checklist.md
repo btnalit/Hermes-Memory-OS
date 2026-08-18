@@ -4427,6 +4427,143 @@ static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
 
 ---
 
+## DA — CJK 分词族缺陷 + 召回影子账本 v2（2026-08-18，外部 agent 评审触发）
+
+**触发**：一个 Hermes agent 提交了 5 条"核心模块改进建议"。核查结论：2 条伪报
+（认知循环故障隔离早已实现，`_run_step:308-333` 逐步 try/except + `error_step_count`，
+生产 439 周期中 `deep_reflection` 报错 56 次而周期照常跑完；图边遗忘是 `invalidated`
+不是删除，`structural_edge_proposer` 的 `state != 'invalidated'` 已提供重连路径），
+1 条半真但改法不可实现（`_score_entry()` 函数不存在、evidence 以 `subject_ref` 为键
+与 recall 的内容 sha 无索引可连），2 条属实。其"75% LLM 失败率"实为 27.5%，且引的
+注释在 `clearance_cycle.py:458` 而非 `fact_judge.py`，本身还是**已落地修复的说明**。
+核查过程另发现 4 项原评审未提的问题，本批修其中 3 项。
+
+### DA.1 CJK 分词缺陷族（Rule-5 全项目扫描：2 处中招、3 处本来就对）
+
+根因一句话：`\w` 在 Python re 下**本就匹配 CJK**，所以 `[\w一-鿿]+` 这类字符类
+在中日韩文字之间**永不断开**，整段话变成一个 token。
+
+- **`recall_arbitration._token_jaccard`**：两个中文改写句 token 集合互不相交 → jaccard
+  恒为 0.0 → L3 近重复（阈值 0.88）与 L4 歧义带（0.70–0.88）对中文**结构性不可达**。
+  生产佐证：近重复在 7134 次召回输入中只命中 5 次（0.07%），确定性去重命中 257 次。
+  修法：拆成双类分词——非 CJK 段仍走原 `\w+`（英文/带重音拉丁**逐位不变**），CJK/假名/
+  谚文段落走双字。沿用仓库内已有的正确范式（`prefetch.py:3555-3561`）。
+- **`crystallization_gate._tokenize`**：产物是 FTS5 MATCH 查询，必须与**索引自身的**
+  分词器一致。生产两 home 的 `memory_fts` 均为 `tokenize='trigram'`（`index_metadata.
+  fts_tokenizer`），trigram 下**短于 3 字符的查询词永不匹配**。真实 trigram 表实测：
+  现状（整段一个 token）只命中自身；**双字 0 命中**；三字真正命中改写句。
+  修法：读 `index_metadata.fts_tokenizer` 分派，trigram 发字符三元组，`unicode61`
+  与未知一律走 legacy（该分词器下索引侧同为整段 token，查询侧无解，需重建索引才行——
+  显式定义而非猜测）。所有词加引号（裸 CJK 词可能被当 MATCH 语法解析）。
+- **本来就对的三处**（不动）：`prefetch` 查询分词、`recall_arbitration._cjk_bigrams`
+  （限表意文字，服务冷却逃逸，扩大范围会改到无关通道）、`candidate_clusters._trigrams`
+  + `_dice`（字符三元组，CJK 安全）。
+
+**"上报方言"与"实际方言"必须同源**：`_query_builder_for()` 一个函数同时返回
+`(mode, builder)`，两处分别推导会让报告在未来某次改动后开始说谎——即本仓库
+CC 记载的"词表与生产者漂移"同型。配守卫测试。
+
+### DA.2 纪元边界：去重语义并入 matrix
+
+`OBSERVATION_WINDOW_ID` 只对 `AUTHORITY_FRESHNESS_MATRIX` 取摘要，而分词器与阈值原本
+是代码私有的——只改分词器会让"结构性为零"的旧样本与修复后样本混在同一纪元里。
+新增 `near_duplicate: {tokenizer, threshold, ambiguity_floor}` 并入 matrix，**且代码
+从 matrix 取默认值**（`NEAR_DUPLICATE_THRESHOLD` / `_AMBIGUITY_JACCARD_FLOOR` /
+`build_recall_plan` 形参默认值）。守卫测试同时钉死两个失败模式：matrix 键无人读
+（即本报告点名的 `relevance_score` 缺陷），与代码常量不受 matrix 覆盖。
+
+### DA.3 影子账本 v2：per-reason 分解（与 DA.2 同批，不可拆）
+
+`evaluate_observation_window` **只按窗口 id 分代、不看 schema_version**，先上 DA.2
+后上 v2 会让 v1/v2 记录混在同一当代窗口里。一次合并变更 = 一次纪元重置 = 同质窗口。
+
+- v1 只记总数：生产 5022 条抑制**无原因分布**，抑制精度在数学上无法从账本算出；
+  `would_change_live_recall` 在 547/547 样本中恒为 true，作为毕业信号零信息量。
+- v2 新增 `suppressed_by_reason`（**完整封闭词表 8 项，恒全键**，0 与缺键必须可区分）、
+  `unknown_reason_count`（未登记原因不消失）、`ambiguous_pair_count`（L4 上线以来
+  算了但从未持久化，"算了没人读"）、`claim_keyed_input_count`（见 DA.4）。
+- 词表落在 `recall_policy.SUPPRESSION_REASONS`（放 `recall_arbitration` 会成环）。
+  普查测试**双向**：正向用真实 producer 驱动出全部 8 项（证明每项可达），反向扫源码
+  字面量与唯一的间接调用点（`_suppression(entry, status)`，`status` 在 `owner_conflict`
+  分支内恒为一值；注意 `lower_authority_suppressed` 只用于 `conflicts[].status`，
+  **不是**抑制原因，朴素 grep 会误收）。
+- **首个生产读者**：`recall_shadow_monitor_stats()` + 监控 INFO 条目
+  `recall_arbitration_shadow_window`（本地分支 + 远端子探针 `recall_shadow_probe` 双面
+  接线）。**故意不评级**——安静窗口本就零抑制，评级会在闲周误报（同
+  `exposure_rollup_lag_hours` 的定性）；采集失败仍 WARN 并已登记
+  `CLEAN_HOST_WARN_CLASSIFICATIONS`（`known_optional` / `warn_if_production`，
+  与 `v2_graph_injection_shadow_collection_failed` 同类），否则 clean-host 会因
+  `clean_host_warn_unclassified` 直接 FAIL。空窗口报 `healthy_no_sample`，不是静默 0。
+
+### DA.4 conflict 通道休眠：给永久零一个分母
+
+`claim_key` 唯一生产者是 crystallized frontmatter（`retrievers/crystallized.py:108`），
+生产上**0 条 crystallized 记录带它**，故 547 条样本 `conflict_count` 全为 0——而永久零
+读起来"无输入"与"分组坏了"完全同貌。新增 `claim_keyed_input_count` 作为分母，贯通
+plan → 账本 → 监控 INFO。这是"lane 无产出必须自述原因"规则的直接应用，不接生产者
+（`claim_key` 语义属 owner 裁定，越权）。
+
+### 反事实覆盖（两次 revert 实测，用 cp 备份而非 git checkout）
+
+- 批 A：回退分派 → `flagged_count=0`，`test_gate_finds_chinese_paraphrase_through_real_
+  trigram_index` FAIL。另配非空洞性检查：同 fixture 把矛盾边置 `candidate` 态 → 应 0 标记，
+  证明该 fixture 的边**确实承重**（否则姐妹测试可能因文本命中而空洞通过）。
+- 批 B：回退分词器 → 3 项 FAIL，其中普查测试报 `unreachable={'near_duplicate'}`。
+
+**教训（写进 W 的适用范围）：CJK 反事实夹具必须在 run *内部* 制造差异。**
+第一版夹具用"仅差句号"的两句——句号在旧正则里**本来就是分隔符**，旧分词器同样命中，
+测试在无修复时照样通过。是 revert 实测把这个空洞夹具抓了出来；换成语气词变体后
+（legacy 0.000 / fixed 0.947）才成立。**只跑新测试看到绿色，等于什么都没验证。**
+
+### 修复效果的诚实边界
+
+- 双字 jaccard 实测：同义改写 0.222 / 0.538（仍远低于 0.88），近似变体
+  （run 内语气词差异 0.923~0.947）才越阈值。**恢复的是近似变体去重，不是语义改写去重**；
+  后者是独立的 owner 设计决策，已配 `test_near_duplicate_still_does_not_collapse_a_
+  chinese_paraphrase` 钉住，防止将来当作分词器调优的副产品悄悄改掉。
+- **门修复不会带来标记量跳升**：生产 active `contradicts` 边只有 4（main）+ 1（sannai），
+  且多数历史边已被 60 天遗忘置为 invalidated——`flagged_count` 的上限由边的稀缺性封顶，
+  不由 FTS 召回封顶。预期变化"零到个位数"。它的价值是**高代价罕见路径上的正确性**：
+  中文候选此前根本走不到边检查那一步。验收看 reason_code 分布与 loop report 的
+  `fts_query_mode`，**不看数量**。边的产出属 proposer 领域（2026-08-06 owner 裁定），
+  本批不碰，仅登记观察。
+
+### 两项书面裁定（防将来重复提问）
+
+1. **`_FTS_LIMIT=5` 保留**。trigram 查询会返回更多候选行，是 BM25 rank 决定哪 5 条入选；
+   排名第 6 的矛盾记录现在"因排名不可见"而非"因分词不可见"——严格变好，加宽属越权。
+2. **门的分词器故意不进 matrix 身份**。它不在召回观测链上，其证据面是 loop report 的
+   `fts_query_mode`；耦合进去会让门内部改动重置召回纪元。
+
+### 一个差点漏掉的漏键（顾问审核抓出，阻断项）
+
+`cognitive_loop._crystallization_gate` 的 step summary 是**逐键挑选**后写进
+reports.jsonl 的，不是 gate 的完整返回值——最初 `fts_query_mode` / `fts_tokenizer`
+没有透传，即"在唯一的持久证据面上不存在"（同 `cognitive_loop.py:1177` 那条注释的
+警告）。全部新测试当时都直接调 `run_crystallization_gate`，无一经过 loop step，所以
+全绿。已透传并补 `test_cognitive_loop_crystallization_gate_step_carries_the_query_
+dialect`；同时把 gate 的三种 return 形态统一键集（无候选/开库失败路径报
+`fts_query_mode="not_queried"`），避免同族漏键。
+
+### 部署注意（必读）
+
+- **必须重启 gateway**：DA.2/DA.3 改的 `recall_arbitration` / `recall_policy` 跑在
+  gateway 进程内（prefetch 热路径），按既有记忆 gateway 会在进程内缓存 provider 模块，
+  **不重启则 v2 账本与新纪元永远不会开始写**。DA.1 的门在 cron 侧，不受此限。
+- **纪元重置是预期**：matrix 摘要变化会把 main 451 条 / sannai 96 条旧观测置为
+  `invalidated`，当代窗口归零重新积累——非回归。
+- 远端子探针 `recall_shadow_probe()` 的生成脚本路径无端到端测试；缺失或异常都会落到
+  已登记的 `recall_shadow_monitor_collection_failed` WARN 而非静默，部署后跑一次
+  full monitor 即闭环。
+
+### 测试数
+
+新增 24 项测试，全量 3559 → 3583 passed / 13 skipped。四静态门
+（import_cycle / write_surface `unclassified_count=0` / static_hygiene /
+public_checkout_probe --strict）+ `git diff --check` 全绿。
+
+---
+
 ## 待办
 
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
@@ -6754,3 +6891,14 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   （CLAUDE.md 记载的无探测器静默失败）与 unit 文件未注册 systemd，均 warning、
   均按面设条件、systemctl 不可用即无样本不发。#4 lane preset 按 owner 裁定驳回，
   无相关代码。全量 3547→3559 passed（+12）/13 skipped，四门全绿。
+- `d4bd89b`：DA — 外部 agent 五条建议核查（2 伪报 / 1 改法不可实现 / 2 属实）后的三批修复。
+  CJK 分词族缺陷两处：`crystallization_gate` 的 FTS 查询按索引 `fts_tokenizer` 分派
+  （生产为 trigram，**双字实测 0 命中**，故发字符三元组），`recall_arbitration.
+  _token_jaccard` 改双类分词（非 CJK 段逐位不变）——此前中文改写句 jaccard 恒 0.0，
+  L3/L4 对中日韩**结构性不可达**。去重语义并入 matrix 取得纪元边界且代码从 matrix 取默认值；
+  影子账本 v2 同批上线（`evaluate_observation_window` 不看 schema_version，分两批会混纪元），
+  加 per-reason 封闭词表 + unknown 桶 + `ambiguous_pair_count` + `claim_keyed_input_count`，
+  并给这条 lane 接上**首个生产读者**（monitor INFO，故意不评级）。两次 revert 实测反事实，
+  其中批 B 第一版夹具"仅差标点"是空洞的（标点在旧正则本就是分隔符）——已换语气词变体并记入教训。
+  部署须重启 gateway（provider 侧进程内缓存），纪元重置使 451/96 条旧观测 invalidated 为预期。
+  全量 3559→3583 passed（+24）/13 skipped，四门全绿。

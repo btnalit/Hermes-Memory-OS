@@ -8891,3 +8891,124 @@ def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(
     evidence = namespace["cognitive_loop_step_evidence"]()
     surfaced = evidence["edge_step_results"]["edge_provenance"]
     assert surfaced["write_failed_count"] == 3
+
+
+def _recall_shadow_payload(**overrides) -> dict:
+    payload = {
+        "schema_version": "memory-os.recall_shadow_monitor.v1",
+        "sample_state": "sampled",
+        "observation_window_id": "memory-os.authority-freshness-matrix.v1:deadbeef",
+        "window_reset_required": False,
+        "current_observation_count": 12,
+        "invalidated_observation_count": 451,
+        "schema_version_counts": {"memory-os.recall_observation.v2": 12},
+        "suppressed_by_reason": {"near_duplicate": 3, "session_duplicate": 9},
+        "unknown_reason_total": 0,
+        "input_total": 40,
+        "selected_total": 20,
+        "suppressed_total": 12,
+        "near_duplicate_total": 3,
+        "ambiguous_pair_total": 1,
+        "conflict_total": 0,
+        "would_change_live_recall_true_count": 12,
+        "latest_observed_at": "2026-08-18T10:25:21Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_recall_arbitration_shadow_window_is_reported_as_ungraded_info():
+    """The shadow window must have a production reader, ungraded.
+
+    Grading any of these would false-alarm on a legitimately quiet window
+    (the exposure_rollup_lag_hours precedent); the value delivered is the
+    per-reason decomposition, which v1 of the ledger could not express at all.
+    """
+    snapshot = _healthy_snapshot()
+    snapshot["recall_shadow_monitor"] = _recall_shadow_payload()
+
+    classification = classify_snapshot(snapshot)
+
+    entries = [
+        item for item in classification["info"]
+        if item["code"] == "recall_arbitration_shadow_window"
+    ]
+    assert len(entries) == 1, classification["info"]
+    value = entries[0]["value"]
+    assert value["suppressed_by_reason"] == {"near_duplicate": 3, "session_duplicate": 9}
+    assert value["schema_version_counts"] == {"memory-os.recall_observation.v2": 12}
+    assert value["would_change_live_recall_true_count"] == 12
+    assert value["ambiguous_pair_total"] == 1
+    # Ungraded: it must not move the run's verdict in either direction.
+    assert not any(
+        item["code"].startswith("recall_arbitration_shadow")
+        for item in classification["fail"] + classification["warn"] + classification["pass"]
+    )
+
+
+def test_recall_shadow_collection_failure_warns_instead_of_reading_as_quiet():
+    """An unreadable window must never look like a healthy quiet one."""
+    snapshot = _healthy_snapshot()
+    snapshot["recall_shadow_monitor"] = {
+        "sample_state": "unavailable",
+        "error_code": "ImportError",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "recall_shadow_monitor_collection_failed"
+        for item in classification["warn"]
+    ), classification["warn"]
+    assert not any(
+        item["code"] == "recall_arbitration_shadow_window"
+        for item in classification["info"]
+    )
+
+
+def test_recall_shadow_collection_failure_is_classified_on_clean_host():
+    """A new WARN code must be registered, or clean-host runs FAIL on it.
+
+    `clean_host_warn_unclassified` turns any unregistered WARN into a FAIL --
+    the registry is not optional bookkeeping for a lane that emits one.
+    """
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["recall_shadow_monitor"] = {
+        "sample_state": "unavailable",
+        "error_code": "OSError",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(
+        item.get("warn_code") == "recall_shadow_monitor_collection_failed"
+        for item in classification["fail"]
+    ), classification["fail"]
+    assert any(
+        item["code"] == "recall_shadow_monitor_collection_failed"
+        and item["classification"] == "known_optional"
+        for item in classification["clean_host_warn_classification"]
+    ), classification.get("clean_host_warn_classification")
+
+
+def test_recall_shadow_empty_window_still_reports_no_sample():
+    """A window with no rows reports `healthy_no_sample`, not silence."""
+    snapshot = _healthy_snapshot()
+    snapshot["recall_shadow_monitor"] = _recall_shadow_payload(
+        sample_state="healthy_no_sample",
+        current_observation_count=0,
+        schema_version_counts={},
+        suppressed_by_reason={},
+        input_total=0, selected_total=0, suppressed_total=0,
+        near_duplicate_total=0, ambiguous_pair_total=0,
+        would_change_live_recall_true_count=0, latest_observed_at="",
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    entries = [
+        item for item in classification["info"]
+        if item["code"] == "recall_arbitration_shadow_window"
+    ]
+    assert entries and entries[0]["value"]["sample_state"] == "healthy_no_sample"

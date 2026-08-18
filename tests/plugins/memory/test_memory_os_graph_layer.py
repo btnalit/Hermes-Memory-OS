@@ -5,6 +5,7 @@ Test IDs map to T1.x.y in graph-layer-roadmap.md §8.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -1220,6 +1221,234 @@ def test_t2_2_2_gate_does_not_flag_non_contradicting_candidate(tmp_path):
     assert result["flagged_count"] == 0, (
         f"Candidate should NOT be flagged (no contradicts edge). Result: {result}"
     )
+
+
+def _cjk_gate_fixture(tmp_path, *, edge_state: str = "active"):
+    """Seed two contradicting Chinese records through the real producer path.
+
+    Bodies are deliberately NOT identical to the candidate written by the
+    caller: the whole point is paraphrase recall, and a fixture that reused
+    the same string would pass with the pre-fix tokenizer too.
+    """
+    store, index = _store(tmp_path)
+    conn = _conn(index)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_cjk_a", "kind": "preference",
+         "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": ["evt_a"], "tags": [],
+         "body": "部署策略偏好灰度发布而不是金丝雀发布"},
+        {"id": "cry_cjk_b", "kind": "preference",
+         "created_at": "2026-06-01T12:00:00Z",
+         "source_event_ids": ["evt_b"], "tags": [],
+         "body": "部署策略偏好金丝雀发布而不是灰度发布"},
+    ])
+    index.rebuild_from_store(store)
+    _seed_contradicts_edge(
+        conn, index.roots, "cry_cjk_a", "cry_cjk_b", state=edge_state)
+    conn.close()
+    return store, index
+
+
+def _seed_cjk_candidate(index, body: str, candidate_id: str = "cand_cjk") -> None:
+    conn = _conn(index)
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        (candidate_id, "preference", body, "[]", "[]", "private", "proposed"),
+    )
+    conn.commit()
+    conn.close()
+
+
+# A paraphrase of cry_cjk_a: shares 3-character windows with it, but no whole
+# punctuation-delimited run of it is a substring of cry_cjk_a.  That asymmetry
+# is what separates the trigram query from the pre-fix whole-run one.
+_CJK_PARAPHRASE = "在部署策略上更偏好灰度发布，不采用金丝雀发布"
+
+
+def test_gate_finds_chinese_paraphrase_through_real_trigram_index(tmp_path):
+    """Counterfactual for the CJK query-dialect fix.
+
+    Pre-fix, ``_tokenize`` collapsed the whole Chinese run into ONE token,
+    which on a trigram index is a verbatim-substring search: the paraphrase
+    matched nothing, ``similar`` was empty, and the gate returned before it
+    ever reached its contradicts-edge check.  Reverting the tokenizer dispatch
+    makes this test fail with flagged_count == 0.
+    """
+    _store_obj, index = _cjk_gate_fixture(tmp_path)
+    _seed_cjk_candidate(index, _CJK_PARAPHRASE)
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(str(index.roots.index_path), index=index)
+
+    if result["fts_query_mode"] != "trigram":
+        pytest.skip(
+            "index built with "
+            f"{result['fts_tokenizer']!r}; paraphrase recall is only reachable "
+            "on a trigram index (see _trigram_tokens docstring)"
+        )
+    assert result["status"] == "ok", result
+    assert result["flagged_count"] >= 1, (
+        "Chinese paraphrase must reach the contradicts-edge check. "
+        f"Result: {result}"
+    )
+
+
+def test_gate_cjk_flag_requires_an_active_edge_not_merely_a_text_match(tmp_path):
+    """Prove the sibling test is not passing vacuously.
+
+    The flag test asserts a conjunction: the trigram query found the records
+    AND an active contradicts edge joins them.  Verifying only the tokenizer
+    half would leave a fixture whose edge never mattered looking identical to
+    a working one.  Same fixture, edge in ``candidate`` state: the query still
+    matches, so a flag here would mean the edge was never load-bearing -- and
+    would also violate the rule that only active edges drive automation.
+    """
+    _store_obj, index = _cjk_gate_fixture(tmp_path, edge_state="candidate")
+    _seed_cjk_candidate(index, _CJK_PARAPHRASE)
+
+    from plugins.memory.memory_os.crystallization_gate import (
+        _fts_match_query,
+        _trigram_tokens,
+        run_crystallization_gate,
+    )
+
+    conn = _conn(index)
+    try:
+        matched = conn.execute(
+            "select record_id from memory_fts where memory_fts match ? "
+            "and record_type = 'crystallized_record'",
+            (_fts_match_query(_trigram_tokens(_CJK_PARAPHRASE)),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    result = run_crystallization_gate(str(index.roots.index_path), index=index)
+    if result["fts_query_mode"] != "trigram":
+        pytest.skip("index is not trigram-tokenized")
+    assert matched, "fixture precondition: the trigram query must still match"
+    assert result["flagged_count"] == 0, (
+        "a candidate-state contradicts edge must not flag; a flag here means "
+        f"the sibling test's edge was never load-bearing. Result: {result}"
+    )
+
+
+def test_gate_bigram_terms_cannot_match_a_trigram_index(tmp_path):
+    """Pin WHY the fix emits trigrams and not the bigrams used elsewhere.
+
+    ``recall_arbitration._cjk_bigrams`` is the in-repo CJK helper, so the
+    obvious "reuse it here" refactor is a real hazard: on a trigram index a
+    bigram term can never match, and the resulting zero-flag behaviour is
+    byte-identical to the defect being fixed.  This test fails loudly if
+    anyone makes that swap.
+    """
+    _store_obj, index = _cjk_gate_fixture(tmp_path)
+
+    from plugins.memory.memory_os.crystallization_gate import (
+        _fts_match_query,
+        _trigram_tokens,
+    )
+    from plugins.memory.memory_os.index import _metadata_value
+
+    conn = _conn(index)
+    try:
+        if _metadata_value(conn, "fts_tokenizer") != "trigram":
+            pytest.skip("index is not trigram-tokenized")
+        bigrams = {
+            run[i:i + 2]
+            for run in re.findall(r"[㐀-鿿]+", _CJK_PARAPHRASE)
+            for i in range(len(run) - 1)
+        }
+
+        def _hits(query: str) -> int:
+            rows = conn.execute(
+                "select record_id from memory_fts where memory_fts match ? "
+                "and record_type = 'crystallized_record'",
+                (query,),
+            ).fetchall()
+            return len(rows)
+
+        assert _hits(_fts_match_query(bigrams)) == 0, (
+            "bigram terms unexpectedly matched a trigram index"
+        )
+        assert _hits(_fts_match_query(_trigram_tokens(_CJK_PARAPHRASE))) >= 1, (
+            "trigram terms must match the seeded Chinese records"
+        )
+    finally:
+        conn.close()
+
+
+def test_gate_query_dialect_follows_the_index_tokenizer(tmp_path):
+    """The dialect is chosen from index_metadata, never assumed.
+
+    An unknown or missing tokenizer must fall back to the legacy tokens
+    rather than guessing trigram semantics for an index that has none.
+    """
+    import plugins.memory.memory_os.index as index_module
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+
+    _store_obj, index = _cjk_gate_fixture(tmp_path)
+    _seed_cjk_candidate(index, _CJK_PARAPHRASE)
+
+    real_metadata_value = index_module._metadata_value
+    observed: dict[str, str] = {}
+    for reported, expected_mode in (
+        ("trigram", "trigram"),
+        ("unicode61", "legacy"),
+        ("", "legacy"),
+    ):
+        def _fake(conn, key, _reported=reported):
+            if key == "fts_tokenizer":
+                return _reported
+            return real_metadata_value(conn, key)
+
+        index_module._metadata_value = _fake
+        try:
+            result = run_crystallization_gate(str(index.roots.index_path), index=index)
+        finally:
+            index_module._metadata_value = real_metadata_value
+        observed[reported] = result["fts_query_mode"]
+        assert result["fts_query_mode"] == expected_mode, (reported, result)
+        assert result["fts_tokenizer"] == (reported or "unknown"), (reported, result)
+    assert observed == {"trigram": "trigram", "unicode61": "legacy", "": "legacy"}
+
+
+def test_gate_reported_dialect_cannot_drift_from_the_query_builder():
+    """Reported mode and query builder must come from one decision.
+
+    Two independent derivations would let a future edit change the query while
+    the run report keeps claiming the old dialect -- an unreadable artifact is
+    how the original defect survived.
+    """
+    from plugins.memory.memory_os.crystallization_gate import (
+        _legacy_tokens,
+        _query_builder_for,
+        _trigram_tokens,
+    )
+
+    assert _query_builder_for("trigram") == ("trigram", _trigram_tokens)
+    for unknown in ("unicode61", "", "porter", "some_future_tokenizer"):
+        assert _query_builder_for(unknown) == ("legacy", _legacy_tokens), unknown
+
+
+def test_gate_skips_candidate_whose_body_yields_no_query_term(tmp_path):
+    """A body too short to produce a trigram is skipped, not crashed on."""
+    from plugins.memory.memory_os.crystallization_gate import (
+        _fts_match_query,
+        _trigram_tokens,
+    )
+
+    assert _trigram_tokens("书房") == set()
+    assert _fts_match_query(set()) == ""
+
+    _store_obj, index = _cjk_gate_fixture(tmp_path)
+    _seed_cjk_candidate(index, "书房", candidate_id="cand_cjk_short")
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok", result
+    assert result["flagged_count"] == 0, result
 
 
 def test_t2_2_3_gate_allows_owner_override(tmp_path):

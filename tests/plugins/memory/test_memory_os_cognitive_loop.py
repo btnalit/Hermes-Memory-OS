@@ -23,6 +23,41 @@ def test_cognitive_loop_rejects_apply_without_test_host(tmp_path):
     assert result["boundaries"]["actual_execute"] is False
 
 
+def test_cognitive_loop_crystallization_gate_step_carries_the_query_dialect(tmp_path):
+    """The step summary -- not the gate's return value -- is what persists.
+
+    `_run_step` writes this summary into reports.jsonl, so a key the summary
+    drops does not exist for any reader.  The gate's query dialect is the one
+    piece of evidence that separates "zero flags because nothing contradicts"
+    from "zero flags because the query could never match the index", which is
+    exactly how the CJK defect stayed invisible; asserting it on the gate's
+    own return value would not have caught the summary dropping it.
+    """
+    import sqlite3
+
+    store = _init_store(tmp_path)
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    index = MemoryOSIndex(store.roots)
+    index.rebuild_from_store(store)
+    conn = sqlite3.connect(str(store.roots.index_path))
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        ("cand_dialect", "preference", "用户在书房安装了一个定时器", "[]", "[]", "private", "proposed"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = CognitiveLoopRunner(store)._crystallization_gate({})
+
+    assert "fts_query_mode" in result, result
+    assert "fts_tokenizer" in result, result
+    assert result["fts_query_mode"] in {"trigram", "legacy"}, result
+    assert result["candidate_count"] == 1, result
+
+
 def test_cognitive_loop_crystallization_gate_preserves_bounded_error_metadata(
     tmp_path, monkeypatch
 ):

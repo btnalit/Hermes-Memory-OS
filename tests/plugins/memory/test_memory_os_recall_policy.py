@@ -125,3 +125,195 @@ class TestRecallObservationRetention:
         status = read_recall_observation_window(roots)
         assert status["invalidated_observation_count"] == 1
         assert status["current_observation_count"] == 1
+
+
+class TestRecallShadowMonitorStats:
+    """The shadow window's first production reader.
+
+    Before this function the ledger's only consumer was the provider's own
+    `status` call, so a lane whose entire purpose is to produce graduation
+    evidence had no way to show that evidence to anyone.
+    """
+
+    def test_empty_window_reports_no_sample_rather_than_health(self, tmp_path):
+        from plugins.memory.memory_os.recall_policy import recall_shadow_monitor_stats
+
+        stats = recall_shadow_monitor_stats(FakeRoots(tmp_path))
+
+        assert stats["sample_state"] == "healthy_no_sample", (
+            "an empty window must say so on its face; a silent 0 reads as a clean bill of health"
+        )
+        assert stats["current_observation_count"] == 0
+        assert stats["suppressed_total"] == 0
+        assert stats["latest_observed_at"] == ""
+
+    def test_window_aggregates_reason_decomposition_and_saturation(self, tmp_path):
+        from plugins.memory.memory_os.recall_policy import (
+            SUPPRESSION_REASONS,
+            recall_shadow_monitor_stats,
+        )
+
+        roots = FakeRoots(tmp_path)
+        append_recall_observation(roots, _plan(
+            suppressed=[{"reason": "near_duplicate"}, {"reason": "budget_exceeded"}],
+            suppressed_count=2, near_duplicate_count=1, ambiguous_pair_count=2,
+            input_count=5, selected_count=3, would_change_live_recall=True,
+        ))
+        append_recall_observation(roots, _plan(
+            suppressed=[{"reason": "near_duplicate"}],
+            suppressed_count=1, near_duplicate_count=1,
+            input_count=4, selected_count=3, would_change_live_recall=True,
+        ))
+
+        stats = recall_shadow_monitor_stats(roots)
+
+        assert stats["sample_state"] == "sampled"
+        assert stats["current_observation_count"] == 2
+        assert set(stats["suppressed_by_reason"]) == set(SUPPRESSION_REASONS)
+        assert stats["suppressed_by_reason"]["near_duplicate"] == 2
+        assert stats["suppressed_by_reason"]["budget_exceeded"] == 1
+        assert stats["input_total"] == 9
+        assert stats["selected_total"] == 6
+        assert stats["suppressed_total"] == 3
+        assert stats["ambiguous_pair_total"] == 2
+        # Reported beside the decomposition precisely because it saturated at
+        # 100% on production and therefore decides nothing on its own.
+        assert stats["would_change_live_recall_true_count"] == 2
+        assert stats["schema_version_counts"] == {"memory-os.recall_observation.v2": 2}
+
+    def test_conflict_denominator_survives_into_the_window(self, tmp_path):
+        """A permanently-zero conflict_total needs its input count beside it."""
+        from plugins.memory.memory_os.recall_policy import recall_shadow_monitor_stats
+
+        roots = FakeRoots(tmp_path)
+        append_recall_observation(roots, _plan(conflict_count=0, claim_keyed_input_count=0))
+        append_recall_observation(roots, _plan(conflict_count=0, claim_keyed_input_count=3))
+
+        stats = recall_shadow_monitor_stats(roots)
+
+        assert stats["conflict_total"] == 0
+        assert stats["claim_keyed_input_total"] == 3, (
+            "without this the zero above cannot be told from a broken lane"
+        )
+
+    def test_mixed_schema_versions_in_one_window_are_visible(self, tmp_path):
+        """A window holding two schema versions means a deploy skipped its era
+        boundary; every ratio computed over it would mix incompatible rows, so
+        the mix must be readable rather than averaged away."""
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+        from plugins.memory.memory_os.recall_policy import recall_shadow_monitor_stats
+
+        roots = FakeRoots(tmp_path)
+        append_jsonl_locked(recall_observation_path(roots), {
+            "schema_version": "memory-os.recall_observation.v1",
+            "observation_window_id": OBSERVATION_WINDOW_ID,
+            "observed_at": "2026-08-01T00:00:00Z",
+            "input_count": 2, "selected_count": 1, "suppressed_count": 1,
+        })
+        append_recall_observation(roots, _plan(
+            suppressed=[{"reason": "near_duplicate"}], suppressed_count=1))
+
+        stats = recall_shadow_monitor_stats(roots)
+
+        assert stats["schema_version_counts"] == {
+            "memory-os.recall_observation.v1": 1,
+            "memory-os.recall_observation.v2": 1,
+        }
+        # The v1 row contributes its totals but no reason breakdown; that
+        # asymmetry is exactly what the version counts warn the reader about.
+        assert stats["suppressed_total"] == 2
+        assert stats["suppressed_by_reason"]["near_duplicate"] == 1
+
+
+class TestRecallObservationV2Reasons:
+    """v2: the ledger must carry WHY things were suppressed, not just how many.
+
+    v1 recorded 5022 suppressions on production with no reason breakdown, so
+    suppression precision -- the one number a graduation decision needs -- was
+    not computable from the ledger at all.
+    """
+
+    def test_reason_buckets_are_always_complete_so_zero_differs_from_absent(self, tmp_path):
+        from plugins.memory.memory_os.recall_policy import SUPPRESSION_REASONS
+
+        roots = FakeRoots(tmp_path)
+        append_recall_observation(roots, _plan(
+            suppressed=[
+                {"reason": "near_duplicate"},
+                {"reason": "near_duplicate"},
+                {"reason": "budget_exceeded"},
+            ],
+            suppressed_count=3,
+            ambiguous_pair_count=4,
+        ))
+
+        record = read_jsonl(recall_observation_path(roots))[-1]
+        assert record["schema_version"] == "memory-os.recall_observation.v2"
+        assert set(record["suppressed_by_reason"]) == set(SUPPRESSION_REASONS), (
+            "a reason that did not occur must read as 0, never as a missing key"
+        )
+        assert record["suppressed_by_reason"]["near_duplicate"] == 2
+        assert record["suppressed_by_reason"]["budget_exceeded"] == 1
+        assert record["suppressed_by_reason"]["exact_duplicate"] == 0
+        assert record["unknown_reason_count"] == 0
+        assert record["ambiguous_pair_count"] == 4, (
+            "computed by build_recall_plan since L4 shipped and persisted by nobody until v2"
+        )
+
+    def test_unregistered_reason_is_counted_not_dropped(self, tmp_path):
+        """An unknown reason must be visible, not silently absorbed.
+
+        Bucketing by a closed vocabulary risks losing anything outside it;
+        the `unknown` counter is what turns that into a signal a reader can
+        act on (and what the census test then chases down).
+        """
+        roots = FakeRoots(tmp_path)
+        append_recall_observation(roots, _plan(
+            suppressed=[
+                {"reason": "near_duplicate"},
+                {"reason": "reason_invented_by_a_future_producer"},
+                {"not_a_mapping_row": True},
+                "malformed-row",
+            ],
+            suppressed_count=4,
+        ))
+
+        record = read_jsonl(recall_observation_path(roots))[-1]
+        assert record["suppressed_by_reason"]["near_duplicate"] == 1
+        assert record["unknown_reason_count"] == 3
+        total = sum(record["suppressed_by_reason"].values()) + record["unknown_reason_count"]
+        assert total == record["suppressed_count"], (
+            "every suppressed row must land in exactly one bucket"
+        )
+
+    def test_plan_produced_by_the_real_builder_round_trips_into_the_ledger(self, tmp_path):
+        """End-to-end: the producer's reasons must survive into the ledger.
+
+        Hand-built plan dicts would pass even if `build_recall_plan` renamed
+        every reason, so this drives the real builder.
+        """
+        from plugins.memory.memory_os.recall_arbitration import build_recall_plan
+        from plugins.memory.memory_os.recall_types import RecallObject, RecallType
+
+        def _object(content: str, ref: str, score: float) -> RecallObject:
+            return RecallObject(
+                recall_type=RecallType.INDEXED_FTS.value,
+                content=content,
+                score=score,
+                source_ref=ref,
+                authority_class="indexed_derived",
+            )
+
+        plan = build_recall_plan(
+            [
+                _object("用户在书房安装了一个定时器用于夜间断电", "cjk-keep", 0.9),
+                _object("用户在书房安装了一个定时器用于夜间断电吗", "cjk-drop", 0.4),
+            ],
+            budget_chars=4000,
+        )
+        roots = FakeRoots(tmp_path)
+        assert append_recall_observation(roots, plan) is True
+
+        record = read_jsonl(recall_observation_path(roots))[-1]
+        assert record["suppressed_by_reason"]["near_duplicate"] == 1
+        assert record["unknown_reason_count"] == 0

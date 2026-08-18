@@ -23,12 +23,29 @@ _EXPLICIT_RECALL_PATTERN = re.compile(
     re.I,
 )
 
+# Dedup semantics are READ FROM the matrix, never restated here: the matrix
+# digest is the observation window's identity, so a threshold or tokenizer that
+# lived only in this module could change detection behaviour without ending the
+# window it invalidates.  A matrix key that the code does not actually read
+# would be the mirror defect (see `relevance_score` in `ranking_precedence`),
+# so `test_near_duplicate_config_is_sourced_from_the_matrix` asserts these
+# module constants and the runtime default equal the matrix values.
+# CJK ideographs + kana + hangul: the scripts whose runs `\w` swallows whole.
+# Deliberately NOT shared with `_cjk_bigrams` below, which serves the cooldown
+# escape path and is limited to ideographs; widening that helper would change
+# query-match behaviour in an unrelated lane.
+_SIMILARITY_CJK_RUN = re.compile(r"[㐀-鿿぀-ヿ가-힯]+")
+
+_NEAR_DUPLICATE_CONFIG = AUTHORITY_FRESHNESS_MATRIX["near_duplicate"]
+NEAR_DUPLICATE_TOKENIZER = str(_NEAR_DUPLICATE_CONFIG["tokenizer"])
+NEAR_DUPLICATE_THRESHOLD = float(_NEAR_DUPLICATE_CONFIG["threshold"])
+
 # FIX 5(b): L4 "ambiguous but not suppressed" band. Pairs at or above this
 # jaccard similarity but below `near_duplicate_threshold` are too similar to
 # ignore but not similar enough to collapse deterministically (no LLM on the
 # hot path per the dedup-ladder design doc). Both entries survive and are
 # cross-linked via `ambiguity_related` instead of one suppressing the other.
-_AMBIGUITY_JACCARD_FLOOR = 0.70
+_AMBIGUITY_JACCARD_FLOOR = float(_NEAR_DUPLICATE_CONFIG["ambiguity_floor"])
 
 
 def build_recall_plan(
@@ -39,7 +56,7 @@ def build_recall_plan(
     current_query: str = "",
     current_task_revision: str = "",
     session_ledger: dict[str, Any] | None = None,
-    near_duplicate_threshold: float = 0.88,
+    near_duplicate_threshold: float = NEAR_DUPLICATE_THRESHOLD,
     freshness_guard_mode: str = "shadow",
     conflict_resolution_mode: str = "shadow",
 ) -> dict[str, Any]:
@@ -166,9 +183,19 @@ def build_recall_plan(
                 ambiguous_pair_count += 1
         near_deduped.append(entry)
 
+    # Conflict resolution is gated entirely on `claim_key`, whose ONLY producer
+    # is crystallized frontmatter (retrievers/crystallized.py). On production
+    # no crystallized record carries one, so `conflict_count` has been 0 for
+    # every sample this lane ever took -- and a permanent zero is ambiguous:
+    # it reads identically whether no input was eligible or the grouping is
+    # broken. `claim_keyed_input_count` below is what separates the two, per
+    # the rule that a lane producing nothing must say why without anyone
+    # re-running it or reading this source.
     conflict_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    claim_keyed_input_count = 0
     for entry in near_deduped:
         if entry["claim_key"]:
+            claim_keyed_input_count += 1
             conflict_groups[entry["claim_key"]].append(entry)
     conflict_fingerprints: set[str] = set()
     conflicts: list[dict[str, Any]] = []
@@ -235,6 +262,9 @@ def build_recall_plan(
         "near_duplicate_count": near_duplicate_count,
         "ambiguous_pair_count": ambiguous_pair_count,
         "conflict_count": len(conflicts),
+        # Denominator for conflict_count: zero here means the conflict lane had
+        # nothing to work with, not that it failed to find conflicts.
+        "claim_keyed_input_count": claim_keyed_input_count,
         "unknown_authority_classes": sorted(unknown_authority_classes),
         "used_budget_chars": used_chars,
         "budget_chars": max(0, int(budget_chars)),
@@ -491,9 +521,49 @@ def _suppression(entry: dict[str, Any], reason: str, *, related: str = "") -> di
     }
 
 
+def _similarity_tokens(text: str) -> set[str]:
+    """Two-class token set: ASCII/word runs plus CJK character bigrams.
+
+    The previous single-class regex (``[\\w\\u4e00-\\u9fff]+``) never broke
+    between CJK characters -- ``\\w`` already matches them -- so an entire
+    Chinese sentence became ONE token.  Two paraphrases then shared no token
+    at all and scored 0.0, which made both L3 (>= threshold, suppress) and L4
+    (ambiguity band) structurally unreachable for Chinese, Japanese and Korean
+    content: measured on production, near-duplicate fired 5 times in 7134
+    recall inputs while deterministic dedup fired 257.
+
+    Bigrams for the CJK class follow the two implementations in this codebase
+    that already got it right -- ``prefetch`` query tokens and ``_cjk_bigrams``
+    below -- and keep ASCII behaviour bit-identical, since the ASCII class is
+    unchanged and the CJK class contributes nothing to a pure-ASCII string.
+
+    Scope note: what this restores is detection of differences *inside* a CJK
+    run (a trailing particle scores ~0.95).  Differences at a run boundary --
+    punctuation, spaces -- were already detectable, because the old regex
+    treated those as separators too; the first counterfactual fixture written
+    for this fix used exactly such a pair and therefore passed with the defect
+    still in place.  Genuine paraphrases score ~0.22-0.54 and remain below
+    both bands by design; semantic-equivalence dedup is a separate decision,
+    not a side effect of this fix.
+    """
+    normalized = str(text or "").casefold()
+    tokens: set[str] = set()
+    # Non-CJK segments keep the original ``\w+`` rule verbatim, so accented
+    # Latin, Cyrillic and every other word character tokenize exactly as they
+    # did before; only the CJK class changes.
+    for segment in re.split(_SIMILARITY_CJK_RUN, normalized):
+        tokens.update(re.findall(r"\w+", segment))
+    for run in re.findall(_SIMILARITY_CJK_RUN, normalized):
+        if len(run) == 1:
+            tokens.add(run)
+            continue
+        tokens.update(run[index:index + 2] for index in range(len(run) - 1))
+    return tokens
+
+
 def _token_jaccard(left: str, right: str) -> float:
-    left_tokens = set(re.findall(r"[\w\u4e00-\u9fff]+", str(left or "").casefold()))
-    right_tokens = set(re.findall(r"[\w\u4e00-\u9fff]+", str(right or "").casefold()))
+    left_tokens = _similarity_tokens(left)
+    right_tokens = _similarity_tokens(right)
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)

@@ -43,7 +43,41 @@ AUTHORITY_FRESHNESS_MATRIX: dict[str, Any] = {
         "relevance_score",
         "stable_input_order",
     ],
+    # Dedup semantics live in the matrix ON PURPOSE: the observation window is
+    # keyed by this dict's digest, so changing how near-duplicates are detected
+    # must invalidate every sample taken under the old rule.  Before this entry
+    # existed, the tokenizer and thresholds were code-only, and a CJK tokenizer
+    # fix would have silently joined "structurally could never fire" samples to
+    # post-fix ones inside one window -- the same era-mixing this project has
+    # already had to correct once for attribution.
+    #
+    # These values are the SOURCE of the runtime defaults (see
+    # recall_arbitration.NEAR_DUPLICATE_THRESHOLD / AMBIGUITY_JACCARD_FLOOR).
+    # They must never become documentation-only: a matrix key the code does not
+    # read is exactly the `relevance_score` defect -- listed in
+    # ranking_precedence above, implemented nowhere.
+    "near_duplicate": {
+        "tokenizer": "ascii_word_plus_cjk_bigram_v1",
+        "threshold": 0.88,
+        "ambiguity_floor": 0.70,
+    },
 }
+
+# Closed vocabulary of every reason `recall_arbitration._suppression` can emit.
+# The observation ledger buckets by these names, so a producer that invents a
+# reason without registering it here lands in `unknown_reason_count` rather
+# than vanishing -- and `test_recall_suppression_reason_census` fails in both
+# directions (unregistered producer / registered name with no producer).
+SUPPRESSION_REASONS: tuple[str, ...] = (
+    "budget_exceeded",
+    "exact_duplicate",
+    "exact_source_duplicate",
+    "lower_authority_conflict",
+    "near_duplicate",
+    "owner_conflict_requires_clarification",
+    "session_duplicate",
+    "stale_task_revision",
+)
 
 
 def authority_freshness_matrix_digest(matrix: Mapping[str, Any]) -> str:
@@ -137,7 +171,16 @@ def evaluate_observation_window(observations: Iterable[Mapping[str, Any]]) -> di
     }
 
 
-RECALL_OBSERVATION_SCHEMA_VERSION = "memory-os.recall_observation.v1"
+# v2 adds `suppressed_by_reason` (full closed vocabulary, always present so a
+# zero is distinguishable from an absent key), `unknown_reason_count` and
+# `ambiguous_pair_count`.  v1 recorded only totals, which made suppression
+# precision impossible to compute from the ledger at all: an owner asked to
+# decide "can this graduate to apply?" had 5022 suppressions and no way to see
+# what they were.  Shipped in the same change as the matrix `near_duplicate`
+# entry so the digest change resets the window and no v1 row can survive into
+# a v2 window (`evaluate_observation_window` keys on window id, not on
+# schema_version, so a separate deploy would have mixed the two).
+RECALL_OBSERVATION_SCHEMA_VERSION = "memory-os.recall_observation.v2"
 
 # Size-gated retention (P2 fix): append_recall_observation grew the ledger
 # forever. Once it exceeds RECALL_OBSERVATION_COMPACT_THRESHOLD records, it
@@ -195,6 +238,24 @@ def append_recall_observation(
         reason = str(entry.get("cooldown_escape_reason") or "")
         if reason:
             escape_counts[reason] = escape_counts.get(reason, 0) + 1
+    suppressed_value = plan.get("suppressed")
+    suppressed_rows: list[Any] = (
+        list(suppressed_value) if isinstance(suppressed_value, list) else []
+    )
+    # Full closed vocabulary every time: a reason that simply did not occur must
+    # read as 0, not as a missing key, or a reader cannot tell "never happened"
+    # from "this build does not report it".
+    suppressed_by_reason = {reason: 0 for reason in SUPPRESSION_REASONS}
+    unknown_reason_count = 0
+    for row in suppressed_rows:
+        if not isinstance(row, Mapping):
+            unknown_reason_count += 1
+            continue
+        reason = str(row.get("reason") or "")
+        if reason in suppressed_by_reason:
+            suppressed_by_reason[reason] += 1
+        else:
+            unknown_reason_count += 1
     observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     record = {
         "schema_version": RECALL_OBSERVATION_SCHEMA_VERSION,
@@ -208,7 +269,17 @@ def append_recall_observation(
         "suppressed_count": int(plan.get("suppressed_count") or 0),
         "exact_duplicate_count": int(plan.get("exact_duplicate_count") or 0),
         "near_duplicate_count": int(plan.get("near_duplicate_count") or 0),
+        # Computed by build_recall_plan since L4 shipped and read by nobody
+        # until v2 -- the "metric with no reader" shape this codebase keeps
+        # paying for.  Persisted here so the L4 band has evidence at all.
+        "ambiguous_pair_count": int(plan.get("ambiguous_pair_count") or 0),
         "conflict_count": int(plan.get("conflict_count") or 0),
+        # conflict_count's denominator. Without it a permanent 0 cannot be told
+        # apart from a broken grouping: on production no crystallized record
+        # carries a claim_key, so the conflict lane has never had an input.
+        "claim_keyed_input_count": int(plan.get("claim_keyed_input_count") or 0),
+        "suppressed_by_reason": suppressed_by_reason,
+        "unknown_reason_count": unknown_reason_count,
         "would_change_live_recall": bool(plan.get("would_change_live_recall")),
         "cooldown_escape_counts": dict(sorted(escape_counts.items())),
     }
@@ -230,3 +301,81 @@ def read_recall_observation_window(roots: Any) -> dict[str, Any]:
     status = evaluate_observation_window(read_jsonl(recall_observation_path(roots)))
     status.pop("current_observations", None)
     return status
+
+
+def recall_shadow_monitor_stats(roots: Any) -> dict[str, Any]:
+    """Aggregate the current observation window into monitor-readable state.
+
+    This function exists because the shadow lane had no production reader at
+    all: the plan counters were written to a ledger, and the only consumer was
+    the provider's own `status` call.  An owner asked "can recall arbitration
+    graduate to apply_canary?" had 5022 suppressions with no breakdown and a
+    `would_change_live_recall` flag that was true in 547 of 547 samples -- a
+    saturated boolean carries no information, so the decision had no evidence.
+
+    Deliberately UNGRADED (INFO): a quiet window legitimately produces zero
+    suppressions, so grading any of these would false-alarm on idle weeks --
+    the same reasoning that keeps `exposure_rollup_lag_hours` ungraded.  What
+    the reader gets instead is decomposition: which reasons fired, how many
+    rows are era-current, and whether the window is schema-homogeneous.
+    """
+    from .jsonl_io import read_jsonl
+
+    window = evaluate_observation_window(read_jsonl(recall_observation_path(roots)))
+    rows = [row for row in window.pop("current_observations", []) if isinstance(row, Mapping)]
+
+    by_reason = {reason: 0 for reason in SUPPRESSION_REASONS}
+    schema_versions: dict[str, int] = {}
+    totals = {
+        "input_total": 0,
+        "selected_total": 0,
+        "suppressed_total": 0,
+        "exact_duplicate_total": 0,
+        "near_duplicate_total": 0,
+        "ambiguous_pair_total": 0,
+        "conflict_total": 0,
+        "claim_keyed_input_total": 0,
+        "unknown_reason_total": 0,
+    }
+    would_change_true = 0
+    for row in rows:
+        schema = str(row.get("schema_version") or "unknown")
+        schema_versions[schema] = schema_versions.get(schema, 0) + 1
+        totals["input_total"] += int(row.get("input_count") or 0)
+        totals["selected_total"] += int(row.get("selected_count") or 0)
+        totals["suppressed_total"] += int(row.get("suppressed_count") or 0)
+        totals["exact_duplicate_total"] += int(row.get("exact_duplicate_count") or 0)
+        totals["near_duplicate_total"] += int(row.get("near_duplicate_count") or 0)
+        totals["ambiguous_pair_total"] += int(row.get("ambiguous_pair_count") or 0)
+        totals["conflict_total"] += int(row.get("conflict_count") or 0)
+        totals["claim_keyed_input_total"] += int(row.get("claim_keyed_input_count") or 0)
+        totals["unknown_reason_total"] += int(row.get("unknown_reason_count") or 0)
+        if row.get("would_change_live_recall"):
+            would_change_true += 1
+        reasons = row.get("suppressed_by_reason")
+        if isinstance(reasons, Mapping):
+            for reason, count in reasons.items():
+                if reason in by_reason:
+                    by_reason[reason] += int(count or 0)
+                else:
+                    totals["unknown_reason_total"] += int(count or 0)
+
+    # An empty window is reported as such rather than as a clean bill of
+    # health: zero samples is "no sample", never "nothing wrong".
+    sample_state = "healthy_no_sample" if not rows else "sampled"
+    return {
+        "schema_version": "memory-os.recall_shadow_monitor.v1",
+        "observation_window_id": window.get("observation_window_id", ""),
+        "window_reset_required": bool(window.get("window_reset_required")),
+        "current_observation_count": int(window.get("current_observation_count") or 0),
+        "invalidated_observation_count": int(window.get("invalidated_observation_count") or 0),
+        "sample_state": sample_state,
+        # A window holding more than one schema version means a deploy landed
+        # without an era boundary -- the per-reason keys would then be missing
+        # on part of the window and every ratio computed over it would be wrong.
+        "schema_version_counts": dict(sorted(schema_versions.items())),
+        "suppressed_by_reason": by_reason,
+        "would_change_live_recall_true_count": would_change_true,
+        "latest_observed_at": str(rows[-1].get("observed_at") or "") if rows else "",
+        **totals,
+    }
