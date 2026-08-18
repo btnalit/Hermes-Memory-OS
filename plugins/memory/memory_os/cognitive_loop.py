@@ -1008,6 +1008,15 @@ class CognitiveLoopRunner:
             "error_records": result.get("error_records", []),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
+            # This summary -- not the gate's full return value -- is what
+            # _run_step persists into reports.jsonl, so a key omitted here
+            # does not exist for any reader (see the same warning at the
+            # edge_step_results block below). Without the query dialect a
+            # zero-flag run cannot be told apart from one whose queries could
+            # never match the index, which is the confusion that hid the CJK
+            # defect in the first place.
+            "fts_tokenizer": result.get("fts_tokenizer", ""),
+            "fts_query_mode": result.get("fts_query_mode", ""),
         }
 
     def _llm_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:

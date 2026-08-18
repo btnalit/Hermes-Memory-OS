@@ -19,7 +19,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .audit import append_audit
 
@@ -44,12 +44,96 @@ def _gate_error_result(code: str, *, component: str) -> dict[str, Any]:
         "flagged_count": 0,
         "flagged_candidates": [],
         "duration_ms": 0,
+        # Same key set on every return shape: a reader must never have to
+        # guess whether a missing dialect means "legacy" or "no query ran".
+        "fts_tokenizer": "",
+        "fts_query_mode": "not_queried",
     }
 
 
-def _tokenize(text: str) -> set[str]:
-    """Lowercase alpha-numeric token set for FTS5 query building."""
+# \u2500\u2500 FTS5 query-term builders \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+#
+# These tokens become an FTS5 MATCH query, so they MUST agree with the
+# tokenizer the index was actually built with (index.py records the choice in
+# ``index_metadata.fts_tokenizer``).  Getting this wrong is not a weaker
+# search -- it is a silently empty one:
+#
+#   * ``trigram`` (the preferred form, index.py:638) matches on character
+#     trigrams, so a query term shorter than 3 characters cannot match at all.
+#     ``_legacy_tokens`` below collapses a whole run of CJK into ONE token
+#     (the character-class ranges never break between Chinese characters), so
+#     on a trigram index a Chinese candidate degenerates to "the entire
+#     sentence must appear verbatim as a substring": measured against a real
+#     trigram table, such a query found only the row it came from and never a
+#     paraphrase, leaving the gate's edge check unreachable for Chinese
+#     content.  Character trigrams restore it.
+#     Bigrams do NOT -- on the same real trigram table a bigram OR-query
+#     returned ZERO rows, i.e. a bigram "fix" is indistinguishable from the
+#     defect it claims to repair, which is exactly how it would ship unnoticed.
+#   * ``unicode61`` (the fallback form, index.py:646) tokenizes indexed CJK
+#     into whole runs as well, so query and index agree there.  Recall is weak
+#     (no paraphrase matching) but self-consistent, and NO query-side change
+#     can improve it -- that needs an index rebuild, which is legitimate but
+#     out of this function's scope.  The legacy tokens are kept deliberately.
+#
+# Anything else, including a missing ``index_metadata`` table, is treated as
+# the fallback: never guess trigram semantics for an unknown index.
+_TRIGRAM_TOKENIZER = "trigram"
+
+# CJK ideographs + kana + hangul.  The defect is not Chinese-specific: every
+# script here is matched by the legacy class without any intra-run break.
+_CJK_RUN_PATTERN = r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+"
+
+
+def _legacy_tokens(text: str) -> set[str]:
+    """Whole-run token set matching a ``unicode61``-shaped index."""
     return set(re.findall(r"[a-z\u4e00-\u9fff][a-z0-9\u4e00-\u9fff]*", text.lower()))
+
+
+def _trigram_tokens(text: str) -> set[str]:
+    """Query terms for a ``tokenize='trigram'`` index.
+
+    CJK/kana/hangul runs become character trigrams; ASCII alphanumeric tokens
+    are kept only at length >= 3, because a trigram index cannot match a
+    shorter term at all.  Dropping "ok"/"db" is that index's semantics, not a
+    regression introduced here.
+    """
+    lowered = text.lower()
+    terms: set[str] = set(re.findall(r"[a-z0-9]{3,}", lowered))
+    for run in re.findall(_CJK_RUN_PATTERN, lowered):
+        for start in range(max(0, len(run) - 2)):
+            terms.add(run[start:start + 3])
+    return terms
+
+
+def _fts_match_query(terms: set[str]) -> str:
+    """OR-join terms as quoted FTS5 phrases.
+
+    Quoting is not cosmetic: a bare CJK or mixed term can be parsed as MATCH
+    syntax rather than as text, which raises instead of searching.  Sorted for
+    a deterministic query string per candidate.
+    """
+    cleaned = sorted({term.replace('"', "").strip() for term in terms} - {""})
+    return " OR ".join(f'"{term}"' for term in cleaned)
+
+
+def _query_builder_for(fts_tokenizer: str) -> tuple[str, Callable[[str], set[str]]]:
+    """Return ``(reported_mode, term_builder)`` for an index tokenizer.
+
+    Deliberately ONE function: if the dialect that gets reported and the
+    dialect that actually builds the query were derived separately, a future
+    edit could change one and leave the other lying -- which is precisely the
+    "a gate whose vocabulary drifts from its producer checks nothing" failure
+    this codebase has already paid for once.
+    """
+    if fts_tokenizer == _TRIGRAM_TOKENIZER:
+        return "trigram", _trigram_tokens
+    return "legacy", _legacy_tokens
+
+
+def _tokenize(text: str) -> set[str]:
+    """Backwards-compatible alias for the legacy (unicode61-shaped) tokens."""
+    return _legacy_tokens(text)
 
 
 # ── Core gate logic ────────────────────────────────────────────────────────
@@ -101,15 +185,29 @@ def run_crystallization_gate(
             "flagged_count": 0,
             "flagged_candidates": [],
             "duration_ms": 0,
+            "fts_tokenizer": "",
+            "fts_query_mode": "not_queried",
         }
 
     # 2. For each candidate, search for similar crystallized records and check
     #    for contradicts edges.
     flagged: list[dict[str, Any]] = []
     error_records: list[dict[str, str]] = []
+    # Bound before the connection so the reported dialect is always defined,
+    # including on the `fts_query_failed` path below.
+    fts_tokenizer = ""
+    fts_query_mode, build_query_terms = _query_builder_for(fts_tokenizer)
     conn2 = sqlite3.connect(index_path)
     conn2.row_factory = sqlite3.Row
     try:
+        # Resolve the index's own tokenizer ONCE per run and build every query
+        # in its dialect.  ``_metadata_value`` returns "" for a database with
+        # no ``index_metadata`` table, which lands on the conservative legacy
+        # branch rather than guessing trigram semantics.
+        from .index import _metadata_value
+
+        fts_tokenizer = _metadata_value(conn2, "fts_tokenizer")
+        fts_query_mode, build_query_terms = _query_builder_for(fts_tokenizer)
         for cand in candidate_rows:
             cid = str(cand.get("candidate_id", ""))
             body = str(cand.get("body", ""))
@@ -123,9 +221,12 @@ def run_crystallization_gate(
                 continue
 
             # Search FTS5 for similar crystallized record bodies.
-            # Use the first 300 chars as query (FTS5 words).
-            query_words = " OR ".join(
-                _tokenize(body[:300])
+            # Use the first 300 chars as query, in the index's own dialect.
+            # A body that is a single 2-character CJK run yields no trigram at
+            # all -- that lands on the same empty-query skip as an empty body.
+            head = body[:300]
+            query_words = _fts_match_query(
+                build_query_terms(head)
             )
             if not query_words.strip():
                 continue
@@ -248,6 +349,11 @@ def run_crystallization_gate(
         "error_code": error_records[0]["error_code"] if error_records else "",
         "error_records": error_records,
         "duration_ms": elapsed_ms,
+        # Which dialect the queries were built in.  Without this a zero-flag
+        # run cannot be told apart from a run whose queries could never match
+        # the index -- the exact confusion that hid the CJK defect for months.
+        "fts_tokenizer": fts_tokenizer or "unknown",
+        "fts_query_mode": fts_query_mode,
     }
 
     if audit_path:

@@ -294,6 +294,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "an output-affecting knob's effective value differs from its expected live value - owner decides; clean hosts have no overrides so the default resolves to the expected value and this stays silent",
         "production_behavior": "warn_if_production",
     },
+    "recall_shadow_monitor_collection_failed": {
+        "classification": "known_optional",
+        "reason": "recall arbitration shadow window could not be read - collection failure surfaced instead of a fabricated healthy-quiet window; the lane is output-neutral in shadow mode, so this degrades graduation evidence rather than behaviour (same class as v2_graph_injection_shadow_collection_failed)",
+        "production_behavior": "warn_if_production",
+    },
     "v2_graph_injection_shadow_collection_failed": {
         "classification": "known_optional",
         "reason": "graph injection shadow ledger could not be read - collection failure surfaced instead of a fabricated zero",
@@ -1628,6 +1633,60 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:
         passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
+
+    # Recall arbitration shadow window. INFO and deliberately ungraded: a quiet
+    # window legitimately suppresses nothing, so a threshold here would
+    # false-alarm on idle weeks (same reasoning as exposure_rollup_lag_hours).
+    # The point is that the window has a production reader AT ALL -- before
+    # this entry the ledger's only consumer was the provider's own status
+    # call, so the shadow->apply graduation decision it exists to inform had
+    # no evidence a monitor could show. Collection failure still WARNs: an
+    # empty dict must never read as a healthy quiet window.
+    raw_recall_shadow = snapshot.get("recall_shadow_monitor")
+    recall_shadow: dict[str, Any] = raw_recall_shadow if isinstance(raw_recall_shadow, dict) else {}
+    recall_sample_state = str(recall_shadow.get("sample_state") or "")
+    if recall_sample_state == "unavailable" or recall_shadow.get("error_code"):
+        warn.append({"code": "recall_shadow_monitor_collection_failed", "value": recall_shadow})
+    elif recall_shadow:
+        schema_counts = recall_shadow.get("schema_version_counts")
+        schema_counts = schema_counts if isinstance(schema_counts, dict) else {}
+        info.append({
+            "code": "recall_arbitration_shadow_window",
+            "value": {
+                "sample_state": recall_sample_state,
+                "current_observation_count": int(recall_shadow.get("current_observation_count") or 0),
+                "invalidated_observation_count": int(
+                    recall_shadow.get("invalidated_observation_count") or 0
+                ),
+                # More than one schema version in one window means a deploy
+                # landed without the era boundary it needed, and every ratio
+                # computed over the window is then mixing incompatible rows.
+                "schema_version_counts": schema_counts,
+                "input_total": int(recall_shadow.get("input_total") or 0),
+                "selected_total": int(recall_shadow.get("selected_total") or 0),
+                "suppressed_total": int(recall_shadow.get("suppressed_total") or 0),
+                # The decomposition v1 could not provide: which reasons the
+                # suppressions actually were.
+                "suppressed_by_reason": recall_shadow.get("suppressed_by_reason") or {},
+                "unknown_reason_total": int(recall_shadow.get("unknown_reason_total") or 0),
+                "near_duplicate_total": int(recall_shadow.get("near_duplicate_total") or 0),
+                "ambiguous_pair_total": int(recall_shadow.get("ambiguous_pair_total") or 0),
+                "conflict_total": int(recall_shadow.get("conflict_total") or 0),
+                # conflict_total's denominator. `claim_key`'s only producer is
+                # crystallized frontmatter, and no production record carries
+                # one, so a permanent conflict_total of 0 means "no eligible
+                # input" -- not "no conflicts found". Without this key the two
+                # are indistinguishable from the artifact alone.
+                "claim_keyed_input_total": int(recall_shadow.get("claim_keyed_input_total") or 0),
+                # Saturated at 100% for 547 of 547 pre-fix samples, which is
+                # why it is reported beside the decomposition rather than as a
+                # signal on its own.
+                "would_change_live_recall_true_count": int(
+                    recall_shadow.get("would_change_live_recall_true_count") or 0
+                ),
+                "latest_observed_at": str(recall_shadow.get("latest_observed_at") or ""),
+            },
+        })
 
     raw_clearance_freshness = snapshot.get("clearance_snapshot_freshness")
     clearance_freshness: dict[str, Any] = raw_clearance_freshness if isinstance(raw_clearance_freshness, dict) else {}
@@ -5060,6 +5119,22 @@ def collect_snapshot(
         except Exception as exc:
             raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": type(exc).__name__}
             raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": type(exc).__name__}
+        # Recall arbitration shadow state: collected in its own try so an
+        # exposure-side failure cannot make this read "unavailable" and vice
+        # versa -- two unrelated lanes sharing one except block would report
+        # each other's outages.
+        try:
+            from plugins.memory.memory_os.recall_policy import recall_shadow_monitor_stats
+            from plugins.memory.memory_os.roots import MemoryOSRoots as _RecallRoots
+
+            raw["recall_shadow_monitor"] = recall_shadow_monitor_stats(
+                _RecallRoots.from_hermes_home(hermes_home, profile="default")
+            )
+        except Exception as exc:
+            raw["recall_shadow_monitor"] = {
+                "sample_state": "unavailable",
+                "error_code": type(exc).__name__,
+            }
     else:
         # Fix 1: collect exposure_monitor_stats / clearance_snapshot_freshness
         # on the remote host too, using the same SSH remote-execution pattern
@@ -5077,6 +5152,18 @@ def collect_snapshot(
         else:
             raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": _v2_error_code}
             raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": _v2_error_code}
+
+        # Recall arbitration shadow window, same never-silent contract: a
+        # missing sub-probe reports "unavailable" with a code rather than an
+        # empty dict that would read as a quiet, healthy window.
+        _recall_payload, _recall_error_code = _consume_remote_probe(raw, "recall_shadow_probe")
+        if _recall_payload is not None:
+            raw["recall_shadow_monitor"] = _recall_payload.get("recall_shadow_monitor") or {}
+        else:
+            raw["recall_shadow_monitor"] = {
+                "sample_state": "unavailable",
+                "error_code": _recall_error_code,
+            }
 
         # BB.6-1: collect permanent-promotion ledger counts on the remote
         # host too. Without this, decision_recovery_failure_count and
@@ -5928,6 +6015,19 @@ def v2_exposure_and_clearance_probe():
             _roots, for_activation=_v2_exposure.get("v2c_unfreeze_ready") is True
         )
         return {"ok": True, "v2_exposure_monitor": _v2_exposure, "clearance_snapshot_freshness": _clearance}
+    except Exception as exc:
+        return {"ok": False, "error_code": type(exc).__name__, "error_detail": str(exc)[:200]}
+
+def recall_shadow_probe():
+    # Remote collection of the recall-arbitration shadow window, mirroring
+    # collect_snapshot()'s local branch. Before this probe the shadow lane had
+    # no production reader at all, so its evidence could not inform the
+    # shadow->apply graduation decision it exists to support.
+    try:
+        from plugins.memory.memory_os.recall_policy import recall_shadow_monitor_stats
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        _roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+        return {"ok": True, "recall_shadow_monitor": recall_shadow_monitor_stats(_roots)}
     except Exception as exc:
         return {"ok": False, "error_code": type(exc).__name__, "error_detail": str(exc)[:200]}
 
@@ -9136,6 +9236,7 @@ owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups",
 owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups", "--auto-route", "--limit", "10"])
 host_capability_probe = seam_host_probe()
 v2_exposure_and_clearance_probe_result = v2_exposure_and_clearance_probe()
+recall_shadow_probe_result = recall_shadow_probe()
 living_memory_promotion_probe_result = living_memory_promotion_probe()
 signal_source_requirements = memory_os_cli(["signal-sources", "--json"])
 memory_projection = memory_os_cli(["projection", "status"])
@@ -9207,6 +9308,7 @@ print(json.dumps({
   "owner_review_proposal_auto_route": owner_review_proposal_auto_route,
   "host_capability_probe": host_capability_probe,
   "v2_exposure_and_clearance_probe": v2_exposure_and_clearance_probe_result,
+  "recall_shadow_probe": recall_shadow_probe_result,
   "living_memory_promotion_probe": living_memory_promotion_probe_result,
   "signal_source_requirements": signal_source_requirements,
   "memory_projection": memory_projection,

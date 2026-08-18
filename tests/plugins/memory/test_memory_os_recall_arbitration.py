@@ -662,3 +662,205 @@ def test_apply_recall_plan_ignores_ambiguity_related_and_still_returns_both_obje
     applied = apply_recall_plan(plan)
     refs = {obj.source_ref for obj in applied[RecallType.CRYSTALLIZED.value]}
     assert refs == {"amb-left-2", "amb-right-2"}
+
+
+# ── CJK similarity tokens, matrix-sourced config, reason census ────────────
+
+
+def _reason_probe_plans() -> list[dict]:
+    """Drive the real producer until every registered reason has fired.
+
+    A census built from hand-written fixtures would only prove the fixtures
+    are self-consistent; driving `build_recall_plan` proves each registered
+    reason is actually reachable, and equality against the vocabulary catches
+    any reason the producer emits without registering.
+    """
+    repeated = _obj("already injected", revision="rev-current", ref="repeat")
+    long_a = _obj("a body far longer than the budget allows", ref="big-a")
+    long_b = _obj("another body far longer than the budget", ref="big-b")
+    return [
+        build_recall_plan(
+            [_obj("old projection", recall_type=RecallType.STATE_OVERLAY.value,
+                  authority="state_projection", revision="rev-old", ref="overlay")],
+            current_task_revision="rev-current",
+        ),
+        build_recall_plan(
+            [repeated],
+            current_task_revision="rev-current",
+            session_ledger={content_fingerprint(repeated.content): _ledger_value("rev-current")},
+        ),
+        build_recall_plan([_obj("first body", ref="same"), _obj("second body", ref="same")]),
+        build_recall_plan([_obj("identical body", ref="a"), _obj("identical body", ref="b")]),
+        build_recall_plan([
+            _obj("用户在书房安装了一个定时器用于夜间断电", ref="cjk-a"),
+            _obj("用户在书房安装了一个定时器用于夜间断电吗", ref="cjk-b"),
+        ]),
+        build_recall_plan([
+            _obj("owner states A", authority="owner_confirmed", claim="c1", ref="oc-a"),
+            _obj("owner states B", authority="owner_confirmed", claim="c1", ref="oc-b"),
+        ]),
+        build_recall_plan([
+            _obj("derived A", authority="indexed_derived", claim="c2", ref="la-a"),
+            _obj("derived B", authority="external_unverified", claim="c2", ref="la-b"),
+        ]),
+        build_recall_plan([long_a, long_b], budget_chars=10),
+    ]
+
+
+def test_near_duplicate_detects_chinese_near_identical_variants():
+    """Counterfactual for the CJK similarity-token fix.
+
+    Pre-fix, ``[\\w\\u4e00-\\u9fff]+`` never split between Chinese characters,
+    so each of these bodies was ONE token, the two tokens differed, and
+    jaccard was 0.0 -- L3 could not fire on Chinese at all.  Reverting
+    ``_similarity_tokens`` to that single-class regex makes this test fail
+    with near_duplicate_count == 0.
+    """
+    plan = build_recall_plan([
+        _obj("用户在书房安装了一个定时器用于夜间断电", ref="cjk-keep", score=0.9),
+        _obj("用户在书房安装了一个定时器用于夜间断电吗", ref="cjk-drop", score=0.4),
+    ], budget_chars=4000)
+
+    assert plan["near_duplicate_count"] == 1, plan
+    assert [item["reason"] for item in plan["suppressed"]] == ["near_duplicate"], plan
+    assert plan["selected_count"] == 1
+
+
+def test_near_duplicate_still_does_not_collapse_a_chinese_paraphrase():
+    """Scope pin: this fix restores near-identical dedup, NOT paraphrase dedup.
+
+    Semantic-equivalence collapsing is a separate owner decision; if a later
+    change starts suppressing here, that decision must be made deliberately
+    rather than arriving as a side effect of a tokenizer tweak.
+    """
+    plan = build_recall_plan([
+        _obj("用户在书房安装了一个定时器", ref="para-a"),
+        _obj("书房的定时器是用户装的", ref="para-b"),
+    ], budget_chars=4000)
+
+    assert plan["near_duplicate_count"] == 0, plan
+    assert plan["ambiguous_pair_count"] == 0, plan
+
+
+def test_similarity_tokens_leave_non_cjk_text_bit_identical():
+    """The ASCII/Latin class must tokenize exactly as the old single-class rule.
+
+    Only the CJK class changed; an English or accented-Latin corpus must see
+    no behavioural difference at all, otherwise the fix silently re-tunes
+    every non-CJK deployment.
+    """
+    import re as _re
+
+    from plugins.memory.memory_os.recall_arbitration import _similarity_tokens
+
+    for text in (
+        "The user installed a timer in the study",
+        "café serves espresso at 07:30",
+        "snake_case and CamelCase and digits 12345",
+    ):
+        assert _similarity_tokens(text) == set(_re.findall(r"\w+", text.casefold())), text
+
+
+def test_near_duplicate_config_is_sourced_from_the_matrix():
+    """Dedup semantics must be matrix data the code reads, not a doc-only key.
+
+    Two failure modes are pinned at once: a matrix key nothing reads (the
+    ``relevance_score`` defect), and a code constant the matrix does not cover
+    (which would change detection without ending the observation window it
+    invalidates).
+    """
+    import inspect
+    from copy import deepcopy
+
+    from plugins.memory.memory_os.recall_arbitration import (
+        _AMBIGUITY_JACCARD_FLOOR,
+        NEAR_DUPLICATE_THRESHOLD,
+        NEAR_DUPLICATE_TOKENIZER,
+    )
+    from plugins.memory.memory_os.recall_policy import (
+        AUTHORITY_FRESHNESS_MATRIX,
+        AUTHORITY_FRESHNESS_MATRIX_DIGEST,
+        authority_freshness_matrix_digest,
+    )
+
+    config = AUTHORITY_FRESHNESS_MATRIX["near_duplicate"]
+    assert NEAR_DUPLICATE_THRESHOLD == config["threshold"]
+    assert NEAR_DUPLICATE_TOKENIZER == config["tokenizer"]
+    assert _AMBIGUITY_JACCARD_FLOOR == config["ambiguity_floor"]
+
+    default = inspect.signature(build_recall_plan).parameters["near_duplicate_threshold"].default
+    assert default == config["threshold"], (
+        "the runtime default must come from the matrix, or the matrix entry is "
+        "decorative and the era boundary it promises does not exist"
+    )
+
+    for key, new_value in (("threshold", 0.5), ("tokenizer", "other_v9"), ("ambiguity_floor", 0.1)):
+        changed = deepcopy(AUTHORITY_FRESHNESS_MATRIX)
+        changed["near_duplicate"][key] = new_value
+        assert authority_freshness_matrix_digest(changed) != AUTHORITY_FRESHNESS_MATRIX_DIGEST, (
+            f"changing near_duplicate.{key} must start a new observation window"
+        )
+
+
+def test_conflict_lane_reports_the_denominator_behind_a_zero():
+    """`conflict_count == 0` must be readable as input-or-failure.
+
+    Conflict grouping keys on `claim_key`, whose only producer is crystallized
+    frontmatter -- and no production record carries one, so this counter has
+    been 0 for every sample the lane ever took.  Without a denominator that
+    permanent zero looks the same whether nothing was eligible or the grouping
+    silently broke.
+    """
+    without_keys = build_recall_plan([_obj("no claim key at all", ref="nk")])
+    assert without_keys["conflict_count"] == 0
+    assert without_keys["claim_keyed_input_count"] == 0, (
+        "no eligible input -- the zero above is expected, not a finding"
+    )
+
+    with_key = build_recall_plan([_obj("single keyed claim", claim="profile.timezone", ref="k1")])
+    assert with_key["conflict_count"] == 0
+    assert with_key["claim_keyed_input_count"] == 1, (
+        "input existed and produced no conflict -- a genuinely different state"
+    )
+
+    conflicting = build_recall_plan([
+        _obj("timezone is UTC", authority="owner_confirmed", claim="profile.timezone", ref="c1"),
+        _obj("timezone is Asia Shanghai", authority="owner_confirmed", claim="profile.timezone", ref="c2"),
+    ])
+    assert conflicting["conflict_count"] == 1
+    assert conflicting["claim_keyed_input_count"] == 2
+
+
+def test_recall_suppression_reason_census():
+    """Two-direction census of the suppression vocabulary.
+
+    Direction 1: every registered reason is reachable from the real producer.
+    Direction 2: no ``_suppression`` call site emits an unregistered literal.
+    A vocabulary that drifts from its producer checks nothing, silently.
+    """
+    import inspect
+    import re as _re
+
+    from plugins.memory.memory_os import recall_arbitration
+    from plugins.memory.memory_os.recall_policy import SUPPRESSION_REASONS
+
+    observed: set[str] = set()
+    for plan in _reason_probe_plans():
+        observed.update(str(item["reason"]) for item in plan["suppressed"])
+    assert observed == set(SUPPRESSION_REASONS), (
+        f"unreachable={set(SUPPRESSION_REASONS) - observed} "
+        f"unregistered={observed - set(SUPPRESSION_REASONS)}"
+    )
+
+    literals: set[str] = set()
+    indirect: set[str] = set()
+    for line in inspect.getsource(recall_arbitration).splitlines():
+        if "_suppression(" not in line or line.lstrip().startswith("def "):
+            continue
+        literals.update(_re.findall(r'_suppression\([^,]+,\s*"([a-z_]+)"', line))
+        indirect.update(_re.findall(r"_suppression\([^,]+,\s*([a-z_]+)\s*[,)]", line))
+    assert literals <= set(SUPPRESSION_REASONS), literals - set(SUPPRESSION_REASONS)
+    assert indirect <= {"status"}, (
+        f"new indirect _suppression reason source(s): {indirect - {'status'}} -- "
+        "extend the census before merging"
+    )
