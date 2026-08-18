@@ -4384,9 +4384,38 @@ warning 在安装路径不可见——**"要不要让漂移挡安装"是毕业�
 
 ### 待办（本节新增）
 
-`cron_registry_snapshot_missing_lanes` 目前是 warning 且安装路径 `>/dev/null`
-不可见。是否升级为 error（从而经 doctor 退出码挡住安装）需先在生产影子观察，
-确认无版本错位误报后由 owner 裁定。
+**owner 裁定 2026-08-18：维持 warning。** 毕业条件定死为二者之一——两台主机
+下一次 full monitor 零误报，或生产上抓到第一例真 drift；届时改一个词即可升级。
+
+裁定前的两处事实更正（原记录有误，一并钉在此处以免再被引用）：
+
+- **不是"安装路径不可见"**：`install_memory_os.sh:804` 的核心 doctor 调用
+  **没有** `>/dev/null`，完整 JSON 打到控制台；`>/dev/null` 的是 `:809/816`
+  两次 shell 插件 doctor。
+- **不是"自动部署路径零覆盖"**：`deploy_memory_os.py` 虽然每次 apply 都传
+  `--skip-verify`（使 `verify_install` 早退、`:804` 那次不跑），但
+  `memory_os_upgrade_compat_check.py` 的 `shell_doctor` spec 会跑
+  `hermes memory-os-agent-os doctor`，它经 `_delegate_to_memory_os_cli` 直通
+  `build_doctor_result`；该 compat check 在 **preflight / apply 后 / postcheck
+  各跑一次**。所以这条 finding 在部署路径上是可见的，只是不阻断。
+
+**因此"让 `.sh` 解析 findings"是伪命题**：severity 已经是三个消费者共用的
+唯一杠杆，且三者都已实现该策略——`_require_doctor_ok`（error 失败 / warning
+通过）、`memory_os_3_200_monitor` 分类端（`doctor.status=="ok"` 否则
+`doctor_not_ok` FAIL）、`.sh:804` 在 `set -e` 下（exit 1 即中止）。任何新增的
+shell 侧 code 名单或 `blocking_count` 都是重复建设，且 shell 侧名单无测试可钉，
+正是 CLAUDE.md「gate 词表与生产者漂移即静默失效」那一条。
+
+**升级的真实代价**（选择维持 warning 的理由）：`build_doctor_result` 有 error
+即置 `status="fail"`，monitor 直接判 `doctor_not_ok` **FAIL**。所以升 error
+不是"让安装更严"，而是**让这条 drift 成为生产 FAIL 级条件**——而它至今没有
+一次生产实例。升级时另需按 exit-3 的模式把 doctor 退出折进 `verify_failures`，
+否则 `set -e` 直接中止、fail-loud 框不渲染。
+
+**待观察（下次 monitor 运行确认，非既知事实）**：3.200 双 profile 且 systemd
+单元经历过 per-profile 改名。若 `memory-os/systemd/` 仍留有改名前的无后缀 unit
+文件，下次 full monitor 会出现 `systemd_timer_unit_not_registered` 的
+`doctor_warning_finding`（外层 WARN 码为既有码，新 finding 只是内层字段）。
 
 ### 测试计数与门
 
