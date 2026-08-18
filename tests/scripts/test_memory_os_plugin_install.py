@@ -3,6 +3,7 @@ import json
 import argparse
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -1460,6 +1461,72 @@ def test_smoke_probe_actually_emits_the_unavailable_prefix(tmp_path, monkeypatch
         installer._smoke_status(requested=True, ok=ok, detail=detail)
         == installer.SMOKE_HOST_RUNTIME_UNAVAILABLE
     )
+
+
+def test_installer_writes_a_runnable_memory_os_cli_wrapper(tmp_path):
+    """A source install must leave a typeable `memory-os` behind.
+
+    pyproject declares the console script, but that only materialises for a
+    pip install; the host install copies sources, so without this the
+    deployed machine has the whole CLI and no way to invoke it.
+    """
+    home = tmp_path / "home"
+
+    report = install_plugin(hermes_home=home, skip_verify=True)
+
+    wrapper = home / "memory-os" / "bin" / "memory-os"
+    assert report["cli_wrapper_path"] == str(wrapper)
+    assert wrapper.is_file()
+    body = wrapper.read_text(encoding="utf-8")
+    # Same PYTHONPATH the heartbeat/cognitive-loop wrappers set.
+    assert "memory-os/runtime/python" in body
+    assert "exec python3 -m plugins.memory.memory_os" in body
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_installer_cli_wrapper_resolves_hermes_home_correctly(tmp_path):
+    """Run the wrapper's resolution instead of grepping it.
+
+    A substring assertion on "${HERMES_HOME:-" passes for
+    "${HERMES_HOME:-'/path'}" too -- and that spelling puts LITERAL single
+    quotes into HERMES_HOME, breaking every path derived from it. Only
+    executing the lines catches that, so this asserts the resolved value in
+    both directions.
+    """
+    home = tmp_path / "home"
+    install_plugin(hermes_home=home, skip_verify=True)
+    wrapper = home / "memory-os" / "bin" / "memory-os"
+
+    # Everything up to the exec: the home/PYTHONPATH resolution under test.
+    prelude = "".join(
+        line for line in wrapper.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not line.startswith("exec ")
+    )
+
+    def resolved(env_home: str | None) -> str:
+        env = dict(os.environ)
+        env.pop("HERMES_HOME", None)
+        if env_home is not None:
+            env["HERMES_HOME"] = env_home
+        return subprocess.run(
+            ["bash", "-c", prelude + '\nprintf "%s" "$HERMES_HOME"'],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout
+
+    # Installed home is the default -- with no stray quotes.
+    assert resolved(None) == str(home)
+    # ...and an explicit HERMES_HOME still wins: this is an interactive CLI,
+    # not a cron wrapper where pinning the home is correct.
+    assert resolved("/somewhere/else") == "/somewhere/else"
+
+
+def test_installer_cli_wrapper_is_not_written_on_dry_run(tmp_path):
+    home = tmp_path / "home"
+
+    report = install_plugin(hermes_home=home, dry_run=True)
+
+    assert report["cli_wrapper_installed"] is False
+    assert not (home / "memory-os" / "bin" / "memory-os").exists()
 
 
 def test_installer_main_exits_three_on_unmet_post_conditions(tmp_path, monkeypatch, capsys):

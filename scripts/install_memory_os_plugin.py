@@ -471,6 +471,7 @@ def install_plugin(
         hermes_home,
         dry_run=dry_run,
     )
+    cli_wrapper_path = _write_cli_wrapper(hermes_home, dry_run=dry_run)
     v3_backup_exclusions_path = _write_v3_backup_exclusions(hermes_home, dry_run=dry_run)
     expired_cleanup_report = _run_expired_working_migration(
         hermes_home,
@@ -773,6 +774,8 @@ def install_plugin(
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
+        "cli_wrapper_path": str(cli_wrapper_path),
+        "cli_wrapper_installed": not dry_run,
         "v3_backup_exclusions_path": str(v3_backup_exclusions_path),
         "expired_working_cleanup": expired_cleanup_report,
         "smoke_test": {
@@ -1280,6 +1283,42 @@ def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run
         encoding="utf-8",
     )
     return artifacts
+
+
+def _write_cli_wrapper(hermes_home: Path, *, dry_run: bool) -> Path:
+    """Put a runnable ``memory-os`` on disk for a source install.
+
+    ``pyproject.toml`` declares a ``memory-os`` console script, but that only
+    materialises for someone who ran ``pip install``. The host install copies
+    sources instead, so a deployed machine has the full 35-subcommand CLI and
+    no way to type it -- every diagnostic becomes a hand-written
+    ``PYTHONPATH=... python3 -m ...`` incantation.
+
+    Lives beside the heartbeat/cognitive-loop wrappers in ``memory-os/bin/``
+    and sets the same PYTHONPATH they do.  Unlike those two -- cron jobs,
+    where pinning HERMES_HOME is correct -- this is an interactive command,
+    so the installed home is only a DEFAULT: ``HERMES_HOME=/other memory-os
+    status`` still works.
+    """
+    wrapper = hermes_home / "memory-os" / "bin" / "memory-os"
+    if dry_run:
+        return wrapper
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    # The default home is assigned on its own line and only then expanded.
+    # Inlining it as "${HERMES_HOME:-'/path'}" looks right and is not: inside
+    # double quotes those single quotes are literal, so HERMES_HOME comes out
+    # as "'/path'" -- quotes included -- and every path built from it is wrong.
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"memory_os_default_home={_shell_quote(str(hermes_home))}\n"
+        "export HERMES_HOME=\"${HERMES_HOME:-$memory_os_default_home}\"\n"
+        "export PYTHONPATH=\"${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}\"\n"
+        "exec python3 -m plugins.memory.memory_os \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    return wrapper
 
 
 def _write_owner_review_cron_helper(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
