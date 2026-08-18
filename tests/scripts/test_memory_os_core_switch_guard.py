@@ -63,6 +63,44 @@ def test_ensure_config_defaults_re_enables_core_disclosure_ledger(tmp_path: Path
     assert report_again["core_mode_report"]["memory_sources.enabled"] is True
 
 
+def test_ensure_config_defaults_creates_skeleton_on_a_fresh_profile(tmp_path: Path):
+    """Counterfactual: the missing-config early return skipped the CE guard.
+
+    A fresh profile is precisely the host that has never had the disclosure
+    ledger switched on, so returning ``no_config`` there meant the one
+    auto-corrected core switch was applied everywhere EXCEPT where it was
+    needed. Note the directory does not exist either -- the old write path
+    never needed a mkdir because the early return guaranteed a parent.
+    """
+    home = tmp_path / "home"
+    assert not (home / "memory-os").exists()
+
+    report = _ensure_config_defaults(home)
+
+    assert report["status"] == "updated"
+    saved = json.loads((home / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert saved["memory_sources"]["enabled"] is True
+    assert saved["memory_sources"]["mode"] == "metadata_only"
+    assert saved["prefetch_char_budget"] == 5500
+    assert any("created" in change for change in report["changes"])
+    # Graduated modes are still only reported, never invented on disk.
+    assert "recall_arbitration" not in saved
+    assert report["core_mode_report"]["memory_sources.enabled"] is True
+
+    # Idempotent: a second pass finds nothing left to do.
+    assert _ensure_config_defaults(home)["status"] == "already_current"
+
+
+def test_ensure_config_defaults_dry_run_does_not_create_missing_config(tmp_path: Path):
+    """dry_run + missing config is a new combination -- it must not write."""
+    home = tmp_path / "home"
+
+    report = _ensure_config_defaults(home, dry_run=True)
+
+    assert report["status"] == "would_update"
+    assert not (home / "memory-os" / "config.json").exists()
+
+
 def test_ensure_config_defaults_dry_run_reports_without_writing(tmp_path: Path):
     home = tmp_path / "home"
     (home / "memory-os").mkdir(parents=True)

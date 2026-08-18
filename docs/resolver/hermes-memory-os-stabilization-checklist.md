@@ -4131,6 +4131,302 @@ CLI 参数直接报错。全仓库 **94 个 `fromisoformat` 调用点 / 53 个�
 （由 `_run_step` 捕获记 error），均非 CW 引入；根因是"缺键"而非"越界值"，
 需要时独立处理。
 
+## CY — 外部部署报告核实 + 安装器"完成即成功"三项修复（2026-08-18）
+
+Owner 转来一份外部主机（RK3399 aarch64 全新部署）写的 `deploy_improvements.md`，
+列 8 项问题。先逐条 grep 核实到 file:line，再按核实结果重排优先级实施。
+
+### CY.0 核实结论：8 项中 2 项证伪、3 项归因错、3 项属实
+
+**证伪 2 项——它建议的修复已经在代码里**：
+
+- **`config.json` 缺 `recall_arbitration` 段**：报告建议加
+  `_DEFAULT_PROVIDER_CONFIG` + deep_merge。`config.py:62` 的
+  `DEFAULT_CONFIG["recall_arbitration"]` 字段与其提议**逐字相同**，
+  `_merge_recall_arbitration_config`（`config.py:378`，经 `_merge_known`
+  `:297`）还多做取值域校验；provider 走 `load_config`（`__init__.py:113`），
+  构造函数 `:70` 直接以 `DEFAULT_CONFIG` 兜底。报告引用的
+  `_load_provider_config()` **全仓库不存在**。`mode` 默认 `"off"` 是毕业契约
+  的设计，写进文件而值不变则行为一字节不改。
+- **审批 token 未内联进 digest**：`_rendered_digest_item_lines` 逐条渲染
+  `会话回复示例: memory approve oa_...`（来自 `_review_action` 的 token），
+  普通 candidate 走 `_review_actions` 的 `candidate` 分支必得
+  approve/reject 两个 `oa_`，`_review_item_suppresses_actions` 只作用于
+  显式 `actions_suppressed` 与未成熟 `proposal`，**从不作用于普通 candidate**。
+  报告者大概率观测到的是**真现象、错归因**：`_rendered_digest_text` 的
+  Telegram 长度预算裁剪与分区上限会省略条目（`还有 N 项…被省略`）。
+
+**归因错 3 项**（症状真）：
+
+- **认知回路 timer 写盘却从未启用**：`.sh` 三种模式默认都 enable
+  （`554-555`/`145-164`）且 `785-825` 有 fail-loud 校验，走文档路径不会复现。
+  真机理是报告者直接调 `install_memory_os_plugin.py`：全部开关 `store_true`
+  默认 False，`440` 行 `install OR enable` 写单元文件，而
+  copy 到 `~/.config/systemd/user/` + `systemctl enable --now` **只在 enable
+  分支内**（`574-585`）→ 必然产出"单元文件在、软链不在"，与观测逐字吻合。
+- **`memory-os` CLI 不存在**：`pyproject.toml` **已有**
+  `[project.scripts] memory-os`（`b7d4476`）。报告称 `.sh` 多处
+  `command_exists memory-os` —— 全文 `command_exists` 仅 5 处，查的是
+  `hermes`/`systemctl`，**从未查过 memory-os**；`<HERMES_HOME>/memory-os/bin/memory-os`
+  全仓库只出现在报告自身。真缺口是源码复制安装不 pip install。
+- **运行时不在 `sys.path`**：报告称"仓库无任何打包元数据"为假。真实情况是
+  50 个第一方脚本各自 bootstrap，且
+  `tests/scripts/test_memory_os_installed_layout_imports.py` **已用测试钉死
+  该缺陷类**（记录 3.200 上 `deploy_l3_probe.py` 的真实事故）。该测试用
+  `-S -E` 隔离子解释器正是为了让 CI 的 editable 安装不使测试空转——**故报告
+  建议的 `.pth` 方案要驳回**：往 site-packages 放 `.pth` 会造成"测试被 `-S`
+  屏蔽、生产生效"的路径解析分叉，把已钉死的缺陷类重新变成盲区。
+
+**"冷启动图谱静默无解释"亦证伪**：`structural_edge_proposer.py:278-281`
+返回 `reason="need ≥2 crystallized records, got N"`，符合本项目
+「Completion Is Not Output」的封闭原因码要求；缺的是**呈现**不是记录。
+
+### CY.1（P1，报告未发现）安装器"跑到底"被当成"成功"
+
+`main()` 末尾无条件 `return 0`（原 `1890-1891`）。后果：`systemctl enable`
+抛 `CalledProcessError` 被吞进 `cognitive_loop_enable_error` 字符串
+（原 `585`）、smoke test FAIL 只打印 `INSTALL MAY BE BROKEN` —— **退出码全是 0**。
+这正是本项目自己写死的反模式：请求了 enable 却没 enable 成，等同于坏掉的
+lane 关闭一个干净的 ExecutionGate 信封。
+
+**同文件内已有相反先例**：`_enable_memory_provider` 经 `_run_required_command`
+直接抛异常（并有测试钉住），systemd 路径却静默——故本修复不是新政策，
+是**恢复一致性**。Rule 5 扫描：兄弟安装器
+`install_memory_os_monitor_dashboard_service.py` 用 `runner(command, check=True)`
+**同样硬失败**，本缺陷是孤例。
+
+修复：新增 `POST_CONDITION_EXIT_CODE = 3` 与 `_unmet_post_conditions(report)`。
+选 3 而非 1，是因为 1 已被未捕获异常占用、2 被 argparse 占用，`.sh` 需要区分
+"崩了"与"跑到底但没做到"。
+
+### CY.2 每个 timer 一个封闭 outcome，孤儿态必须自报家门
+
+新增 `_timer_enable_state()`，封闭取值
+`not_installed` / `artifacts_written_not_enabled` / `enabled` /
+`enable_skipped_systemctl_unavailable` / `enable_failed`，进报告
+`runtime_timer_state` / `cognitive_loop_timer_state`。
+`artifacts_written_not_enabled`（即 CY.0 复现的那个形态）额外向 stderr
+打一条指明"单元文件已写、systemd 从未见过"的警告——但**不判失败**，
+因为只装不启是合法用法（cron 兜底）。
+`systemctl_unavailable_skipped` 同样**不算未达成**：无 user systemd 主机
+回落 cron 是既定设计。
+
+### CY.3 smoke test：分开"探针没跑成"与"探针跑了且失败"
+
+实施中被自己的测试打脸：把 smoke FAIL 一律判致命，会让
+`test_installer_cli_hindsight_config_imports_when_run_by_absolute_path`
+挂掉——因为 `_verify_memory_os_hot_path` 在 **hermes-agent 不可导入**时
+也返回 `(False, ...)`，而"从没装 hermes-agent 的机器上安装"是合法场景。
+这与本项目「一个 lane 无产出必须说明是没有输入还是处理失败」是同一条要求。
+
+修复：加 `SMOKE_HOST_RUNTIME_UNAVAILABLE` 前缀标记与 `_smoke_status()`，
+封闭取值 `not_requested` / `passed` / `host_runtime_unavailable` / `failed`；
+`_unmet_post_conditions` **只判 `failed`**。
+
+### CY.4 `.sh` 侧：容忍 exit 3 但必须把它折进裁决
+
+顾问在方案评审时抓到我第一版的洞：若 `.sh` 仅"容忍" rc==3 就交给
+`verify_install`，则 smoke FAIL 而 timer 健康时——`verify_install` 从不重跑
+smoke → `verify_failures` 为空 → **退出 0**，我要修的 envelope bug 原样搬到
+shell 层。**报告可以归一到一个面，裁决不行。**
+
+修复：`run_installer` 捕获 rc（rc==3 记 `INSTALLER_POST_CONDITION_FAILED=1`
+并继续；其余非零仍按原样中止），`verify_install` 把该标志注入
+`verify_failures`；且 `SKIP_VERIFY`/`DRY_RUN` 早退分支**也**检查该标志
+（`--skip-verify` 静的是我们自己的探针，不是安装器已报告的事实）。
+
+**刻意不做**：不把 `--skip-verify` 透传给 plugin.py。自审时发现
+`deploy_memory_os.py:271` 每次 apply 都传 `--skip-verify`，透传会
+**静默取消每一次生产部署的 hot-path smoke** ——这是方案里没有的覆盖损失。
+已在原处留注释说明为何不传。
+
+### CY.5（P2）`_ensure_config_defaults` 在全新主机上整体跳过
+
+`config.json` 不存在时 `return {"status": "no_config"}` 早退，于是 CE 那条
+**唯一**自动纠偏（`memory_sources.enabled` False→True，存在理由是 CD.E
+四天生产披露断流）在**最需要它的全新 profile 上从不执行**。Section W 规则 4
+所指的"静默跳过型地雷"。
+
+影响面已界定：`.sh` 三种模式必传 `--memory-sources-preset`（`684`），
+preset 写入器先建 config.json，故只咬直调 plugin.py 的路径。
+
+修复：改为写最小骨架再套既有逻辑。三个细节：
+① 补 `config_path.parent.mkdir(parents=True, exist_ok=True)`——原写入分支
+从不需要 mkdir，因为早退保证了父目录存在，去掉早退就去掉了那个保证
+（顾问指出，否则恰好在目标主机上崩）；
+② 骨架显式写 `memory_sources.mode = "metadata_only"`——**这是我自己的测试
+抓出来的**：只靠 CE 那行 `ms_cfg["enabled"]=True` 会写出没有 `mode` 的
+半个 dict，隐私相关字段的安全性就寄托在另一个模块的读时默认上；
+③ 沿用既有 `updated`/`would_update` 词表不新增取值（无生产读者，遵守封闭集合）。
+
+**顺带修正一个既有测试的附带断言**：
+`test_installer_does_not_write_memory_sources_config_by_default` 原先断言
+`config.json` 根本不存在——那是上述缺陷的副产物，不是契约。改为断言其真实
+意图（未写入任何 preset 标记），并钉住守护产物。
+
+### 反事实覆盖
+
+三条修复各自 revert→实测 FAIL→restore→PASS（用 `cp` 备份，不用
+`git checkout --`）：
+- 退出码改回 `return 0` → `assert 0 == 3` FAIL；
+- 恢复 `no_config` 早退 → 两条骨架测试以 `'no_config' == 'updated'` FAIL；
+- `artifacts_written_not_enabled` 改回 `not_installed` → 孤儿态测试 FAIL。
+
+### 测试计数与门
+
+新增 **10 个测试函数**（骨架创建 2、timer 状态/孤儿告警 2、未达成判定 2、
+smoke 状态分级 2、退出码正反各 1）；另修正 1 个既有测试的附带断言。
+全量 3537 → **3547 passed / 13 skipped / 0 failed**。
+
+smoke 状态那 2 个是**合入前顾问全量 diff 复审**加的第 2 个：原先只有分类
+函数的测试，而它的 detail 串是**拿常量自己拼的** —— 正是本项目
+`counterfactual-tests-must-use-real-producer` 那个坑：生产端
+`_verify_memory_os_hot_path` 若哪天不再发该前缀，测试照绿，而所有没装
+hermes-agent 的环境会开始退 3。补的那条直接调真实生产端（用
+`sys.modules[...] = None` 让 import 确定性失败），断言它真的发出分类器所依赖的前缀。
+
+**Rule 5 记录不改**：失败框 `printf "║  ✗ %-54s ║"` 的两条**既有**条目
+（`cognitive-loop timer is not active/enabled (ENABLE_COGNITIVE_LOOP=1)`，60/61 字符）
+本就撑破边框。本轮新增条目已压到 50 字符合规；既有两条不动——缩写会丢掉
+`ENABLE_COGNITIVE_LOOP=1` 这个"是哪个变量驱动了检查"的诊断信息，而加宽整个框
+比这个纯观感缺陷本身更具侵入性。
+四静态门（import_cycle / write_surface `unclassified_count=0` /
+static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
+
+### 未做（边界扩张，待 owner 放行）
+
+`memory-os` CLI wrapper（建议写进既有 `<HERMES_HOME>/memory-os/bin/`，
+**不采纳 `.pth`**，理由见 CY.0）、部署完整性 doctor（另开子命令而非并入
+`doctor`，因 README lane A 在无 systemd 的临时目录跑 `doctor`；且新证据
+等级必须同批注册进 CLAUDE.md 的封闭集合）、lane preset（仅接受显式
+`--lane-preset-owner-approved` + 仅 shadow 档，**驳回**"作为
+`--production-safe` 默认"——模式默认不是 owner 权威）。
+
+---
+
+## CZ — 部署报告两项待放行项的最小实现：CLI wrapper + doctor 部署完整性（2026-08-18）
+
+CY 把 `deploy_improvements.md` 的 #1/#2/#4 列为边界扩张待 owner 放行。owner
+批 #4 驳回（lane preset 不得作为 `--production-safe` 默认），并要求先与顾问
+讨论 #1/#2 的**最小高收益**实现、太复杂则否决。裁定：两项都不复杂，各自
+独立成 commit，以便否决即一条 `git revert`。
+
+### CZ.0 顾问推翻自己上一轮的「另开子命令」建议
+
+CY 记录的方案是 deploy-doctor **另开子命令**，唯一理由是并入 `doctor` 会让
+README lane A（无 systemd 的临时目录跑 `memory-os doctor`）变吵。本轮提出
+**按面存在与否设条件**后该理由消失：没有 snapshot、没有 unit 文件的 profile
+一条 finding 都不发。这一改砍掉三样东西——新子命令、新证据等级
+（findings 直接走既有 `memory-os.doctor.v0`，**CLAUDE.md 的证据等级封闭集合
+无需扩充**）、独立 reason code 体系。同时按范围砍掉 resolved knob 值、
+config 段模式、cron job 分类三项检查（与 monitor 重叠，复杂度和噪音都在那里）。
+
+### CZ.1 `memory-os` CLI wrapper（`d6b9664`）
+
+`pyproject.toml` 声明了 `memory-os` console script，但那只对 `pip install`
+的人生效；主机安装走**源码复制**，于是部署主机上有完整 35 子命令 CLI 却
+无从敲起，每次诊断都要手写 `PYTHONPATH=... python3 -m ...`。
+
+写 `<HERMES_HOME>/memory-os/bin/memory-os`，与既有 heartbeat/cognitive-loop
+wrapper 同目录同 PYTHONPATH。**不采纳 `.pth`**：
+`test_memory_os_installed_layout_imports.py` 用 `-S` 隔离子解释器正是为了
+让 CI 的 editable 安装不使那批测试空转，放 `.pth` 会造成"测试被屏蔽、生产
+生效"的分叉，把一个已钉死的缺陷类重新变成盲区。
+
+与两个 cron wrapper 有一处**故意不同**：那些是定时任务，钉死 `HERMES_HOME`
+是对的；这个是交互式命令，装机 home 只作默认值，`HERMES_HOME=x memory-os
+status` 仍然生效。
+
+**实现中踩到并修掉一个真 bug**：默认值必须**单独一行赋值再展开**。
+显而易见的内联写法 `"${HERMES_HOME:-'/path'}"` 是错的——双引号内的单引号
+是字面量，`HERMES_HOME` 会变成 `'/path'`（**带引号**），由它派生的每条路径
+都错。更要命的是**子串断言 `"${HERMES_HOME:-" in body` 对错误写法一样通过**，
+所以测试改为**执行**那几行并双向断言解析结果。反事实：换回内联写法 → 执行
+型测试 FAIL，而两条子串型测试**照常 PASS**——这正是它存在的理由。
+
+### CZ.2 doctor 部署完整性两项检查（`<本节 commit>`）
+
+新增 `_deployment_integrity_checks(store)` 挂进 `build_doctor_result`，
+只做两条最高收益检查，各自按面设条件：
+
+**(a) `cron_registry_snapshot_missing_lanes`** —— 编译内注册的 lane 不在
+主机已装 snapshot 的 `member_keys` 里。CLAUDE.md 明载这是**静默失败且此前
+无任何探测器**：`_load_group` 优先读 snapshot 且 member 非空时不回落，于是
+新注册的 lane 在已 onboard 主机上直接从 tick 里消失——无 unknown key、无
+error record、无 WARN，envelope 干干净净地关闭却从未调用它。
+只在 snapshot **存在**时比对（无 snapshot 时 runner 回落编译内注册表，
+不存在缺口，故这不是买绿）；v0 snapshot 无 `groups` 数组时按设计回落，不发。
+**严重级 warning 而非 error**：从新 checkout 对旧主机 HOME 跑 doctor 会
+产生版本错位假漂移。注意 `.sh` 的 verify 跑 doctor 时是 `>/dev/null`，
+warning 在安装路径不可见——**"要不要让漂移挡安装"是毕业决策，记入待办
+由 owner 定，先影子跑**。
+
+**(b) `systemd_timer_unit_not_registered`** —— unit 文件在
+`memory-os/systemd/` 而 systemd 不认识（CY 复现的那个部署形态）。
+单元名**取自磁盘文件名**（per-profile 后缀已内嵌），**绝不重推导后缀**——
+重推导正是 CV 节修过的那类错探测。探测走 `systemctl --user list-unit-files`
+子进程（用户上下文天然正确）；systemctl 不可用/无 user bus 时**什么都不发**
+——那是"无样本"，不为它发明新严重级去扩 doctor 词表。
+**严重级必须 warning**：装而不启 + cron 兜底是 CY 刚刚显式支持的合法稳态，
+判 error 会让每台无 systemd 主机 doctor 失败。
+
+### 测试与反事实
+
+新增 **12 个测试**（wrapper 3、部署完整性 9）。两条按顾问要求必写：
+① `test_bare_profile_emits_no_deployment_findings` ——裸 HERMES_HOME 断言
+部署类 finding 为零，**这条钉的是"按面设条件"契约本身**，即推翻另开子命令
+的全部依据；没有它，以后谁去掉条件 lane A 就静默变吵。
+② snapshot 测试用**真实写入器** `write_cron_registry_snapshot` 构造再摘掉
+一个 lane，不手拼 JSON（`counterfactual-tests-must-use-real-producer`）。
+
+反事实实测：wrapper 换回内联写法 → 执行型测试 FAIL / 子串型照绿；
+漂移检测置空 → `test_snapshot_missing_a_registered_lane_is_reported` FAIL。
+
+### 待办（本节新增）
+
+**owner 裁定 2026-08-18：维持 warning。** 毕业条件定死为二者之一——两台主机
+下一次 full monitor 零误报，或生产上抓到第一例真 drift；届时改一个词即可升级。
+
+裁定前的两处事实更正（原记录有误，一并钉在此处以免再被引用）：
+
+- **不是"安装路径不可见"**：`install_memory_os.sh:804` 的核心 doctor 调用
+  **没有** `>/dev/null`，完整 JSON 打到控制台；`>/dev/null` 的是 `:809/816`
+  两次 shell 插件 doctor。
+- **不是"自动部署路径零覆盖"**：`deploy_memory_os.py` 虽然每次 apply 都传
+  `--skip-verify`（使 `verify_install` 早退、`:804` 那次不跑），但
+  `memory_os_upgrade_compat_check.py` 的 `shell_doctor` spec 会跑
+  `hermes memory-os-agent-os doctor`，它经 `_delegate_to_memory_os_cli` 直通
+  `build_doctor_result`；该 compat check 在 **preflight / apply 后 / postcheck
+  各跑一次**。所以这条 finding 在部署路径上是可见的，只是不阻断。
+
+**因此"让 `.sh` 解析 findings"是伪命题**：severity 已经是三个消费者共用的
+唯一杠杆，且三者都已实现该策略——`_require_doctor_ok`（error 失败 / warning
+通过）、`memory_os_3_200_monitor` 分类端（`doctor.status=="ok"` 否则
+`doctor_not_ok` FAIL）、`.sh:804` 在 `set -e` 下（exit 1 即中止）。任何新增的
+shell 侧 code 名单或 `blocking_count` 都是重复建设，且 shell 侧名单无测试可钉，
+正是 CLAUDE.md「gate 词表与生产者漂移即静默失效」那一条。
+
+**升级的真实代价**（选择维持 warning 的理由）：`build_doctor_result` 有 error
+即置 `status="fail"`，monitor 直接判 `doctor_not_ok` **FAIL**。所以升 error
+不是"让安装更严"，而是**让这条 drift 成为生产 FAIL 级条件**——而它至今没有
+一次生产实例。升级时另需按 exit-3 的模式把 doctor 退出折进 `verify_failures`，
+否则 `set -e` 直接中止、fail-loud 框不渲染。
+
+**待观察（下次 monitor 运行确认，非既知事实）**：3.200 双 profile 且 systemd
+单元经历过 per-profile 改名。若 `memory-os/systemd/` 仍留有改名前的无后缀 unit
+文件，下次 full monitor 会出现 `systemd_timer_unit_not_registered` 的
+`doctor_warning_finding`（外层 WARN 码为既有码，新 finding 只是内层字段）。
+
+### 测试计数与门
+
+新增 **12 个测试函数**（CLI wrapper 3、部署完整性 9）。
+全量 3547 → **3559 passed / 13 skipped / 0 failed**（12:12）。
+四静态门（import_cycle / write_surface `unclassified_count=0` /
+static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
+两项各自独立 commit（`d6b9664` / 本节），owner 否决任一项即一条 `git revert`。
+
+---
+
 ## 待办
 
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
@@ -6434,3 +6730,27 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   计数三层接线含 `if not facts` 早退、timeutil 25 点收敛）拒 2（event_stats
   排序反测经模糊测试证明不可构造、双排序 Timsort 下不成立）；
   另钉解析器取舍特征测试。
+
+- `5c2d9c0..（CY，本节）`：外部主机部署报告 `deploy_improvements.md` 8 项逐条
+  核实——2 项证伪（`recall_arbitration` 默认段与 digest 内联 `oa_` token 的
+  建议修复均已在代码中，且其引用的 `_load_provider_config`/
+  `command_exists memory-os`/`memory-os/bin/memory-os` 三处仓库内不存在）、
+  3 项归因错、3 项属实；另查出报告未发现的真 P1：`install_memory_os_plugin.py`
+  `main()` 无条件 `return 0`，吞掉 `systemctl enable` 失败与 smoke FAIL。
+  修 3 项——退出码诚实化（新 code 3 + `_unmet_post_conditions`）、每 timer
+  封闭 outcome 与孤儿态告警、`_ensure_config_defaults` 全新主机骨架（CE 守护
+  原本在最需要的主机上被整体跳过）；顺带把 smoke 的"探针没跑成"与"跑了且失败"
+  分级（否则合法环境被判失败），并在 `.sh` 把 exit 3 **折进** `verify_failures`
+  而非仅容忍（否则同一 envelope bug 搬到 shell 层）。自审否掉自己加的
+  `--skip-verify` 透传（会静默取消每次生产部署的 smoke）。
+  全量 3537→3547 passed（+10）/13 skipped，四门全绿。合入前另做一次**最终统一 diff** 顾问复审（此前只审过中间态与逐条 Edit），据其发现补生产端前缀断言、压缩失败框条目长度、修正测试分桶。
+
+- `80d144b..（CZ，本节）`：CY 列为待放行的 #1/#2 最小实现——顾问裁定两项均不
+  复杂并**推翻自己上一轮的「deploy-doctor 另开子命令」建议**：按面存在设条件
+  后，并入 `doctor` 不再有 lane A 噪音问题，顺带省掉新证据等级注册。
+  #1 写 `memory-os/bin/memory-os` wrapper（不采纳 `.pth`，理由见 CY.0；实现中
+  踩到并修掉内联 `${HERMES_HOME:-'...'}` 会带字面单引号的真 bug，测试改为执行
+  解析而非子串断言）；#2 新增 doctor 两条部署检查——registry snapshot 漏 lane
+  （CLAUDE.md 记载的无探测器静默失败）与 unit 文件未注册 systemd，均 warning、
+  均按面设条件、systemctl 不可用即无样本不发。#4 lane preset 按 owner 裁定驳回，
+  无相关代码。全量 3547→3559 passed（+12）/13 skipped，四门全绿。

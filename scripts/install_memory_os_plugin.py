@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Install Memory-OS as a Hermes user memory provider plugin."""
+"""Install Memory-OS as a Hermes user memory provider plugin.
+
+LOW-LEVEL PLUMBING -- the supported entry point is
+``scripts/install_memory_os.sh``.  Every switch here is opt-in
+(``store_true``), so invoking this module directly with a partial flag set
+produces a partially-installed host: notably ``--install-cognitive-loop``
+WITHOUT ``--enable-cognitive-loop`` writes the systemd unit files under
+``<HERMES_HOME>/memory-os/systemd/`` but never links or enables them, which
+looks healthy from the artifact list alone.  The wrapper supplies the
+production defaults and the fail-loud verification pass; this module only
+owns being honest about what it did and did not achieve.
+
+Exit codes:
+  0  everything requested was achieved (or ``--dry-run``)
+  1  hard failure -- an uncaught exception (e.g. provider enable raised)
+  2  argparse usage error
+  3  install completed but a REQUESTED post-condition was not achieved
+     (a timer enable that failed, or a failing hot-path smoke test).
+     Code 3 exists so ``install_memory_os.sh`` can distinguish "crashed"
+     from "ran to the end without doing what was asked" and fold the
+     latter into its own verification verdict instead of aborting early.
+"""
 
 from __future__ import annotations
 
@@ -235,6 +256,27 @@ LLM_JUDGE_PRESETS: dict[str, dict[str, object]] = {
 }
 
 
+# Marker prefix on the one smoke-test failure that means "the probe could not
+# run here", not "the hot path is broken". Graded separately: see
+# _smoke_status() and _unmet_post_conditions().
+SMOKE_HOST_RUNTIME_UNAVAILABLE = "host_runtime_unavailable"
+
+
+def _smoke_status(*, requested: bool, ok: bool, detail: str) -> str:
+    """Closed status for the hot-path smoke test.
+
+    "not run" and "ran and failed" must not share an outcome -- that is the
+    same conflation that lets a broken lane and an idle lane look identical.
+    """
+    if not requested:
+        return "not_requested"
+    if ok:
+        return "passed"
+    if str(detail or "").startswith(SMOKE_HOST_RUNTIME_UNAVAILABLE):
+        return SMOKE_HOST_RUNTIME_UNAVAILABLE
+    return "failed"
+
+
 def _verify_memory_os_hot_path(hermes_home: str) -> tuple:
     """E2E smoke test: verify Hermes MemoryManager accepts and calls the provider.
 
@@ -252,8 +294,13 @@ def _verify_memory_os_hot_path(hermes_home: str) -> tuple:
         from agent.memory_manager import MemoryManager
         from agent.memory_provider import MemoryProvider as HostABC
     except ImportError as e:
+        # The probe could not RUN -- distinct from "it ran and the hot path is
+        # broken". Installing from a machine without hermes-agent importable is
+        # legitimate, so this must never be graded as a hot-path failure. The
+        # prefix is the contract with the single call site below.
         return False, (
-            f"Cannot import Hermes agent runtime — is hermes-agent installed? {e}"
+            f"{SMOKE_HOST_RUNTIME_UNAVAILABLE}: Cannot import Hermes agent runtime — "
+            f"is hermes-agent installed? {e}"
         )
 
     # 1. Verify provider class inherits from host ABC
@@ -424,6 +471,7 @@ def install_plugin(
         hermes_home,
         dry_run=dry_run,
     )
+    cli_wrapper_path = _write_cli_wrapper(hermes_home, dry_run=dry_run)
     v3_backup_exclusions_path = _write_v3_backup_exclusions(hermes_home, dry_run=dry_run)
     expired_cleanup_report = _run_expired_working_migration(
         hermes_home,
@@ -591,6 +639,34 @@ def install_plugin(
                     file=sys.stderr,
                 )
 
+    # ── Per-timer closed outcome, and a loud word for the orphan shape ──
+    runtime_timer_state = _timer_enable_state(
+        artifacts_written=bool(runtime_artifacts) and not dry_run,
+        enable_requested=enable_runtime,
+        enabled=runtime_enabled,
+        start_method=runtime_start_method,
+    )
+    cognitive_loop_timer_state = _timer_enable_state(
+        artifacts_written=bool(cognitive_loop_artifacts) and not dry_run,
+        enable_requested=enable_cognitive_loop,
+        enabled=cognitive_loop_enabled,
+        start_method=cognitive_loop_start_method,
+    )
+    for _label, _flag, _state in (
+        ("heartbeat", "--enable-runtime", runtime_timer_state),
+        ("cognitive-loop", "--enable-cognitive-loop", cognitive_loop_timer_state),
+    ):
+        if _state != "artifacts_written_not_enabled":
+            continue
+        print(
+            f"memory-os-install: WARNING — {_label} systemd unit files were written to "
+            f"{hermes_home}/memory-os/systemd/ but NOT registered with systemd "
+            f"(no {_flag}). The units exist on disk and the lane will never run.\n"
+            f"  Re-run with {_flag}, or use the supported entry point: "
+            f"scripts/install_memory_os.sh",
+            file=sys.stderr,
+        )
+
     # E2E smoke test — verify hot path is actually working
     smoke_ok = True
     smoke_detail = ""
@@ -645,6 +721,7 @@ def install_plugin(
         "runtime_start_method": runtime_start_method,
         "runtime_enable_error": runtime_enable_error,
         "runtime_enable_command": runtime_enable_command,
+        "runtime_timer_state": runtime_timer_state,
         "cognitive_loop_artifacts_installed": bool(cognitive_loop_artifacts) and not dry_run,
         "cognitive_loop_artifacts": [str(path) for path in cognitive_loop_artifacts],
         "cognitive_loop_interval": cognitive_loop_interval,
@@ -653,6 +730,7 @@ def install_plugin(
         "cognitive_loop_start_method": cognitive_loop_start_method,
         "cognitive_loop_enable_error": cognitive_loop_enable_error,
         "cognitive_loop_enable_command": cognitive_loop_enable_command,
+        "cognitive_loop_timer_state": cognitive_loop_timer_state,
         "owner_review_cron_helper_install_requested": install_owner_review_cron_helper,
         "owner_review_cron_helper_installed": bool(owner_review_cron_helper.get("helper")) and not dry_run,
         "owner_review_cron_helper_path": str(owner_review_cron_helper.get("helper") or ""),
@@ -696,12 +774,19 @@ def install_plugin(
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
+        "cli_wrapper_path": str(cli_wrapper_path),
+        "cli_wrapper_installed": not dry_run,
         "v3_backup_exclusions_path": str(v3_backup_exclusions_path),
         "expired_working_cleanup": expired_cleanup_report,
         "smoke_test": {
             "requested": not skip_verify and not dry_run,
             "passed": smoke_ok,
             "detail": smoke_detail,
+            "status": _smoke_status(
+                requested=not skip_verify and not dry_run,
+                ok=smoke_ok,
+                detail=smoke_detail,
+            ),
         },
         "dry_run": dry_run,
     }
@@ -867,6 +952,75 @@ def _ensure_embedder_package(*, dry_run: bool = False, target_python: str = "") 
             file=sys.stderr,
         )
         return result
+
+
+def _timer_enable_state(
+    *,
+    artifacts_written: bool,
+    enable_requested: bool,
+    enabled: bool,
+    start_method: str,
+) -> str:
+    """Closed reason code for what happened to one systemd timer.
+
+    "The unit files exist" is not "the timer runs": the copy into the user
+    unit directory and ``systemctl enable --now`` live inside the
+    ``enable_*`` branch, while the artifacts are written whenever EITHER
+    ``install_*`` or ``enable_*`` is set.  Installing without enabling
+    therefore leaves unit files on disk that systemd has never seen -- the
+    shape a real deployment hit -- and nothing in the artifact list says so.
+    This makes that state say its own name.
+    """
+    if not artifacts_written:
+        return "not_installed"
+    if not enable_requested:
+        return "artifacts_written_not_enabled"
+    if enabled:
+        return "enabled"
+    if start_method == "systemctl_unavailable_skipped":
+        return "enable_skipped_systemctl_unavailable"
+    return "enable_failed"
+
+
+# Install ran to completion but did not achieve something it was asked to do.
+# Distinct from 1 (uncaught exception) and 2 (argparse) so the shell wrapper
+# can fold it into its own verdict rather than aborting before it reports.
+POST_CONDITION_EXIT_CODE = 3
+
+
+def _unmet_post_conditions(report: dict[str, Any]) -> list[str]:
+    """Requested actions that did not actually happen.
+
+    Completion is judged from what the install ACHIEVED, never from the fact
+    that it reached the end -- an installer that exits 0 having not enabled
+    what was asked is the same defect shape as a broken lane closing a clean
+    ExecutionGate envelope.  ``_enable_memory_provider`` already fails hard
+    on this class; the systemd path used to swallow it into a string field
+    that only a JSON reader would ever see.
+
+    ``systemctl_unavailable_skipped`` is deliberately NOT unmet: falling back
+    to cron on a host without user systemd is documented behaviour.
+    """
+    if bool(report.get("dry_run")):
+        return []
+    unmet: list[str] = []
+    for label, state_key, error_key in (
+        ("heartbeat timer", "runtime_timer_state", "runtime_enable_error"),
+        ("cognitive-loop timer", "cognitive_loop_timer_state", "cognitive_loop_enable_error"),
+    ):
+        if str(report.get(state_key) or "") != "enable_failed":
+            continue
+        detail = str(report.get(error_key) or "") or "no error detail recorded"
+        unmet.append(f"{label}: enable was requested but the timer is not enabled ({detail})")
+    smoke = report.get("smoke_test") if isinstance(report.get("smoke_test"), dict) else {}
+    # Only a probe that RAN and failed counts. host_runtime_unavailable means
+    # the probe could not run at all (installing from a machine where
+    # hermes-agent is not importable is legitimate and pre-dates this change),
+    # so grading it would fail installs that are fine.
+    if str(smoke.get("status") or "") == "failed":
+        detail = str(smoke.get("detail") or "") or "no detail recorded"
+        unmet.append(f"hot-path smoke test: FAIL ({detail})")
+    return unmet
 
 
 def _systemctl_available() -> bool:
@@ -1129,6 +1283,42 @@ def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run
         encoding="utf-8",
     )
     return artifacts
+
+
+def _write_cli_wrapper(hermes_home: Path, *, dry_run: bool) -> Path:
+    """Put a runnable ``memory-os`` on disk for a source install.
+
+    ``pyproject.toml`` declares a ``memory-os`` console script, but that only
+    materialises for someone who ran ``pip install``. The host install copies
+    sources instead, so a deployed machine has the full 35-subcommand CLI and
+    no way to type it -- every diagnostic becomes a hand-written
+    ``PYTHONPATH=... python3 -m ...`` incantation.
+
+    Lives beside the heartbeat/cognitive-loop wrappers in ``memory-os/bin/``
+    and sets the same PYTHONPATH they do.  Unlike those two -- cron jobs,
+    where pinning HERMES_HOME is correct -- this is an interactive command,
+    so the installed home is only a DEFAULT: ``HERMES_HOME=/other memory-os
+    status`` still works.
+    """
+    wrapper = hermes_home / "memory-os" / "bin" / "memory-os"
+    if dry_run:
+        return wrapper
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    # The default home is assigned on its own line and only then expanded.
+    # Inlining it as "${HERMES_HOME:-'/path'}" looks right and is not: inside
+    # double quotes those single quotes are literal, so HERMES_HOME comes out
+    # as "'/path'" -- quotes included -- and every path built from it is wrong.
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"memory_os_default_home={_shell_quote(str(hermes_home))}\n"
+        "export HERMES_HOME=\"${HERMES_HOME:-$memory_os_default_home}\"\n"
+        "export PYTHONPATH=\"${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}\"\n"
+        "exec python3 -m plugins.memory.memory_os \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    return wrapper
 
 
 def _write_owner_review_cron_helper(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
@@ -1888,7 +2078,21 @@ def main() -> int:
         skip_verify=args.skip_verify,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+
+    unmet = _unmet_post_conditions(report)
+    if not unmet:
+        return 0
+    print(
+        "memory-os-install: INSTALL INCOMPLETE — requested actions that were not achieved:",
+        file=sys.stderr,
+    )
+    for item in unmet:
+        print(f"  ✗ {item}", file=sys.stderr)
+    print(
+        f"  (exit {POST_CONDITION_EXIT_CODE}: the install ran to the end; the items above did not happen)",
+        file=sys.stderr,
+    )
+    return POST_CONDITION_EXIT_CODE
 
 
 def _write_v3_backup_exclusions(hermes_home: Path, *, dry_run: bool) -> Path:
@@ -1920,16 +2124,34 @@ def _ensure_config_defaults(
     strips keys outside the schema (e.g. the ``preset`` markers other
     installer steps just wrote) -- the same key-laundering mechanism that let
     a config rewrite silently flip production switches (CD.E).
+
+    A missing config.json used to return early, which silently skipped the CE
+    guard on exactly the host that needs it most: a fresh profile.  Every
+    ``install_memory_os.sh`` mode passes a preset whose writer creates the
+    file first, so the gap only opened on the direct-``plugin.py`` path -- but
+    "the guard runs on every install" was the whole premise of CE, and an
+    early return that skips it silently is the trap Section W rule 4 names.
+    The skeleton is written from scratch instead; the provider merges
+    ``DEFAULT_CONFIG`` over whatever is on disk, so an empty base is safe.
     """
     config_path = hermes_home / "memory-os" / "config.json"
-    if not config_path.exists():
-        return {"status": "no_config", "reason": "config.json not found"}
-    cfg = _read_json_config(config_path)
+    created_skeleton = not config_path.exists()
+    cfg = {} if created_skeleton else _read_json_config(config_path)
     changed: list[str] = []
+    if created_skeleton:
+        # State metadata_only ON DISK rather than leaning on the provider's
+        # read-time merge. mode is the privacy-relevant field (never raw
+        # bodies); a config an auditor can read beats one whose safety
+        # depends on a default living in another module. enabled is left
+        # False here so the CE guard below is what flips it -- and therefore
+        # still reports the flip in `changes`.
+        cfg["memory_sources"] = {"enabled": False, "mode": "metadata_only"}
+        changed.append("config.json: created (was missing; core-switch guard would otherwise be skipped)")
 
     if cfg.get("prefetch_char_budget", 0) < 5500:
+        previous = cfg.get("prefetch_char_budget")
         cfg["prefetch_char_budget"] = 5500
-        changed.append("prefetch_char_budget: 2200 → 5500")
+        changed.append(f"prefetch_char_budget: {previous if previous is not None else 'unset'} → 5500")
 
     # CE: core observability must not ship dark on an upgraded host. The
     # disclosure ledger (memory_sources, metadata_only -- no raw bodies) is
@@ -1970,6 +2192,10 @@ def _ensure_config_defaults(
         }
 
     if not dry_run:
+        # The parent used to be guaranteed by the early return (the file
+        # existed, so its directory did). Creating the skeleton removes that
+        # guarantee on a fresh profile.
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

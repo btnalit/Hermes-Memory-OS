@@ -3,6 +3,7 @@ import json
 import argparse
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -715,11 +716,27 @@ def test_installer_can_write_deep_reflection_test_host_preset(tmp_path):
 
 
 def test_installer_does_not_write_memory_sources_config_by_default(tmp_path):
+    """No preset means no PRESET is written -- not that no config exists.
+
+    This used to assert config.json was absent entirely. That assertion was
+    incidental to a defect: ``_ensure_config_defaults`` returned early when
+    the file was missing, so the CE core-switch guard (the one that keeps the
+    disclosure ledger from shipping dark) was skipped on exactly the fresh
+    profiles it exists for. The guard now creates the skeleton, so the file
+    exists; what this test actually pins -- that no memory_sources *preset*
+    was applied -- is unchanged and asserted below.
+    """
     report = install_plugin(hermes_home=tmp_path / "home")
 
     assert report["memory_sources_preset"] is None
     assert report["memory_sources_config_written"] is False
-    assert not (tmp_path / "home" / "memory-os" / "config.json").exists()
+
+    config_path = tmp_path / "home" / "memory-os" / "config.json"
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    # Guard output only -- no preset marker, which is what "by default" means.
+    assert "preset" not in saved.get("memory_sources", {})
+    assert saved["memory_sources"]["enabled"] is True
+    assert saved["memory_sources"]["mode"] == "metadata_only"
 
 
 def test_installer_can_write_memory_sources_test_host_preset(tmp_path):
@@ -1278,3 +1295,291 @@ def test_report_file_listings_are_posix_on_every_platform(tmp_path):
     # shell listing may legitimately be flat or empty).
     assert any("/" in entry for field in fields for entry in report[field])
     assert report["system_module_files"], "system modules listing must not be empty"
+
+
+# ── Install honesty: the exit code must reflect what was ACHIEVED ──────────
+#
+# Counterfactual target: main() used to `return 0` unconditionally. A
+# requested `systemctl enable --now` could raise, the error was swallowed
+# into a string field only a JSON reader would ever see, and the installer
+# still reported success -- the same shape as a broken lane closing a clean
+# ExecutionGate envelope. `_enable_memory_provider` in the same file has
+# always failed hard on this class; the systemd path did not.
+
+
+def _systemctl_run_fake(*, enable_fails: bool):
+    """A ``subprocess.run`` stand-in keyed on argv.
+
+    Keyed deliberately. A fake that raises for EVERY subprocess call also
+    breaks ``_systemctl_available()``, which sends the code down the
+    documented ``systemctl_unavailable_skipped`` branch and back to exit 0 --
+    the test would then fail WITH the fix present and send the reader
+    chasing a defect that is not there.  The availability probe must
+    succeed; only ``enable`` fails.
+    """
+
+    def fake_run(command, *args, **kwargs):
+        argv = list(command) if isinstance(command, (list, tuple)) else [str(command)]
+        if enable_fails and argv[:4] == ["systemctl", "--user", "enable", "--now"]:
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_cognitive_loop_timer_state_records_enable_failure(tmp_path, monkeypatch):
+    """A failed enable is a distinct, named state -- not an empty string."""
+    monkeypatch.setattr(
+        "scripts.install_memory_os_plugin.subprocess.run",
+        _systemctl_run_fake(enable_fails=True),
+    )
+
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        install_cognitive_loop=True,
+        enable_cognitive_loop=True,
+        systemd_dir=tmp_path / "units",
+        skip_verify=True,
+    )
+
+    assert report["cognitive_loop_enabled"] is False
+    assert report["cognitive_loop_timer_state"] == "enable_failed"
+    from scripts.install_memory_os_plugin import _unmet_post_conditions
+
+    unmet = _unmet_post_conditions(report)
+    assert any("cognitive-loop timer" in item for item in unmet)
+
+
+def test_installer_warns_when_units_are_written_but_never_enabled(tmp_path, capsys):
+    """The exact deployed shape: unit files on disk, systemd never told.
+
+    Writing the artifacts is gated on ``install_* or enable_*`` while the
+    copy into the user unit directory lives inside ``enable_*`` only, so this
+    combination silently produced a lane that could never run.
+    """
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        install_cognitive_loop=True,
+        skip_verify=True,
+    )
+
+    assert report["cognitive_loop_timer_state"] == "artifacts_written_not_enabled"
+    stderr = capsys.readouterr().err
+    assert "NOT registered with systemd" in stderr
+    assert "--enable-cognitive-loop" in stderr
+
+
+def test_unmet_post_conditions_ignores_documented_and_dry_run_paths():
+    """The duals. Each of these must NOT be reported as unmet."""
+    from scripts.install_memory_os_plugin import _unmet_post_conditions
+
+    # A host without user systemd falls back to cron by design.
+    assert _unmet_post_conditions({
+        "cognitive_loop_timer_state": "enable_skipped_systemctl_unavailable",
+        "smoke_test": {"requested": True, "passed": True, "status": "passed"},
+    }) == []
+    # Not asked to enable anything.
+    assert _unmet_post_conditions({
+        "cognitive_loop_timer_state": "artifacts_written_not_enabled",
+        "smoke_test": {"requested": False, "passed": False, "status": "not_requested"},
+    }) == []
+    # A dry run achieves nothing on purpose.
+    assert _unmet_post_conditions({
+        "dry_run": True,
+        "cognitive_loop_timer_state": "enable_failed",
+        "smoke_test": {"requested": True, "passed": False, "status": "failed"},
+    }) == []
+    # The probe could not RUN -- installing from a machine without
+    # hermes-agent importable is legitimate and must not fail the install.
+    assert _unmet_post_conditions({
+        "runtime_timer_state": "enabled",
+        "smoke_test": {
+            "requested": True,
+            "passed": False,
+            "status": "host_runtime_unavailable",
+            "detail": "host_runtime_unavailable: Cannot import Hermes agent runtime",
+        },
+    }) == []
+
+
+def test_unmet_post_conditions_reports_failing_smoke_test():
+    from scripts.install_memory_os_plugin import _unmet_post_conditions
+
+    unmet = _unmet_post_conditions({
+        "runtime_timer_state": "enabled",
+        "smoke_test": {
+            "requested": True,
+            "passed": False,
+            "status": "failed",
+            "detail": "initialize_all failed: boom",
+        },
+    })
+
+    assert len(unmet) == 1
+    assert "smoke test" in unmet[0]
+    assert "initialize_all failed: boom" in unmet[0]
+
+
+def test_smoke_status_separates_cannot_run_from_ran_and_failed():
+    """The conflation this replaces made a legitimate environment look broken."""
+    from scripts.install_memory_os_plugin import (
+        SMOKE_HOST_RUNTIME_UNAVAILABLE,
+        _smoke_status,
+    )
+
+    assert _smoke_status(requested=False, ok=False, detail="") == "not_requested"
+    assert _smoke_status(requested=True, ok=True, detail="") == "passed"
+    assert _smoke_status(
+        requested=True,
+        ok=False,
+        detail=f"{SMOKE_HOST_RUNTIME_UNAVAILABLE}: Cannot import Hermes agent runtime — ...",
+    ) == SMOKE_HOST_RUNTIME_UNAVAILABLE
+    assert _smoke_status(requested=True, ok=False, detail="initialize_all failed: boom") == "failed"
+
+
+def test_smoke_probe_actually_emits_the_unavailable_prefix(tmp_path, monkeypatch):
+    """Producer side of the prefix contract -- do not test it with a fixture.
+
+    The status test above builds its detail string from the constant, so it
+    would stay green even if _verify_memory_os_hot_path stopped emitting the
+    prefix. That drift is not cosmetic: every environment without
+    hermes-agent importable would start exiting 3 on a healthy install. This
+    asserts the real producer emits what the classifier keys on.
+    """
+    import scripts.install_memory_os_plugin as installer
+
+    # Deterministic on machines where `agent` IS importable: None in
+    # sys.modules makes the import raise, exercising the same branch.
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", None)
+    monkeypatch.setitem(sys.modules, "agent.memory_provider", None)
+
+    ok, detail = installer._verify_memory_os_hot_path(str(tmp_path / "home"))
+
+    assert ok is False
+    assert detail.startswith(installer.SMOKE_HOST_RUNTIME_UNAVAILABLE)
+    assert (
+        installer._smoke_status(requested=True, ok=ok, detail=detail)
+        == installer.SMOKE_HOST_RUNTIME_UNAVAILABLE
+    )
+
+
+def test_installer_writes_a_runnable_memory_os_cli_wrapper(tmp_path):
+    """A source install must leave a typeable `memory-os` behind.
+
+    pyproject declares the console script, but that only materialises for a
+    pip install; the host install copies sources, so without this the
+    deployed machine has the whole CLI and no way to invoke it.
+    """
+    home = tmp_path / "home"
+
+    report = install_plugin(hermes_home=home, skip_verify=True)
+
+    wrapper = home / "memory-os" / "bin" / "memory-os"
+    assert report["cli_wrapper_path"] == str(wrapper)
+    assert wrapper.is_file()
+    body = wrapper.read_text(encoding="utf-8")
+    # Same PYTHONPATH the heartbeat/cognitive-loop wrappers set.
+    assert "memory-os/runtime/python" in body
+    assert "exec python3 -m plugins.memory.memory_os" in body
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_installer_cli_wrapper_resolves_hermes_home_correctly(tmp_path):
+    """Run the wrapper's resolution instead of grepping it.
+
+    A substring assertion on "${HERMES_HOME:-" passes for
+    "${HERMES_HOME:-'/path'}" too -- and that spelling puts LITERAL single
+    quotes into HERMES_HOME, breaking every path derived from it. Only
+    executing the lines catches that, so this asserts the resolved value in
+    both directions.
+    """
+    home = tmp_path / "home"
+    install_plugin(hermes_home=home, skip_verify=True)
+    wrapper = home / "memory-os" / "bin" / "memory-os"
+
+    # Everything up to the exec: the home/PYTHONPATH resolution under test.
+    prelude = "".join(
+        line for line in wrapper.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not line.startswith("exec ")
+    )
+
+    def resolved(env_home: str | None) -> str:
+        env = dict(os.environ)
+        env.pop("HERMES_HOME", None)
+        if env_home is not None:
+            env["HERMES_HOME"] = env_home
+        return subprocess.run(
+            ["bash", "-c", prelude + '\nprintf "%s" "$HERMES_HOME"'],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout
+
+    # Installed home is the default -- with no stray quotes.
+    assert resolved(None) == str(home)
+    # ...and an explicit HERMES_HOME still wins: this is an interactive CLI,
+    # not a cron wrapper where pinning the home is correct.
+    assert resolved("/somewhere/else") == "/somewhere/else"
+
+
+def test_installer_cli_wrapper_is_not_written_on_dry_run(tmp_path):
+    home = tmp_path / "home"
+
+    report = install_plugin(hermes_home=home, dry_run=True)
+
+    assert report["cli_wrapper_installed"] is False
+    assert not (home / "memory-os" / "bin" / "memory-os").exists()
+
+
+def test_installer_main_exits_three_on_unmet_post_conditions(tmp_path, monkeypatch, capsys):
+    """The counterfactual proper: without the fix this returns 0.
+
+    ``install_plugin`` is stubbed so the assertion is about the exit-code
+    wiring alone and never touches the real user unit directory.
+    """
+    import scripts.install_memory_os_plugin as installer
+
+    monkeypatch.setattr(
+        installer,
+        "install_plugin",
+        lambda **kwargs: {
+            "dry_run": False,
+            "cognitive_loop_timer_state": "enable_failed",
+            "cognitive_loop_enable_error": "Command 'systemctl' returned non-zero exit status 1.",
+            "smoke_test": {"requested": True, "passed": True, "status": "passed"},
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["install_memory_os_plugin.py", "--hermes-home", str(tmp_path / "home")],
+    )
+
+    assert installer.main() == installer.POST_CONDITION_EXIT_CODE
+    assert installer.POST_CONDITION_EXIT_CODE == 3  # pinned: install_memory_os.sh keys on it
+
+    captured = capsys.readouterr()
+    assert "INSTALL INCOMPLETE" in captured.err
+    assert "cognitive-loop timer" in captured.err
+    # The JSON report still ships in full on stdout.
+    assert json.loads(captured.out)["cognitive_loop_timer_state"] == "enable_failed"
+
+
+def test_installer_main_still_exits_zero_when_everything_was_achieved(tmp_path, monkeypatch):
+    import scripts.install_memory_os_plugin as installer
+
+    monkeypatch.setattr(
+        installer,
+        "install_plugin",
+        lambda **kwargs: {
+            "dry_run": False,
+            "runtime_timer_state": "enabled",
+            "cognitive_loop_timer_state": "enabled",
+            "smoke_test": {"requested": True, "passed": True, "status": "passed"},
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["install_memory_os_plugin.py", "--hermes-home", str(tmp_path / "home")],
+    )
+
+    assert installer.main() == 0
