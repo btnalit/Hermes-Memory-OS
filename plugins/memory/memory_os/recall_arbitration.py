@@ -537,10 +537,14 @@ def _similarity_tokens(text: str) -> set[str]:
     below -- and keep ASCII behaviour bit-identical, since the ASCII class is
     unchanged and the CJK class contributes nothing to a pure-ASCII string.
 
-    Scope note: this restores *near-identical variant* detection (particle or
-    punctuation edits score ~0.92-1.0).  Genuine paraphrases score ~0.22-0.54
-    and remain below both bands by design; semantic-equivalence dedup is a
-    separate decision, not a side effect of this fix.
+    Scope note: what this restores is detection of differences *inside* a CJK
+    run (a trailing particle scores ~0.95).  Differences at a run boundary --
+    punctuation, spaces -- were already detectable, because the old regex
+    treated those as separators too; the first counterfactual fixture written
+    for this fix used exactly such a pair and therefore passed with the defect
+    still in place.  Genuine paraphrases score ~0.22-0.54 and remain below
+    both bands by design; semantic-equivalence dedup is a separate decision,
+    not a side effect of this fix.
     """
     normalized = str(text or "").casefold()
     tokens: set[str] = set()
