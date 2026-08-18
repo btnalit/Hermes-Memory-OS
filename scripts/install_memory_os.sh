@@ -14,6 +14,12 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 YES=0
 DRY_RUN=0
 SKIP_VERIFY=0
+# Set when install_memory_os_plugin.py exits 3: it ran to completion but did
+# not achieve something that was requested. Carried across functions so the
+# verdict is folded into verify_install's box instead of being tolerated --
+# tolerating the code without folding it in would move the very "exit 0 while
+# something requested did not happen" bug up into this wrapper.
+INSTALLER_POST_CONDITION_FAILED=0
 ALLOW_CREATE=0
 MODE="interactive"
 HERMES_HOME_INPUT="${HERMES_HOME:-}"
@@ -685,6 +691,11 @@ run_installer() {
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
   args+=("--hindsight" "${HINDSIGHT_MODE}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
+  # NOTE: --skip-verify is deliberately NOT propagated. It silences this
+  # wrapper's own probes only; the Python installer still runs its hot-path
+  # smoke test. deploy_memory_os.py passes --skip-verify on every apply
+  # (it runs its own phased postcheck), so propagating would silently drop
+  # the smoke test from every production deploy.
 
   # ── Auto-detect gateway Python for package installs ──────────────────
   if [[ -z "${TARGET_PYTHON:-}" ]]; then
@@ -705,7 +716,19 @@ run_installer() {
   echo "Running installer:"
   printf '  %q' "${args[@]}"
   echo
-  "${args[@]}"
+  local installer_rc=0
+  "${args[@]}" || installer_rc=$?
+  if [[ "${installer_rc}" == "3" ]]; then
+    # Exit 3 = ran to the end, but a requested action did not happen. Keep
+    # going so verify_install can render one consolidated failure box rather
+    # than aborting here with a bare shell error; the flag guarantees the
+    # run still fails.
+    INSTALLER_POST_CONDITION_FAILED=1
+    echo "  [WARN] installer reported unmet post-conditions (exit 3) — continuing to verification"
+  elif [[ "${installer_rc}" != "0" ]]; then
+    # Anything else is a hard failure (uncaught exception / usage error).
+    exit "${installer_rc}"
+  fi
 
   # Install cleanup_expired_working.py script
   local cleanup_src="${REPO_ROOT}/scripts/cleanup_expired_working.py"
@@ -754,12 +777,24 @@ run_installer() {
 }
 
 verify_install() {
-  [[ "${SKIP_VERIFY}" == "1" || "${DRY_RUN}" == "1" ]] && return 0
+  if [[ "${SKIP_VERIFY}" == "1" || "${DRY_RUN}" == "1" ]]; then
+    # --skip-verify silences OUR probes, not the installer's own verdict: an
+    # unmet post-condition is something the installer reported as fact, so it
+    # still fails the run.
+    if [[ "${INSTALLER_POST_CONDITION_FAILED}" == "1" ]]; then
+      echo "Memory-OS install reported unmet post-conditions (exit 3); see the JSON report above." >&2
+      exit 1
+    fi
+    return 0
+  fi
   echo
   echo "Memory-OS install verification"
   echo "------------------------------"
 
   local verify_failures=()
+  if [[ "${INSTALLER_POST_CONDITION_FAILED}" == "1" ]]; then
+    verify_failures+=("installer reported unmet post-conditions (exit 3) — see JSON report above")
+  fi
 
   # ── Doctor check (always run) ──────────────────────────────────────
   HERMES_HOME="${HERMES_HOME}" hermes memory

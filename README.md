@@ -360,6 +360,14 @@ HERMES_HOME=/root/.hermes \
 Switching an upgraded host back to `active-closure` pauses known optional jobs;
 it does not delete them.
 
+> `install_memory_os_plugin.py` is low-level plumbing, shown here only for this
+> one cron-profile task. Every switch it has is opt-in, so running it directly
+> to install a host produces whatever subset of flags you happened to pass —
+> for example `--install-cognitive-loop` without `--enable-cognitive-loop`
+> writes the systemd unit files but never registers them, so the loop never
+> runs. Use `scripts/install_memory_os.sh` to install: it supplies the
+> production defaults and fails loudly when a core component is missing.
+
 ## Verify the Installation
 
 ```bash
