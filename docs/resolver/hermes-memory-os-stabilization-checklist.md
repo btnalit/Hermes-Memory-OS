@@ -4304,6 +4304,100 @@ static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
 
 ---
 
+## CZ — 部署报告两项待放行项的最小实现：CLI wrapper + doctor 部署完整性（2026-08-18）
+
+CY 把 `deploy_improvements.md` 的 #1/#2/#4 列为边界扩张待 owner 放行。owner
+批 #4 驳回（lane preset 不得作为 `--production-safe` 默认），并要求先与顾问
+讨论 #1/#2 的**最小高收益**实现、太复杂则否决。裁定：两项都不复杂，各自
+独立成 commit，以便否决即一条 `git revert`。
+
+### CZ.0 顾问推翻自己上一轮的「另开子命令」建议
+
+CY 记录的方案是 deploy-doctor **另开子命令**，唯一理由是并入 `doctor` 会让
+README lane A（无 systemd 的临时目录跑 `memory-os doctor`）变吵。本轮提出
+**按面存在与否设条件**后该理由消失：没有 snapshot、没有 unit 文件的 profile
+一条 finding 都不发。这一改砍掉三样东西——新子命令、新证据等级
+（findings 直接走既有 `memory-os.doctor.v0`，**CLAUDE.md 的证据等级封闭集合
+无需扩充**）、独立 reason code 体系。同时按范围砍掉 resolved knob 值、
+config 段模式、cron job 分类三项检查（与 monitor 重叠，复杂度和噪音都在那里）。
+
+### CZ.1 `memory-os` CLI wrapper（`d6b9664`）
+
+`pyproject.toml` 声明了 `memory-os` console script，但那只对 `pip install`
+的人生效；主机安装走**源码复制**，于是部署主机上有完整 35 子命令 CLI 却
+无从敲起，每次诊断都要手写 `PYTHONPATH=... python3 -m ...`。
+
+写 `<HERMES_HOME>/memory-os/bin/memory-os`，与既有 heartbeat/cognitive-loop
+wrapper 同目录同 PYTHONPATH。**不采纳 `.pth`**：
+`test_memory_os_installed_layout_imports.py` 用 `-S` 隔离子解释器正是为了
+让 CI 的 editable 安装不使那批测试空转，放 `.pth` 会造成"测试被屏蔽、生产
+生效"的分叉，把一个已钉死的缺陷类重新变成盲区。
+
+与两个 cron wrapper 有一处**故意不同**：那些是定时任务，钉死 `HERMES_HOME`
+是对的；这个是交互式命令，装机 home 只作默认值，`HERMES_HOME=x memory-os
+status` 仍然生效。
+
+**实现中踩到并修掉一个真 bug**：默认值必须**单独一行赋值再展开**。
+显而易见的内联写法 `"${HERMES_HOME:-'/path'}"` 是错的——双引号内的单引号
+是字面量，`HERMES_HOME` 会变成 `'/path'`（**带引号**），由它派生的每条路径
+都错。更要命的是**子串断言 `"${HERMES_HOME:-" in body` 对错误写法一样通过**，
+所以测试改为**执行**那几行并双向断言解析结果。反事实：换回内联写法 → 执行
+型测试 FAIL，而两条子串型测试**照常 PASS**——这正是它存在的理由。
+
+### CZ.2 doctor 部署完整性两项检查（`<本节 commit>`）
+
+新增 `_deployment_integrity_checks(store)` 挂进 `build_doctor_result`，
+只做两条最高收益检查，各自按面设条件：
+
+**(a) `cron_registry_snapshot_missing_lanes`** —— 编译内注册的 lane 不在
+主机已装 snapshot 的 `member_keys` 里。CLAUDE.md 明载这是**静默失败且此前
+无任何探测器**：`_load_group` 优先读 snapshot 且 member 非空时不回落，于是
+新注册的 lane 在已 onboard 主机上直接从 tick 里消失——无 unknown key、无
+error record、无 WARN，envelope 干干净净地关闭却从未调用它。
+只在 snapshot **存在**时比对（无 snapshot 时 runner 回落编译内注册表，
+不存在缺口，故这不是买绿）；v0 snapshot 无 `groups` 数组时按设计回落，不发。
+**严重级 warning 而非 error**：从新 checkout 对旧主机 HOME 跑 doctor 会
+产生版本错位假漂移。注意 `.sh` 的 verify 跑 doctor 时是 `>/dev/null`，
+warning 在安装路径不可见——**"要不要让漂移挡安装"是毕业决策，记入待办
+由 owner 定，先影子跑**。
+
+**(b) `systemd_timer_unit_not_registered`** —— unit 文件在
+`memory-os/systemd/` 而 systemd 不认识（CY 复现的那个部署形态）。
+单元名**取自磁盘文件名**（per-profile 后缀已内嵌），**绝不重推导后缀**——
+重推导正是 CV 节修过的那类错探测。探测走 `systemctl --user list-unit-files`
+子进程（用户上下文天然正确）；systemctl 不可用/无 user bus 时**什么都不发**
+——那是"无样本"，不为它发明新严重级去扩 doctor 词表。
+**严重级必须 warning**：装而不启 + cron 兜底是 CY 刚刚显式支持的合法稳态，
+判 error 会让每台无 systemd 主机 doctor 失败。
+
+### 测试与反事实
+
+新增 **12 个测试**（wrapper 3、部署完整性 9）。两条按顾问要求必写：
+① `test_bare_profile_emits_no_deployment_findings` ——裸 HERMES_HOME 断言
+部署类 finding 为零，**这条钉的是"按面设条件"契约本身**，即推翻另开子命令
+的全部依据；没有它，以后谁去掉条件 lane A 就静默变吵。
+② snapshot 测试用**真实写入器** `write_cron_registry_snapshot` 构造再摘掉
+一个 lane，不手拼 JSON（`counterfactual-tests-must-use-real-producer`）。
+
+反事实实测：wrapper 换回内联写法 → 执行型测试 FAIL / 子串型照绿；
+漂移检测置空 → `test_snapshot_missing_a_registered_lane_is_reported` FAIL。
+
+### 待办（本节新增）
+
+`cron_registry_snapshot_missing_lanes` 目前是 warning 且安装路径 `>/dev/null`
+不可见。是否升级为 error（从而经 doctor 退出码挡住安装）需先在生产影子观察，
+确认无版本错位误报后由 owner 裁定。
+
+### 测试计数与门
+
+新增 **12 个测试函数**（CLI wrapper 3、部署完整性 9）。
+全量 3547 → **3559 passed / 13 skipped / 0 failed**（12:12）。
+四静态门（import_cycle / write_surface `unclassified_count=0` /
+static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
+两项各自独立 commit（`d6b9664` / 本节），owner 否决任一项即一条 `git revert`。
+
+---
+
 ## 待办
 
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
@@ -6621,3 +6715,13 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   而非仅容忍（否则同一 envelope bug 搬到 shell 层）。自审否掉自己加的
   `--skip-verify` 透传（会静默取消每次生产部署的 smoke）。
   全量 3537→3547 passed（+10）/13 skipped，四门全绿。合入前另做一次**最终统一 diff** 顾问复审（此前只审过中间态与逐条 Edit），据其发现补生产端前缀断言、压缩失败框条目长度、修正测试分桶。
+
+- `80d144b..（CZ，本节）`：CY 列为待放行的 #1/#2 最小实现——顾问裁定两项均不
+  复杂并**推翻自己上一轮的「deploy-doctor 另开子命令」建议**：按面存在设条件
+  后，并入 `doctor` 不再有 lane A 噪音问题，顺带省掉新证据等级注册。
+  #1 写 `memory-os/bin/memory-os` wrapper（不采纳 `.pth`，理由见 CY.0；实现中
+  踩到并修掉内联 `${HERMES_HOME:-'...'}` 会带字面单引号的真 bug，测试改为执行
+  解析而非子串断言）；#2 新增 doctor 两条部署检查——registry snapshot 漏 lane
+  （CLAUDE.md 记载的无探测器静默失败）与 unit 文件未注册 systemd，均 warning、
+  均按面设条件、systemctl 不可用即无样本不发。#4 lane preset 按 owner 裁定驳回，
+  无相关代码。全量 3547→3559 passed（+12）/13 skipped，四门全绿。

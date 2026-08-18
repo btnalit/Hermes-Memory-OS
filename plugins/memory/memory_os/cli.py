@@ -732,6 +732,151 @@ def _direct_hermes_provider_active(hermes_home: Path) -> bool:
     return str(memory.get("provider") or "") == "hindsight"
 
 
+def _systemctl_user_units() -> set[str] | None:
+    """Unit names systemd knows about for this user, or None if unknowable.
+
+    None means "no sample" -- systemctl absent, no user bus (containers, an
+    SSH session without a user session). The caller emits nothing in that
+    case rather than inventing a severity for it.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "list-unit-files", "--no-legend", "--no-pager"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0:
+        return None
+    names: set[str] = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            names.add(parts[0])
+    return names
+
+
+def _cron_snapshot_drift_findings(store: MemoryOSStore) -> list[dict[str, Any]]:
+    """Lanes registered in code but absent from the host's installed snapshot.
+
+    ``cron_group_runner._load_group`` prefers
+    ``system/memory_os_cron_registry.json`` and returns its ``member_keys``
+    without falling back whenever that list is non-empty. So on an onboarded
+    host a newly registered lane is simply missing from its tick: no
+    unknown-key error, no WARN, a clean envelope closed having never invoked
+    it. CLAUDE.md documents this as silent and, until now, undetected.
+
+    Gated on the snapshot existing, which is not buying green: with no
+    snapshot the runner falls back to the compiled-in registry and there is
+    no gap to find. The failure is a snapshot that exists and omits a lane.
+    """
+    from .cron_registry import groups_from_snapshot, memory_os_cron_groups
+
+    snapshot_path = store.roots.memory_os_root / "system" / "memory_os_cron_registry.json"
+    if not snapshot_path.is_file():
+        return []
+    try:
+        raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [
+            _finding(
+                "cron_registry_snapshot_unreadable",
+                "warning",
+                f"Installed cron registry snapshot could not be read: {exc}. "
+                "Lane membership on this host cannot be verified.",
+                {"snapshot_path": str(snapshot_path)},
+            )
+        ]
+    if not isinstance(raw, dict):
+        return []
+    installed = {group.key: set(group.member_keys) for group in groups_from_snapshot(raw)}
+    if not installed:
+        # A v0 snapshot carries no groups array; callers fall back by design.
+        return []
+    findings: list[dict[str, Any]] = []
+    for group in memory_os_cron_groups():
+        if group.key not in installed:
+            continue
+        missing = sorted(set(group.member_keys) - installed[group.key])
+        if not missing:
+            continue
+        findings.append(
+            _finding(
+                "cron_registry_snapshot_missing_lanes",
+                "warning",
+                f"Cron group {group.key!r} is registered with lanes that the installed "
+                f"snapshot does not list: {', '.join(missing)}. Those lanes never run on "
+                "this host and close no envelope. Re-run owner cron onboarding (or the "
+                "installer) to regenerate the snapshot.",
+                {
+                    "group_key": group.key,
+                    "missing_lane_keys": missing,
+                    "registered_member_keys": list(group.member_keys),
+                    "installed_member_keys": sorted(installed[group.key]),
+                    "snapshot_path": str(snapshot_path),
+                },
+            )
+        )
+    return findings
+
+
+def _orphan_systemd_unit_findings(store: MemoryOSStore) -> list[dict[str, Any]]:
+    """Timer unit files written to disk that systemd has never been told about.
+
+    The installer writes units whenever ``install_*`` OR ``enable_*`` is set
+    but only registers them under ``enable_*``, so a partial flag set leaves
+    units that look installed and never fire. Warning, not error: install
+    without enable is a supported steady state (cron fallback).
+    """
+    systemd_dir = store.roots.memory_os_root / "systemd"
+    if not systemd_dir.is_dir():
+        return []
+    # Unit names come from the on-disk filenames -- the per-profile suffix is
+    # already baked in. Never re-derive that suffix here; doing so is how a
+    # probe ends up asking about a unit that was never installed.
+    timers = sorted(path.name for path in systemd_dir.glob("*.timer"))
+    if not timers:
+        return []
+    known = _systemctl_user_units()
+    if known is None:
+        return []
+    orphans = [name for name in timers if name not in known]
+    if not orphans:
+        return []
+    return [
+        _finding(
+            "systemd_timer_unit_not_registered",
+            "warning",
+            f"Timer unit files exist under {systemd_dir} but systemd does not know them: "
+            f"{', '.join(orphans)}. Those lanes never run. Enable them, or ignore this if "
+            "the host schedules Memory-OS through cron instead.",
+            {"systemd_dir": str(systemd_dir), "unregistered_units": orphans},
+        )
+    ]
+
+
+def _deployment_integrity_checks(store: MemoryOSStore) -> list[dict[str, Any]]:
+    """Deployment-surface findings, each gated on its surface being present.
+
+    These ride ``doctor`` rather than a separate ``deploy-doctor`` command.
+    The reason to split was noise on the README's blank-machine lane, where
+    ``doctor`` runs against a bare temp dir with no systemd and no cron --
+    and gating every check on the artifact it inspects removes that noise at
+    the source: a profile with no snapshot and no unit files produces no
+    findings here at all. Keeping them on ``memory-os.doctor.v0`` also means
+    no new evidence level enters the documented closed set.
+    """
+    return [
+        *_cron_snapshot_drift_findings(store),
+        *_orphan_systemd_unit_findings(store),
+    ]
+
+
 def _hermes_contract_checks() -> list[dict[str, Any]]:
     """Verify Memory-OS plugin conforms to Hermes agent memory provider contract.
 
@@ -850,8 +995,11 @@ def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
     audit = meta_audit(store)
     has_error = any(finding["severity"] == "error" for finding in audit["findings"])
     contract_findings = _hermes_contract_checks()
-    all_findings = audit["findings"] + contract_findings
-    has_error = has_error or any(f["severity"] == "error" for f in contract_findings)
+    deployment_findings = _deployment_integrity_checks(store)
+    all_findings = audit["findings"] + contract_findings + deployment_findings
+    has_error = has_error or any(
+        f["severity"] == "error" for f in (*contract_findings, *deployment_findings)
+    )
     return {
         "schema_version": "memory-os.doctor.v0",
         "exit_code": 1 if has_error else 0,
@@ -861,6 +1009,10 @@ def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
         "hermes_contract_checks": {
             "count": len(contract_findings),
             "findings": contract_findings,
+        },
+        "deployment_integrity_checks": {
+            "count": len(deployment_findings),
+            "findings": deployment_findings,
         },
     }
 
