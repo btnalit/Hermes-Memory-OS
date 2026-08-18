@@ -4274,9 +4274,22 @@ preset 写入器先建 config.json，故只咬直调 plugin.py 的路径。
 
 ### 测试计数与门
 
-新增 **9 个测试函数**（骨架创建 2、timer 状态/孤儿告警 2、未达成判定 3、
-smoke 状态分级 1、退出码正反各 1 中的 1）；另修正 1 个既有测试的附带断言。
-全量 3537 → **3546 passed / 13 skipped / 0 failed**（12:03）。
+新增 **10 个测试函数**（骨架创建 2、timer 状态/孤儿告警 2、未达成判定 2、
+smoke 状态分级 2、退出码正反各 1）；另修正 1 个既有测试的附带断言。
+全量 3537 → **3547 passed / 13 skipped / 0 failed**。
+
+smoke 状态那 2 个是**合入前顾问全量 diff 复审**加的第 2 个：原先只有分类
+函数的测试，而它的 detail 串是**拿常量自己拼的** —— 正是本项目
+`counterfactual-tests-must-use-real-producer` 那个坑：生产端
+`_verify_memory_os_hot_path` 若哪天不再发该前缀，测试照绿，而所有没装
+hermes-agent 的环境会开始退 3。补的那条直接调真实生产端（用
+`sys.modules[...] = None` 让 import 确定性失败），断言它真的发出分类器所依赖的前缀。
+
+**Rule 5 记录不改**：失败框 `printf "║  ✗ %-54s ║"` 的两条**既有**条目
+（`cognitive-loop timer is not active/enabled (ENABLE_COGNITIVE_LOOP=1)`，60/61 字符）
+本就撑破边框。本轮新增条目已压到 50 字符合规；既有两条不动——缩写会丢掉
+`ENABLE_COGNITIVE_LOOP=1` 这个"是哪个变量驱动了检查"的诊断信息，而加宽整个框
+比这个纯观感缺陷本身更具侵入性。
 四静态门（import_cycle / write_surface `unclassified_count=0` /
 static_hygiene / public_checkout_probe --strict）+ `git diff --check` 全绿。
 
@@ -6607,4 +6620,4 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   分级（否则合法环境被判失败），并在 `.sh` 把 exit 3 **折进** `verify_failures`
   而非仅容忍（否则同一 envelope bug 搬到 shell 层）。自审否掉自己加的
   `--skip-verify` 透传（会静默取消每次生产部署的 smoke）。
-  全量 3537→3546 passed（+9）/13 skipped，四门全绿。
+  全量 3537→3547 passed（+10）/13 skipped，四门全绿。合入前另做一次**最终统一 diff** 顾问复审（此前只审过中间态与逐条 Edit），据其发现补生产端前缀断言、压缩失败框条目长度、修正测试分桶。

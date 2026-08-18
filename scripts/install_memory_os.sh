@@ -793,7 +793,8 @@ verify_install() {
 
   local verify_failures=()
   if [[ "${INSTALLER_POST_CONDITION_FAILED}" == "1" ]]; then
-    verify_failures+=("installer reported unmet post-conditions (exit 3) — see JSON report above")
+    # Kept under 54 chars: the box below renders each entry with %-54s.
+    verify_failures+=("installer post-conditions unmet (exit 3, see JSON)")
   fi
 
   # ── Doctor check (always run) ──────────────────────────────────────

@@ -1436,6 +1436,32 @@ def test_smoke_status_separates_cannot_run_from_ran_and_failed():
     assert _smoke_status(requested=True, ok=False, detail="initialize_all failed: boom") == "failed"
 
 
+def test_smoke_probe_actually_emits_the_unavailable_prefix(tmp_path, monkeypatch):
+    """Producer side of the prefix contract -- do not test it with a fixture.
+
+    The status test above builds its detail string from the constant, so it
+    would stay green even if _verify_memory_os_hot_path stopped emitting the
+    prefix. That drift is not cosmetic: every environment without
+    hermes-agent importable would start exiting 3 on a healthy install. This
+    asserts the real producer emits what the classifier keys on.
+    """
+    import scripts.install_memory_os_plugin as installer
+
+    # Deterministic on machines where `agent` IS importable: None in
+    # sys.modules makes the import raise, exercising the same branch.
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", None)
+    monkeypatch.setitem(sys.modules, "agent.memory_provider", None)
+
+    ok, detail = installer._verify_memory_os_hot_path(str(tmp_path / "home"))
+
+    assert ok is False
+    assert detail.startswith(installer.SMOKE_HOST_RUNTIME_UNAVAILABLE)
+    assert (
+        installer._smoke_status(requested=True, ok=ok, detail=detail)
+        == installer.SMOKE_HOST_RUNTIME_UNAVAILABLE
+    )
+
+
 def test_installer_main_exits_three_on_unmet_post_conditions(tmp_path, monkeypatch, capsys):
     """The counterfactual proper: without the fix this returns 0.
 
