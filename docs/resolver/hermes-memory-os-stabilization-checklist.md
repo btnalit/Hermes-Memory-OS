@@ -7188,3 +7188,19 @@ caller 在循环外建一次缓存。
   `continuity_constants.py`，`cycle_count` 1→0）。7 项反事实实测 revert→FAIL→restore→PASS。
   **仅仓库验证**：prefetch/temporal/state_overlay 属 provider 侧，生效需重启 gateway（owner 步骤）。
   全量 3583→3607 passed（+24）/13 skipped，四门全绿。
+
+- `9824db2 部署 + 790bd76`：DB 部署与生产验证 + DC — PR #70 的 provider 侧修复
+  经 gateway 重启在 3.200 双 profile 落地并实证（四份 provider + 两份 modules +
+  scripts 逐文件 hash 全一致；`recent_events` 1→6、注入 5 条真实 conversation_turn、
+  main 排除 261 条记账行；两 profile 无新增 FAIL/WARN，sannai PASS 90 为历史最高）。
+  部署中暴露的 `doctor_not_ok` 经考古证实连续 ≥4 夜先存，剖析出真因是
+  `provenance` 的 taint 谓词**按候选**重读全量事件语料（doctor 66.5s 中 59.3s、
+  242 次 read_events、187 万次 json.loads）——改为 caller 持有的批级
+  `load_event_cache()` + `EventLookup` id 索引，`is_tainted` 私有
+  `_events_cache` 提为公开、`candidate_external_ref` 补同参（两个都补），
+  Rule-5 同步接上 `candidate_aggregation` 三个循环，结晶写路径**有意不缓存**
+  并加测试钉住；顺带把 monitor "探针超时"与"doctor 不健康"分成两个 code
+  （新增 `doctor_probe_timeout`，20s 默认**不抬**）。缓存第一版提到循环外
+  破坏了 `build_status_report` 的 O(1) 路径，由全量套件抓出并改为惰性构建。
+  +17 测试，全量 3622 passed/13 skipped（唯一 FAIL 为已知 flaky 并发用例，
+  单跑 PASS），四门全绿。
