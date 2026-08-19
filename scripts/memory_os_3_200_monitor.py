@@ -5915,6 +5915,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _hermes_home = ''' + _hh + r'''
+# Every `hermes ...` subprocess below inherits this process's environment, and
+# _run_probe ships this script over `ssh host "python3 -"`, which forwards no
+# environment at all. HERMES_HOME is unset in a non-interactive SSH session, so
+# without this line every CLI-derived section silently measured the CLI's
+# DEFAULT home instead of the one --hermes-home asked for. Measured on the dual
+# profile production host: a sannai run reported main's numbers (240 candidates
+# and ~99k audit entries against sannai's real 60 and ~53k), and main's slow
+# doctor was attributed to sannai. The local cron path was unaffected because
+# the lane env already carries HERMES_HOME -- which is exactly why this stayed
+# invisible: the nightly artifacts were correct.
+#
+# Set once here rather than per call site: a future bare `hermes ...` call must
+# be profile-correct by default, not correct only if its author remembered.
+# shell_alias_no_env deliberately strips it back out -- see its docstring.
+os.environ["HERMES_HOME"] = _hermes_home
 for _path in (
     os.path.join(_hermes_home, "memory-os/runtime/python"),
     os.path.join(_hermes_home, "plugins/memory_os"),
@@ -8642,6 +8657,13 @@ def _cron_schedule_interval(schedule):
     return timedelta(hours=1)
 
 def shell_alias_no_env():
+    # The whole point of this section is that the shell alias resolves WITHOUT
+    # HERMES_HOME, so it must strip the variable explicitly. It used to rely on
+    # the ambient environment happening not to define it, which made the
+    # contract depend on how the probe was launched: correct over SSH by
+    # accident, and quietly not "no env" under the local cron lane, which does
+    # export it. Now it holds either way.
+    _no_env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
     commands = {
       "status": ["hermes", "memory-os-agent-os", "status"],
       "doctor": ["hermes", "memory-os-agent-os", "doctor"],
@@ -8674,7 +8696,10 @@ def shell_alias_no_env():
     except (TypeError, ValueError):
         workers = 4
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {name: executor.submit(load_json_cmd, command) for name, command in commands.items()}
+        futures = {
+            name: executor.submit(load_json_cmd, command, _no_env)
+            for name, command in commands.items()
+        }
         results = {}
         for name, future in futures.items():
             try:
