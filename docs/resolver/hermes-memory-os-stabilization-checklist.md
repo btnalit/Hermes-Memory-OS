@@ -4680,11 +4680,17 @@ session_mirror+cron 占 2041/6298），sannai 的 tail-5 全是 `governance_reso
 
 `prefetch` / `temporal` / `state_overlay` 属 **provider 侧**，3.200 gateway 进程内缓存
 provider 模块，**生效需重启 gateway**（cron/心跳不受影响），属 owner 步骤。本批未部署到
-生产。部署后预期变化：overlay `recent_events` 从 1 条升到最多 5 条且只含 `conversation_turn`；
-`quality.json` 新增 `event_stats_health`（封闭 reason 集，首轮可能为
-`cache_predates_recall_field`，下一次 `event_stats_refresh` 后自愈）。
+生产。部署后预期变化：overlay `recent_events` 从 1 条升到最多 5 条且只含 `conversation_turn`
+（实测：回溯 214 条事件即可凑满 5 条真实对话）；`quality.json` 新增 `event_stats_health`
+（封闭 reason 集 `EVENT_STATS_HEALTH_REASONS`，首轮可能为 `cache_predates_recall_field`，
+下一次 `event_stats_refresh` 后自愈）。
 
-新增 23 项测试，全量 3583 → 3606 passed / 13 skipped。四静态门
+**遗留清理（owner 决定，本批不动）**：`override_sweep` 的修复只是**停止继续喂**
+`/root/.hermes/memory-os/system/write_audit*.jsonl`，已写下的孤儿分片（`.jsonl` 28 KB /
+`.202607` 34 KB / `.202608` 22 KB）仍留在主机上，任何读者都 glob 不到。建议归档而非删除
+——它们是 override_sweep 唯一的历史审计记录。
+
+新增 24 项测试，全量 3583 → 3607 passed / 13 skipped。四静态门
 （import_cycle `cycle_count=0` / write_surface `unclassified_count=0` / static_hygiene /
 public_checkout_probe --strict）+ `git diff --check` 全绿。
 
@@ -7045,4 +7051,4 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   目录"。顺带断掉 `event_stats→prefetch→state_overlay` 导入环（常量下沉
   `continuity_constants.py`，`cycle_count` 1→0）。7 项反事实实测 revert→FAIL→restore→PASS。
   **仅仓库验证**：prefetch/temporal/state_overlay 属 provider 侧，生效需重启 gateway（owner 步骤）。
-  全量 3583→3606 passed（+23）/13 skipped，四门全绿。
+  全量 3583→3607 passed（+24）/13 skipped，四门全绿。

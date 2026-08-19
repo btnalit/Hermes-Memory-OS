@@ -1,4 +1,4 @@
-"""Guards for the event_stats path drift and the unbounded anchor read (DA).
+"""Guards for the event_stats path drift and the unbounded anchor read (DB).
 
 Two defects landed together because fixing either alone was wrong:
 
@@ -505,6 +505,35 @@ def test_compaction_refuses_to_rewrite_a_ledger_with_malformed_lines(tmp_path) -
     assert result["reason"] in COMPACT_JSONL_TAIL_REASONS
     assert path.read_bytes() == before, "a refused compaction must not touch the file"
     assert result["error_records"], "the malformed line must be reported, not ignored"
+
+
+def test_overlay_event_stats_health_reasons_are_a_pinned_closed_set(tmp_path) -> None:
+    """Every reason the overlay can emit must be in the declared set.
+
+    Derived from the source rather than hand-listed, so adding a branch that
+    invents a new reason fails here instead of shipping an unlisted value.
+    """
+    import re as _re
+    from plugins.memory.memory_os import state_overlay as _so
+
+    source = Path(_so.__file__).read_text(encoding="utf-8")
+    body = source.split("def build_state_overlay", 1)[1].split("\ndef ", 1)[0]
+    emitted = set(
+        _re.findall(r'event_stats_health\["reason"\]\s*=\s*\(?\s*\n?\s*"([a-z_]+)"', body)
+    )
+    emitted |= set(_re.findall(r'else\s+"([a-z_]+)"\s*\n?\s*\)', body))
+    assert emitted, "reason assignments must be discoverable in the builder"
+    unlisted = emitted - _so.EVENT_STATS_HEALTH_REASONS
+    assert not unlisted, f"reason(s) emitted but not declared: {sorted(unlisted)}"
+
+    # And the missing-cache branch really produces a declared value.
+    roots = _make_roots(tmp_path)
+    store = MemoryOSStore(roots)
+    overlay = _so.build_state_overlay(store, roots)
+    assert overlay["event_stats_health"]["reason"] == "cache_missing"
+    assert (
+        overlay["event_stats_health"]["reason"] in _so.EVENT_STATS_HEALTH_REASONS
+    )
 
 
 def test_compaction_keeps_more_records_than_the_widest_reader_window() -> None:

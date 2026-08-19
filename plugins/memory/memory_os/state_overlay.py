@@ -28,6 +28,22 @@ if TYPE_CHECKING:
     from .roots import MemoryOSRoots
 
 
+# Closed reason set for the event_stats source's contribution to
+# recent_events.  Pinned as a constant (and asserted by a guard test) for the
+# same reason COMPACT_JSONL_TAIL_REASONS is: a reason vocabulary that is
+# closed only "by construction" is one edit away from growing an unlisted
+# value, and an unlisted reason is exactly the silence this field exists to
+# remove.
+EVENT_STATS_HEALTH_REASONS: frozenset[str] = frozenset({
+    "produced",
+    "no_events",
+    "no_recall_meaningful_events",
+    "cache_predates_recall_field",
+    "cache_missing",
+    "cache_corrupt",
+})
+
+
 _NOISE_LINE_MARKERS = (
     "CONTEXT COMPACTION",
     "CONTEXT COMPACT",
