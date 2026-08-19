@@ -9097,3 +9097,46 @@ def test_remote_probe_doctor_section_carries_probe_failure_fields():
     script = monitor._remote_probe_script("/root/.hermes")
     assert '"probe_error": doctor.get("_error")' in script
     assert '"probe_exit_code": doctor.get("_code")' in script
+
+
+# -- DD: the remote probe must measure the profile it was asked to measure ---
+
+
+def test_remote_probe_script_exports_hermes_home_for_cli_subprocesses():
+    """Counterfactual for the profile-blind remote probe.
+
+    _run_probe ships this script over `ssh host "python3 -"`, which forwards no
+    environment, and HERMES_HOME is unset in a non-interactive SSH session. Every
+    bare `hermes ...` call in the probe therefore resolved to the CLI's DEFAULT
+    home rather than --hermes-home. Measured on the dual-profile production host:
+    a sannai run reported main's 240 candidates / ~99k audit entries against
+    sannai's real 60 / ~53k, and main's slow doctor was attributed to sannai.
+    """
+    script = monitor._remote_probe_script("/root/.hermes/profiles/sannai")
+
+    assert 'os.environ["HERMES_HOME"] = _hermes_home' in script
+    # ...and it must be exported before anything can shell out.
+    assert script.index('os.environ["HERMES_HOME"] = _hermes_home') < script.index("def run(")
+
+
+def test_remote_probe_script_bakes_the_requested_home_not_the_default():
+    """The baked literal must follow --hermes-home, per profile."""
+    sannai = monitor._remote_probe_script("/root/.hermes/profiles/sannai")
+    main = monitor._remote_probe_script("/root/.hermes")
+
+    assert '_hermes_home = "/root/.hermes/profiles/sannai"' in sannai
+    assert '_hermes_home = "/root/.hermes"' in main
+
+
+def test_shell_alias_no_env_section_strips_hermes_home_explicitly():
+    """Its "no env" contract must not depend on how the probe was launched.
+
+    Over SSH the variable happened to be absent, so the section was accidentally
+    correct; under the local cron lane (which exports HERMES_HOME) it was not.
+    Now that the probe exports it globally, relying on ambient absence would
+    silently turn this into a with-env check.
+    """
+    script = monitor._remote_probe_script("/root/.hermes")
+
+    assert '_no_env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}' in script
+    assert "executor.submit(load_json_cmd, command, _no_env)" in script

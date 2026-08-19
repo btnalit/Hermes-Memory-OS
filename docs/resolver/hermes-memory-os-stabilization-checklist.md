@@ -7111,6 +7111,75 @@ caller 在循环外建一次缓存。
   `test_build_status_report_uses_O1_index_health` 抓到。**只跑改动相关测试
   不会发现**，是全量套件抓的；已改为惰性构建并补两个"无候选=0 次读取"
   回归钉。这正是 Section W 第 1 条与"测试只证明做了的是对的"的又一次实证。
+### DC 部署与生产验证（2026-08-19，main+sannai 双 profile，`8ad1baf`）
+
+- `/opt` ff `9824db2 → 8ad1baf`；`deploy_memory_os.py` production-safe upgrade
+  ×2 home，逐阶段全绿（main preflight 30/0/0、sannai 29/0/0；两 home
+  apply=applied、postcheck=pass、manifest `deployed_head=8ad1baf`），
+  唯一 WARN 仍是既有良性 `llm_judge_probe=ambiguous`。dry-run 显式确认
+  main `hindsight=preserved_active`、sannai `not_configured`，
+  `config_defaults=already_current`。
+- hash 核验：2 个改动 provider 文件 × 2 副本 × 2 home = **8/8**，
+  modules `candidate_aggregation.py` ×2、`scripts/memory_os_3_200_monitor.py`
+  ×2 全一致。
+- **DC 真因修复的生产实证（main profile，真实语料）**：
+  `_candidate_review_items` **59.3s → 0.28s**、`store.read_events()`
+  **242 次 → 1 次**、仍产出 192 条 review item（输出不变，只是便宜了）。
+  `doctor` **46s → 10–11s**（`status=ok`/`exit_code=0`，输出同构），
+  sannai `doctor` 7s → 5s。
+- monitor（`--caller-timeout-seconds 900`）：main PASS **83→99**、
+  WARN **14→7**、`doctor_not_ok` 与 `shell_alias_no_env_failed` **双双消失**；
+  doctor 段首次真正被读到（新出现 `doctor_warning_finding: index_stale`
+  ——此前探针超时，doctor 的 findings 从未进入过报告）。sannai 耗时
+  213s→131s。
+- **今晨记为"本次运行未出现"的两条 FAIL 已复现**
+  （`session_mirror_auto_apply_permit_integrity_invalid`、
+  `index_not_healthy_in_production`），证实当时拒绝把它们写成"已修"是对的。
+
+### DD — 远端探针 profile 失明：`--hermes-home` 指了谁，CLI 段就没在测谁（2026-08-19）
+
+DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
+`index_counts` **几乎逐字段相同**（audit ~99k、candidates 240、edges 6042），
+而两 home 的真实体量差一个量级。落盘核对坐实：sannai
+`candidates.jsonl` 实为 **60** 行、audit **53k**，monitor 却报 240 / 99k
+——报的是 **main** 的数。
+
+- **根因**：`_run_probe` 以 `ssh host "python3 -"` 投送脚本，**不转发任何
+  环境变量**，而非交互式 SSH 会话里 `HERMES_HOME` 实测为 unset。生成脚本
+  只把 `_hermes_home` 字面量用于 `sys.path` 与 `memory_os_cli()` 的显式
+  env，**从不写 `os.environ["HERMES_HOME"]`**；于是 8 处裸
+  `hermes ...` 调用（含驱动 index 健康的 `status` 与驱动
+  `doctor_ok/doctor_not_ok` 的 `doctor`）全部落回 CLI 默认 home = main。
+- **为什么一直没被发现**：本地 cron 通道的 lane env 自带 HERMES_HOME，
+  **夜间产物是对的**（sannai 最近一份 artifact 的 audit=45445、
+  candidates=15，是它自己的数）。失明只发生在**远端 SSH 调用**上——也就是
+  人工排障时用的那条路径。教训与 CLAUDE.md 的目录漂移族同构：
+  消费者解析到了另一个位置，而 `exists()`/默认值让它悄无声息。
+- **连带证实的两件事**：① 今日"sannai `doctor_not_ok` 已消失"实为
+  **main 的 doctor 变快后透过 sannai 的失明探针被观测到**；sannai 自身
+  doctor 已用显式 env 直测为 5s。② 生成脚本里读 ambient `HERMES_HOME` 的
+  seam host-capability 探针（`hermes_home_missing` bootstrap 码）在**每次
+  远端运行**都无法 bootstrap——同一根因，本次一并修好。
+- **修法**：在生成脚本顶部**一次性** `os.environ["HERMES_HOME"] =
+  _hermes_home`，而不是给 8 个调用点各打补丁——将来新增的裸 `hermes ...`
+  必须**默认正确**，而不是"作者记得才正确"。同时把
+  `shell_alias_no_env` 的"无 env"契约**显式化**（自建剔除 HERMES_HOME 的
+  env 副本）：它此前依赖环境恰好没定义该变量，SSH 下侥幸正确、本地 cron
+  下其实并非"无 env"——这本身就是一个潜伏缺陷，顺手钉住。
+- **反事实**：revert monitor → 3 个新测试中 2 个 FAIL（第 3 个钉的是既有
+  正确行为，两边都 PASS，如实记录），restore → PASS。
+- **部署后验收判据**：sannai monitor 的 `audit_entries` 应约 53k、
+  candidates 为 60/None 而非 99k/240；**预期 sannai 的 FAIL/WARN 集合会
+  变化**——那是它 CLI 侧的第一次诚实测量，不是本次修改引入的回归。
+  在此之前的所有 sannai monitor 数字（含 DB 节 PASS 90、DC 节 PASS 94）
+  都是 Python 段=sannai / CLI 段=main 的**混合值**，**不回改历史小节**，
+  由本节说明即可。
+- **另立不并入本批**：sannai doctor 的
+  `systemd_timer_unit_not_registered` 指名
+  `hermes-memory-os-sannai-heartbeat.timer`（profile 中缀），而磁盘与
+  systemd 里实为 `hermes-memory-os-heartbeat-sannai.timer`（profile 后缀，
+  CO 批次的约定）——doctor 自己拼的名字与安装器的约定漂移，属命名词表
+  drift 族，待独立立项核实后再修。
 
 - `26f4a80..d4bc158（CV，本节）`：PR #57 评审 14 项发现收口——dashboard
   `--profile main` 默认值 crash-loop（主场景级）、孤儿 day-count 键接上
@@ -7204,3 +7273,19 @@ caller 在循环外建一次缓存。
   破坏了 `build_status_report` 的 O(1) 路径，由全量套件抓出并改为惰性构建。
   +17 测试，全量 3622 passed/13 skipped（唯一 FAIL 为已知 flaky 并发用例，
   单跑 PASS），四门全绿。
+
+- `8ad1baf 部署 + 13dad46`：DC 部署与生产验证 + DD — PR #71 在 3.200 双 profile
+  落地并取得真因实证（main 真实语料：`store.read_events()` **242→1**、
+  `_candidate_review_items` **59.3s→0.28s**、`doctor` **46s→10s** 且输出同构；
+  monitor PASS **83→99**、WARN **14→7**，`doctor_not_ok` 与
+  `shell_alias_no_env_failed` 双双消失，doctor 的 findings 首次真正进入报告）。
+  验收中发现 DD：`_run_probe` 走 `ssh host "python3 -"` 不转发环境、生成脚本
+  从不写 `os.environ["HERMES_HOME"]`，致 8 处裸 `hermes ...` 调用（含驱动
+  index 健康的 `status` 与驱动 doctor 判定的 `doctor`）全部落回默认 home
+  ——sannai 实为 60 候选/53k audit，却被报成 main 的 240/99k。本地 cron 通道
+  自带该变量故夜间产物无恙，**失明只在远端 SSH 路径**。修法为脚本顶部一次性
+  导出（新增裸调用默认正确），并把 `shell_alias_no_env` 的"无 env"契约显式化
+  （此前靠环境恰好未定义，SSH 下侥幸成立）。此前所有 sannai monitor 数字
+  （含 PASS 90/94）均为 Python 段=sannai、CLI 段=main 的混合值，不回改历史小节。
+  +3 测试（2 个反事实成立、1 个钉既有正确行为如实记录），全量
+  **3626 passed / 13 skipped / 0 failed**，五门 + `git diff --check` 全绿。
