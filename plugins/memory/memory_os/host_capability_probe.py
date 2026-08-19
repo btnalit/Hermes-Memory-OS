@@ -134,7 +134,11 @@ def probe_host_capabilities(
         "structural_write_gate": _structural_write_gate_capability(),
         # Legacy compatibility keys consumed by 53 collectors and older monitor fixtures.
         "memory_os_core": _path_capability(roots.memory_os_root),
-        "session_mirror": _path_capability(roots.memory_os_root / "system" / "session_mirror_state.json"),
+        # SessionMirror persists its state under runtime/ (session_mirror.py::
+        # state_path).  Probing system/ reported the capability absent on every
+        # host forever — the same producer/consumer directory drift as the
+        # event_stats cache, and equally silent.
+        "session_mirror": _path_capability(roots.memory_os_root / "runtime" / "session_mirror_state.json"),
         "memory_sources": _path_capability(roots.memory_os_root / "system" / "memory_sources.jsonl"),
         "hermes_cron": cron_capability,
         "profile": _first_path_capability(roots.hermes_home, ("profiles", "config.json")),

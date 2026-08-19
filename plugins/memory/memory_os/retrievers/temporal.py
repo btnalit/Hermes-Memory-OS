@@ -7,11 +7,16 @@ anchors, and active task anchors — no LLM dependency.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, TYPE_CHECKING
 
+from plugins.memory.memory_os.event_stats import read_event_stats
+from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
+from plugins.memory.memory_os.roots import (
+    LAST_SESSION_ANCHOR_TAIL_RECORDS,
+    last_session_anchor_path,
+)
 
 if TYPE_CHECKING:
     from plugins.memory.memory_os.store import MemoryOSStore
@@ -69,38 +74,41 @@ class TemporalRetriever:
         roots = store.roots
 
         # 1) Last session anchors — most recent non-current session
-        lsa_path = roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+        lsa_path = last_session_anchor_path(roots)
         if lsa_path.exists():
-            try:
-                records: list[dict[str, Any]] = []
-                current_sid = str((scope or {}).get("session_id", ""))
-                for line in lsa_path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    record = json.loads(line)
-                    if not isinstance(record, dict):
-                        continue
-                    if current_sid and str(record.get("session_id", "")) == current_sid:
-                        continue
-                    if record.get("foreground_summary"):
-                        records.append(record)
-                records.sort(key=lambda r: str(r.get("ended_at", "")), reverse=True)
-                for record in records[:3]:
-                    summary = str(record.get("foreground_summary", ""))
-                    objects.append(RecallObject(
-                        recall_type=RecallType.TEMPORAL.value,
-                        content=summary[:300],
-                        score=0.7,
-                        source_ref=f"temporal:last_session:{str(record.get('session_id', ''))[:12]}",
-                        metadata={
-                            "anchor": "last_session",
-                            "session_id": str(record.get("session_id", "")),
-                            "ended_at": str(record.get("ended_at", "")),
-                            "signals": signals,
-                        },
-                    ))
-            except (json.JSONDecodeError, OSError):
-                pass
+            records: list[dict[str, Any]] = []
+            current_sid = str((scope or {}).get("session_id", ""))
+            # Bounded tail read: the retriever runs per turn while the ledger
+            # is append-only, so a full read grows with deployment age.  Only
+            # the three newest anchors are used.  read_jsonl_tail absorbs
+            # malformed lines and OS errors into bounded error records, so the
+            # fail-open try/except this replaced is no longer needed.
+            tail = read_jsonl_tail(
+                lsa_path,
+                max_records=LAST_SESSION_ANCHOR_TAIL_RECORDS,
+                component="temporal_retriever",
+                operation="last_session_anchors",
+            )
+            for record in tail.records:
+                if current_sid and str(record.get("session_id", "")) == current_sid:
+                    continue
+                if record.get("foreground_summary"):
+                    records.append(record)
+            records.sort(key=lambda r: str(r.get("ended_at", "")), reverse=True)
+            for record in records[:3]:
+                summary = str(record.get("foreground_summary", ""))
+                objects.append(RecallObject(
+                    recall_type=RecallType.TEMPORAL.value,
+                    content=summary[:300],
+                    score=0.7,
+                    source_ref=f"temporal:last_session:{str(record.get('session_id', ''))[:12]}",
+                    metadata={
+                        "anchor": "last_session",
+                        "session_id": str(record.get("session_id", "")),
+                        "ended_at": str(record.get("ended_at", "")),
+                        "signals": signals,
+                    },
+                ))
 
         # 2) Active task anchor — current foreground task
         current_task_anchor = str((scope or {}).get("current_task_anchor", ""))
@@ -119,26 +127,30 @@ class TemporalRetriever:
             ))
 
         # 3) Event stats — recent summaries
-        event_stats_path = roots.memory_os_root / "system" / "event_stats.json"
-        if event_stats_path.exists():
-            try:
-                es = json.loads(event_stats_path.read_text(encoding="utf-8"))
-                summaries = es.get("recent_event_summaries", [])
-                if isinstance(summaries, list):
-                    for s in summaries[-5:]:
-                        if not isinstance(s, dict):
-                            continue
-                        summary = str(s.get("summary", "")).strip()
-                        if summary:
-                            objects.append(RecallObject(
-                                recall_type=RecallType.TEMPORAL.value,
-                                content=summary[:200],
-                                score=0.6,
-                                source_ref=f"temporal:event:{s.get('kind', 'event')}",
-                                metadata={"anchor": "event_stats", "signals": signals},
-                            ))
-            except (json.JSONDecodeError, OSError):
-                pass
+        #
+        # Read through read_event_stats (which owns the file's location) —
+        # never a path literal.  This branch spent its whole life pointed at
+        # system/event_stats.json while the producer wrote runtime/, so
+        # exists() was permanently False and the source contributed nothing,
+        # with no error record to say so.
+        #
+        # The field read is recall_event_summaries, not recent_event_summaries:
+        # the latter is a raw tail that on production is entirely machine
+        # bookkeeping (cron mirror / governance rows).  Injecting that into
+        # recall is worse than injecting nothing, which is why the path fix
+        # and the kind filter had to land together.
+        stats, _freshness = read_event_stats(roots)
+        if stats is not None:
+            for s in stats.recall_event_summaries[-5:]:
+                summary = str(s.get("summary", "")).strip()
+                if summary:
+                    objects.append(RecallObject(
+                        recall_type=RecallType.TEMPORAL.value,
+                        content=summary[:200],
+                        score=0.6,
+                        source_ref=f"temporal:event:{s.get('kind', 'event')}",
+                        metadata={"anchor": "event_stats", "signals": signals},
+                    ))
 
         objects.sort(key=lambda o: o.score, reverse=True)
         return objects[:top_k]

@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
+from .continuity_constants import (
+    _BOOKKEEPING_FILL_KIND_MARKERS,
+    _BRIDGE_SEED_SLOTS,
+    _MAX_CONTINUITY_RECORDS,
+)
 from .crystallized import (
     CrystallizedMemoryService,
     read_candidate_queue,
@@ -26,7 +31,7 @@ from .low_clue_recall import (
     build_low_clue_guard_lines,
     normalize_low_clue_recall_config,
 )
-from .jsonl_io import build_error_record
+from .jsonl_io import build_error_record, read_jsonl_tail
 from .memory_sources import (
     GUARD_RECALL_CLARIFICATION,
     append_memory_source_record,
@@ -34,6 +39,7 @@ from .memory_sources import (
     memory_sources_enabled,
     normalize_memory_sources_config,
 )
+from .roots import LAST_SESSION_ANCHOR_TAIL_RECORDS, last_session_anchor_path
 from .store import MemoryOSStore
 from .timeutil import ensure_utc_aware
 
@@ -48,35 +54,12 @@ CONTINUITY_FRESHNESS_KNOB = "lane_continuity_freshness_enabled"
 # Max working items shown per file (most recent first).
 WORKING_ITEMS_PER_FILE = 5
 
-_BRIDGE_SEED_SLOTS = {
-    "foreground": 2,
-    "cron": 1,
-    "mailbox": 1,
-    "room_family": 1,
-    "state_source": 1,
-    "governance": 1,
-}
-
-_MAX_CONTINUITY_RECORDS = 8
-
-# Bookkeeping event kinds are excluded from the selector's GLOBAL recency
-# fill — and only from the fill. The seeded slots above stay untouched: one
-# state_source line and one governance line per bridge is a pinned design
-# (test_prefetch_continuity_selector_preserves_bridge_seed_events) giving the
-# agent cross-lane awareness. The fill is a different animal: production's
-# recent event window carries bursts of producer bookkeeping (a clearance
-# cycle emitted 158 governance_resolver_approved + 118 _invalidated events),
-# and a pure-recency fill lets one burst crowd every conversation turn out of
-# Recent Event Summaries. Fail-open by construction: an UNKNOWN kind is never
-# hidden — hiding requires opting into this list, so producer-vocabulary
-# drift shows new kinds instead of losing them (the CC lesson, inverted to
-# the safe side).
-_BOOKKEEPING_FILL_KIND_MARKERS = (
-    "governance_",
-    "state_source_",
-    "session_fact_extracted",
-    "session_observed",
-)
+# Continuity-selector constants (_BRIDGE_SEED_SLOTS, _MAX_CONTINUITY_RECORDS,
+# _BOOKKEEPING_FILL_KIND_MARKERS) now live in the leaf module
+# continuity_constants and are imported at the top of this file, so that
+# event_stats — the O(1) mirror of this selector — can share them without
+# importing prefetch.  They stay reachable as prefetch._MAX_CONTINUITY_RECORDS
+# and siblings for existing callers and tests.
 
 
 def _is_bookkeeping_event_kind(event: Any) -> bool:
@@ -2862,22 +2845,24 @@ def _last_session_lines(
     if not session_id:
         return []
 
-    path = store.roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+    path = last_session_anchor_path(store.roots)
     if not path.exists():
         return []
 
     now = datetime.now(timezone.utc)
     best: tuple[datetime, dict[str, Any]] | None = None
 
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
+    # Bounded tail read, not a full scan.  This runs inside the per-turn
+    # prefetch request and the ledger is append-only, so a read_text() here
+    # costs more every day the deployment lives: measured on production at
+    # 316 KB / 378 records = 6.4 ms per turn, growing ~4.8 KB/day.  Only the
+    # newest anchor is wanted, so the tail window is what we read.
+    for record in read_jsonl_tail(
+        path,
+        max_records=LAST_SESSION_ANCHOR_TAIL_RECORDS,
+        component="prefetch",
+        operation="last_session_lines",
+    ).records:
         # Exclude current session's own anchor
         if str(record.get("session_id", "")) == session_id:
             continue

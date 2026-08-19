@@ -4,7 +4,27 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+# Location-agnostic import resolution: repo checkout > runtime layout.
+# The probe reads files the runtime owns, so it must address them through the
+# runtime's accessors rather than rebuilding path literals — rebuilding them
+# is how this script came to report an empty event_stats block forever while
+# the cache sat, healthy, one directory over.
+_self = Path(__file__).absolute()
+_repo_root = _self.parents[1]  # scripts/ → repo root
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    _runtime_root = Path.home() / ".hermes" / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
+
+from plugins.memory.memory_os.event_stats import event_stats_path  # noqa: E402
+from plugins.memory.memory_os.roots import last_session_anchor_path  # noqa: E402
 
 
 def probe(home_str="/root/.hermes"):
@@ -25,7 +45,7 @@ def probe(home_str="/root/.hermes"):
             })
 
     # 2. Candidates (last 5 for kind/summary sampling)
-    candidates_file = mos / "candidates" / "candidates.jsonl"
+    candidates_file = mos / "crystallized" / "candidates.jsonl"  # canonical: MemoryOSRoots.crystallized_root
     results["candidates"] = {"total": 0, "samples": []}
     if candidates_file.exists():
         lines = [l for l in candidates_file.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -62,16 +82,29 @@ def probe(home_str="/root/.hermes"):
                 pass
 
     # 4. Event stats (cached)
-    event_stats_file = mos / "system" / "event_stats.json"
-    results["event_stats"] = {}
+    event_stats_file = event_stats_path(SimpleNamespace(memory_os_root=mos))
+    results["event_stats"] = {"present": False, "path": str(event_stats_file)}
     if event_stats_file.exists():
         es = json.loads(event_stats_file.read_text(encoding="utf-8"))
         results["event_stats"] = {
+            "present": True,
+            "path": str(event_stats_file),
             "total_events": es.get("total_event_count"),
+            # Raw tail — on production this is machine bookkeeping, kept here
+            # because the probe's job is to show what is actually on disk.
             "recent_summaries": [
                 {"kind": s.get("kind"), "summary": str(s.get("summary", ""))[:200]}
                 for s in es.get("recent_event_summaries", [])[:5]
-            ]
+            ],
+            # Kind-filtered tail — what recall consumers actually inject.
+            "recall_summaries": [
+                {"kind": s.get("kind"), "summary": str(s.get("summary", ""))[:200]}
+                for s in es.get("recall_event_summaries", [])[:5]
+            ],
+            "recall_summary_scanned_count": es.get("recall_summary_scanned_count"),
+            "recall_summary_excluded_kind_counts": es.get(
+                "recall_summary_excluded_kind_counts"
+            ),
         }
 
     # 5. Task anchors (recent activity)
@@ -108,7 +141,7 @@ def probe(home_str="/root/.hermes"):
         conn.close()
 
     # 7. Last session anchors
-    lsa_file = mos / "system" / "last_session_anchor.jsonl"
+    lsa_file = last_session_anchor_path(SimpleNamespace(memory_os_root=mos))
     results["last_sessions"] = {"total_lines": 0, "latest": []}
     if lsa_file.exists():
         lines = [l for l in lsa_file.read_text(encoding="utf-8").splitlines() if l.strip()]

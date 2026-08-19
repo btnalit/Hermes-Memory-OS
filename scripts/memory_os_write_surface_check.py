@@ -33,6 +33,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     # Governed IO primitives — classification follows caller (structural_write_gate or owner action)
     "plugins/memory/memory_os/jsonl_io.py::append_jsonl_locked::path.open_a::target": "governed_io_primitive",
     "plugins/memory/memory_os/jsonl_io.py::append_jsonl_lines_locked::path.open_a::target": "governed_io_primitive",
+    "plugins/memory/memory_os/jsonl_io.py::compact_jsonl_tail::path.open_a::archive_target": "governed_io_primitive",
     "plugins/memory/memory_os/jsonl_io.py::_append_line_under_lock::path.open_a::target": "governed_io_primitive",
     "plugins/memory/memory_os/jsonl_io.py::locked_jsonl_file::path.open_a": "governed_io_primitive_lockfile",
     "plugins/memory/memory_os/execution_gate.py::start_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_permit_ledger",
