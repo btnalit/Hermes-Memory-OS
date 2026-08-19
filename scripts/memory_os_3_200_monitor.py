@@ -4647,6 +4647,11 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "prefetch._indexed_lines",
     "prefetch_facade",
     "provenance",
+    # DB: session-end last-session-anchor compaction (size-gated) reports its
+    # rewrite failures here.  The append itself still lands; only the bounding
+    # of an unbounded ledger is lost, so it is recoverable but must not be
+    # silent.
+    "provider",
     "provisional",
     "provisional_sweep",
     "runtime",
@@ -4657,8 +4662,13 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "session_mirror",
     "shadow_recall",
     "sqlite",
+    # DB: bounded tail reads of the last-session-anchor ledger.  Both emit
+    # malformed-line / read-failure records from the shared jsonl_io tail
+    # reader rather than the silent `except: pass` they replaced.
+    "state_overlay",
     "state_source_mirror",
     "symbolic_offloader",
+    "temporal_retriever",
 })
 
 

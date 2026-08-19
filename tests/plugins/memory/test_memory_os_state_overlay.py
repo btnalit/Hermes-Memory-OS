@@ -24,8 +24,21 @@ from plugins.memory.memory_os.state_overlay_renderer import (
     render_state_overlay_md,
     render_state_overlay_md_short,
 )
+from plugins.memory.memory_os.event_stats import build_event_stats, write_event_stats
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.roots import MemoryOSRoots
+
+
+def _write_event_stats_via_producer(roots: MemoryOSRoots, events: list[dict]) -> None:
+    """Materialise event_stats.json the way production does.
+
+    Deliberately routed through build_event_stats + write_event_stats rather
+    than hand-writing JSON at a path literal.  Hand-written fixtures are what
+    hid the producer/consumer path drift here for the deployment's whole
+    life: the fixture wrote to the same wrong directory the consumer read
+    from, so the test agreed with the bug instead of catching it.
+    """
+    write_event_stats(roots, build_event_stats(events))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -248,19 +261,27 @@ class TestBuildStateOverlay:
 
     def test_build_overlay_with_event_stats(self, tmp_path):
         roots = _make_roots(tmp_path)
-        stats_path = roots.memory_os_root / "system" / "event_stats.json"
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        stats_path.write_text(json.dumps({
-            "total_event_count": 5,
-            "recent_event_summaries": [
-                {"kind": "conversation_turn", "summary": "Discussed overlay design"},
-                {"kind": "fact_judge", "summary": "Judged memory candidates"},
-            ],
-        }))
+        _write_event_stats_via_producer(roots, [
+            {"id": "e1", "ts": "2026-01-01T00:00:00Z",
+             "kind": "conversation_turn", "summary": "Discussed overlay design"},
+            {"id": "e2", "ts": "2026-01-01T00:01:00Z",
+             "kind": "fact_judge", "summary": "Judged memory candidates"},
+        ])
         store = _make_store(roots)
         overlay = build_state_overlay(store, roots)
         assert len(overlay["recent_events"]["data"]) >= 1
         assert overlay["recent_events"]["status"] == "ok"
+        # The overlay must read what the producer actually wrote.  If the
+        # consumer rebuilds its own path literal again, read_event_stats
+        # returns nothing here and this section falls back to empty.
+        assert any(
+            "Discussed overlay design" in e["text"]
+            for e in overlay["recent_events"]["data"]
+        )
+        assert overlay["event_stats_health"]["reason"] == "produced"
+        # fact_judge is not recall-meaningful — excluded, and counted rather
+        # than silently dropped.
+        assert overlay["event_stats_health"]["excluded_kind_counts"].get("fact_judge") == 1
 
     def test_build_overlay_empty_roots_no_crash(self, tmp_path):
         """Even with zero data, build_state_overlay must not raise."""
@@ -425,20 +446,23 @@ class TestBuildStateOverlay:
 
     def test_build_overlay_with_document_upload_boilerplate(self, tmp_path):
         roots = _make_roots(tmp_path)
-        stats_path = roots.memory_os_root / "system" / "event_stats.json"
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        stats_path.write_text(json.dumps({
-            "recent_event_summaries": [
-                {
-                    "kind": "conversation_turn",
-                    "summary": (
-                        "[The user sent a text document: 'memory-os-plan.md'. "
-                        "Its content has been included below. The file is also saved at: /tmp/doc.md]"
-                    ),
-                },
-                {"kind": "conversation_turn", "summary": "Useful event: overlay filter added"},
-            ],
-        }), encoding="utf-8")
+        _write_event_stats_via_producer(roots, [
+            {
+                "id": "e1",
+                "ts": "2026-01-01T00:00:00Z",
+                "kind": "conversation_turn",
+                "summary": (
+                    "[The user sent a text document: 'memory-os-plan.md'. "
+                    "Its content has been included below. The file is also saved at: /tmp/doc.md]"
+                ),
+            },
+            {
+                "id": "e2",
+                "ts": "2026-01-01T00:01:00Z",
+                "kind": "conversation_turn",
+                "summary": "Useful event: overlay filter added",
+            },
+        ])
         store = _make_store(roots)
 
         overlay = build_state_overlay(store, roots)

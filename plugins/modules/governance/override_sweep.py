@@ -193,7 +193,12 @@ class OverrideSweepModule:
         append_jsonl_locked(self.runs_path, runs_record)
 
         # Audit
-        audit_path = Path(self.hermes_home) / "memory-os" / "system" / "write_audit.jsonl"
+        # Canonical audit root is memory-os/audit/ (MemoryOSRoots.audit_path).
+        # This site addressed system/ instead, and because append_audit shards
+        # monthly off the parent it built a parallel audit trail nobody reads:
+        # read_audit_records and the monitor both glob memory-os/audit/, so
+        # every override_sweep row written here was invisible to them.
+        audit_path = Path(self.hermes_home) / "memory-os" / "audit" / "write_audit.jsonl"
         append_audit(
             audit_path,
             action="override_sweep_run",

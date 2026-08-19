@@ -4564,6 +4564,138 @@ public_checkout_probe --strict）+ `git diff --check` 全绿。
 
 ---
 
+## DB — 生产者/消费者目录漂移族（4 例）+ 锚点账本无界全读（2026-08-18，owner 指出）
+
+**触发**：owner 指出两条缺陷并要求"在实际生产环境验证清楚，并与顾问确认清楚"。两条
+都成立，且都比原述更宽；核查过程中还发现一条会让"修好"变成"改坏"的反转。
+
+### DB.1 `event_stats.json` 路径漂移 —— 出生即死，且比原述宽两倍
+
+- **根因**：生产者 `event_stats.py::event_stats_path` 写 `runtime/event_stats.json`；
+  消费者硬编码 `system/event_stats.json`，共 **3 处**（`retrievers/temporal.py:122`、
+  `state_overlay.py:208`、`scripts/memory_os_overlay_data_probe.py:65`），不是 1 处。
+- **生产实测（3.200 双 profile）**：`runtime/event_stats.json` 均存在且新鲜；
+  `system/event_stats.json` **两 profile 都不存在**，且回溯到 2026-07-11 的 5 份备份中
+  **没有任何一份**出现过 `system/` 副本 → 该分支**自出生即死，不是回归**。线上部署码
+  `/root/.hermes/plugins/memory_os/` 同样漂移，生产跑的就是坏配对。
+- **为什么无声**：两处消费者都是裸 `if path.exists():` 无 else——无 error record、无计数器。
+- **为什么两轮评审+测试都没抓到**：`test_memory_os_state_overlay.py:251/428` 的夹具把
+  文件手写到**消费者的错误路径**上，于是测试与 bug 自洽通过。这正是
+  `counterfactual-tests-must-use-real-producer` 那条教训的又一次实例；两处夹具已改为经
+  `write_event_stats(build_event_stats(...))` 真实生产者落盘。
+- **活影响实测**：真正的活受害者是 **overlay→prefetch，不是 temporal**。
+  `state_overlay.recent_events` 双 profile 都只有 **1 条**（上限 `max_recent_events=5`），
+  唯一来源 `last_session`，而 section status 仍报 `ok`——饥饿被掩盖；overlay 是活路径
+  （`prefetch.py:1314` 读 `current.json`）。temporal 侧 `recall_arbitration.mode="shadow"`
+  输出中性，但 facade **每轮真在跑**（`recall_plan_observations.jsonl` 08-19 01:37 仍在写），
+  即**成本已付、收益为零**。
+
+### DB.2 反转：只修路径 = prefetch 质量回归（本批不可拆分的理由）
+
+`build_event_stats` 取 `events[-5:]` 且不筛 kind，而生产尾部**结构性**是机器记账：
+main 的 tail-5 全是 `conversation_turn_mirrored`（cron 每 ~5.5 分钟镜像一次；
+session_mirror+cron 占 2041/6298），sannai 的 tail-5 全是 `governance_resolver_*`
+（governance_feedback 占 1349/2073）。直接接通即向 owner 可见上下文注入 5 行治理/镜像模板。
+**死路径一直在意外地替 overlay 挡噪声**——故路径修复与 kind 过滤必须同批落地。
+
+- **修法（生产者侧，顾问裁定）**：消费者侧过滤对既有 5 条字段是**空洞的**（尾部恒为机器行
+  → 恒得 0 条）；过滤必须发生在全量事件仍在内存处。`build_event_stats` 新增**加性字段**
+  `recall_event_summaries`（原 `recent_event_summaries` 保持原样，status/probe 读者不变）。
+- **允许表 fail-closed + 计数**：`RECALL_MEANINGFUL_EVENT_KINDS = {conversation_turn}`
+  （依据从生产各 kind 真实 summary 取样判定：`session_fact_extracted` 是"已抽取"的通知而
+  非事实本身，`session_observed`/`governance_*`/`*_mirrored` 均为模板）。未分类 kind 一律
+  排除并计入 `recall_summary_excluded_kind_counts`，另有 `recall_summary_scanned_count` /
+  `recall_summary_scan_truncated`。
+- **极性说明（已写进代码注释）**：既有 `_BOOKKEEPING_FILL_KIND_MARKERS` 是 **fail-open**
+  （治理"展示"，隐藏需显式登记，未知 kind 不消失）；本允许表是 **fail-closed**（治理
+  "注入"，未知 kind 漏进去才是伤害）。目标同为"词表漂移绝不无声"，安全方向相反是刻意的。
+  守卫测试绑定两张表：允许表中的 kind 不得同时被记账表判定为记账。
+
+### DB.3 `last_session_anchor.jsonl` 每轮全文件读 —— 活受害者是 prefetch
+
+- **三个读者**：`prefetch.py::_last_session_lines`（**每轮活热路径**，全读无上限）、
+  `temporal.py`（shadow 热路径，全读无上限）、`state_overlay.py::_read_last_session_anchors`
+  （cron；`max_lines=500` 只截了 parse，`read_text()` 的 I/O 仍随文件无界增长）。
+- **生产实测**（315,762 B / 378 行）：prefetch 变体中位 **6.41 ms**、temporal 变体
+  **6.17 ms**，均**高于**原述 4.91 ms。增长单调无压缩：127,795 B(07-10) → 207,430(07-28)
+  → 315,762(08-18) ≈ **+4.8 KB/天**。
+- **主修法**：`jsonl_io.read_jsonl_tail()`——自 EOF 反向 seek 分块，`max_records` **无默认值**
+  （忘记设界正是本缺陷本身，故不给"无界"默认），`max_bytes` 触顶时发
+  `jsonl_tail_scan_truncated` 而非静默返回短结果。三处读者全部接入；路径与尾窗常量下沉
+  `roots.py`（`last_session_anchor_path` / `LAST_SESSION_ANCHOR_TAIL_RECORDS=50`）。
+- **次修法**：会话结束处尺寸门压缩（`compact_jsonl_tail`，1 MB 门 / 保留 500 条 ≥ overlay
+  最宽读窗，故压缩**只能界住没人读的部分**）。**先归档后丢弃**：崩溃只会让归档重复，绝不丢记录。
+  封闭 reason 集 `no_file/below_threshold/nothing_to_drop/compacted/malformed_lines_present/
+  read_failed/write_failed`，每次会话结束写入 audit（含 no-op），因为"什么都没做"必须说明是哪一种。
+- **自查抓到的自造缺陷**：重写只保留能解析的行，故畸形行会被**静默删除**。改为遇畸形行
+  即拒绝压缩（`malformed_lines_present`）——无界账本远小于被静默截断的账本。
+
+### DB.4 断掉 `event_stats → prefetch → state_overlay` 导入环
+
+`state_overlay` 需要 `read_event_stats` 时导入检查报环。根因是 `event_stats` 为 **3 个常量**
+把整个 `prefetch` 拖了进来。新增叶子模块 `continuity_constants.py` 承载
+`_BRIDGE_SEED_SLOTS` / `_MAX_CONTINUITY_RECORDS` / `_BOOKKEEPING_FILL_KIND_MARKERS`，
+`prefetch` 原样再导出（`prefetch._MAX_CONTINUITY_RECORDS` 等既有调用与测试不受影响）。
+`cycle_count` 1 → 0。
+
+### DB.5 Rule-5 全项目扫描：同族缺陷共 4 例，另 3 例生产坐实
+
+按"在一个文件发现缺陷 → 全项目找同一模式"扫描"同一数据文件名出现在不同目录"：
+
+| 文件 | 生产者/正典 | 漂移读写方 | 生产实测后果 |
+|---|---|---|---|
+| `event_stats.json` | `runtime/` | 3 处 `system/` | `system/` 从不存在，源恒无贡献 |
+| `session_mirror_state.json` | `runtime/`（`session_mirror.py:447`） | `host_capability_probe.py:137` 读 `system/` | `system/` 不存在 → 该 capability **在每台主机上永远报缺席** |
+| `write_audit.jsonl` | `audit/`（`MemoryOSRoots.audit_path`，16 MB） | `override_sweep.py:196` 写 `system/` | `append_audit` 按父目录月度分片，于是 `system/` 下**建起一条平行审计轨**（`write_audit.202608.jsonl` 22 KB，08-19 05:48 仍在写），monitor 与 dashboard 都 glob `audit/`，**一行都读不到** |
+| `candidates.jsonl` | `crystallized/` | `overlay_data_probe.py:48` 读 `candidates/` | 该目录不存在，探针候选块恒为空 |
+
+四处全部修复。新增**全项目守卫**
+`test_no_data_file_is_addressed_under_two_directories`：任何数据文件名不得在源码中出现于
+两个目录，per-module 同名文件（`config.json`/`current.json`/`policy.json`/`reports.jsonl`/
+`runs.jsonl`/`would_send.jsonl`/`policy_applies.jsonl`）走显式白名单并注明理由。这条断言就是
+本次扫描的固化——它正是用来找出上表四例的。
+
+### DB.6 既有守卫抓到的连带项
+
+`test_error_record_emitting_components_constant_matches_source` 在全量中 FAIL：新的
+`build_error_record(component=...)` 发射方未在监控侧登记。已把组件名对齐既有短名词表
+（避免再造一套并行命名），并登记 `provider` / `state_overlay` / `temporal_retriever`
+（`prefetch` 已在表内）。这条守卫按设计生效了，未改动其判定。
+
+### 反事实覆盖（全部实测 revert → FAIL → restore → PASS）
+
+1. 路径字面量守卫：向 `state_overlay.py` 注回一个字面量 → FAIL。
+2. 全项目漂移守卫：把 `host_capability_probe` 改回 `system/` → FAIL。
+3. `state_overlay` 尾读还原为整读 → FAIL。
+4. `prefetch` 尾读还原为整读 → FAIL。
+5. `temporal` 尾读还原为整读 → FAIL。
+6. 去掉 kind 过滤（召回字段退化为原始尾部）→ 2 项 FAIL。
+7. 去掉压缩的归档步骤 → FAIL。
+
+另有**天然反事实**：修复前的全量跑中，两处旧夹具测试
+（`test_build_overlay_with_event_stats` / `test_build_overlay_with_document_upload_boilerplate`）
+如预期 FAIL——正是它们此前写到错误路径才让缺陷存活。
+
+### 部署说明（本批仅仓库验证）
+
+`prefetch` / `temporal` / `state_overlay` 属 **provider 侧**，3.200 gateway 进程内缓存
+provider 模块，**生效需重启 gateway**（cron/心跳不受影响），属 owner 步骤。本批未部署到
+生产。部署后预期变化：overlay `recent_events` 从 1 条升到最多 5 条且只含 `conversation_turn`
+（实测：回溯 214 条事件即可凑满 5 条真实对话）；`quality.json` 新增 `event_stats_health`
+（封闭 reason 集 `EVENT_STATS_HEALTH_REASONS`，首轮可能为 `cache_predates_recall_field`，
+下一次 `event_stats_refresh` 后自愈）。
+
+**遗留清理（owner 决定，本批不动）**：`override_sweep` 的修复只是**停止继续喂**
+`/root/.hermes/memory-os/system/write_audit*.jsonl`，已写下的孤儿分片（`.jsonl` 28 KB /
+`.202607` 34 KB / `.202608` 22 KB）仍留在主机上，任何读者都 glob 不到。建议归档而非删除
+——它们是 override_sweep 唯一的历史审计记录。
+
+新增 24 项测试，全量 3583 → 3607 passed / 13 skipped。四静态门
+（import_cycle `cycle_count=0` / write_surface `unclassified_count=0` / static_hygiene /
+public_checkout_probe --strict）+ `git diff --check` 全绿。
+
+---
+
 ## 待办
 
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
@@ -6902,3 +7034,21 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   其中批 B 第一版夹具"仅差标点"是空洞的（标点在旧正则本就是分隔符）——已换语气词变体并记入教训。
   部署须重启 gateway（provider 侧进程内缓存），纪元重置使 451/96 条旧观测 invalidated 为预期。
   全量 3559→3583 passed（+24）/13 skipped，四门全绿。
+- `8bf4877`：DB — owner 指出的两条缺陷经生产实测**均成立且更宽**，并牵出一整族。
+  ① `event_stats.json` 生产者写 `runtime/`、消费者硬编码 `system/`（**3 处**非 1 处）；3.200 双
+  profile 与回溯到 07-11 的 5 份备份**都不存在** `system/` 副本 → 自出生即死。活受害者是
+  **overlay→prefetch 而非 temporal**：`recent_events` 恒 1 条（上限 5）却报 `status=ok`；
+  temporal 为 shadow，成本每轮照付、收益为零。两处旧夹具把文件写到**消费者的错路径**，
+  测试与 bug 自洽通过——已改走真实生产者。② 只修路径会**变差**：生产最近窗口 97.7% 是机器
+  记账（回溯 214 条才凑满 5 条真实对话，163 条是 cron 镜像），故同批加**生产者侧 fail-closed
+  允许表**+逐 kind 排除计数；极性与既有 fail-open 记账表相反且写明缘由，守卫测试绑定两表。
+  ③ 锚点账本全读的活受害者是 **prefetch 非 temporal**（生产实测 6.41 ms/轮，+4.8 KB/天）；
+  新增 `jsonl_io.read_jsonl_tail`（seek 尾读，`max_records` **无默认值**）接三处读者，会话结束
+  加尺寸门压缩（先归档后丢弃；遇畸形行拒绝压缩）。④ **Rule-5 扫描出同族共 4 例**，另 3 例
+  同样生产坐实：`session_mirror_state.json`（capability 在每台主机永远报缺席）、
+  `write_audit.jsonl`（`system/` 下建起平行月度审计轨，8 月片 22 KB 仍在写，monitor/dashboard
+  全读不到）、`candidates.jsonl`（探针目录错）——新增全项目守卫"同一数据文件名不得出现在两个
+  目录"。顺带断掉 `event_stats→prefetch→state_overlay` 导入环（常量下沉
+  `continuity_constants.py`，`cycle_count` 1→0）。7 项反事实实测 revert→FAIL→restore→PASS。
+  **仅仓库验证**：prefetch/temporal/state_overlay 属 provider 侧，生效需重启 gateway（owner 步骤）。
+  全量 3583→3607 passed（+24）/13 skipped，四门全绿。

@@ -13,19 +13,62 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .jsonl_io import locked_jsonl_file
-from .prefetch import (
+from .continuity_constants import (
     _BOOKKEEPING_FILL_KIND_MARKERS,
     _BRIDGE_SEED_SLOTS as _CONTINUITY_SEED_SLOTS,
     _MAX_CONTINUITY_RECORDS,
 )
+from .jsonl_io import locked_jsonl_file
 from .timeutil import ensure_utc_aware
 
 EVENT_STATS_SCHEMA_VERSION = "memory-os.event_stats.v0"
 
-# Continuity selector constants — imported from prefetch (single source of
-# truth) rather than hand-copied, so seed-slot/marker vocabulary drift
-# between the live selector and this mirror is structurally impossible.
+# Continuity selector constants — imported from continuity_constants (single
+# source of truth, shared with the live selector in prefetch) rather than
+# hand-copied, so seed-slot/marker vocabulary drift between the live selector
+# and this mirror is structurally impossible.
+
+# ── Recall-meaningful event kinds ────────────────────────────────────
+# ``recent_event_summaries`` is a raw tail (``events[-5:]``) kept honest for
+# status/probe readers.  It is NOT usable as recall content: on production
+# the tail is structurally machine bookkeeping — the main profile's last five
+# events were all ``conversation_turn_mirrored`` (a cron mirror fires every
+# ~5.5 min), the second profile's were all ``governance_resolver_*``.  Feeding
+# that tail into the state overlay or temporal recall injects bookkeeping
+# templates into owner-facing context.
+#
+# ``recall_event_summaries`` is therefore a separate, kind-filtered field, and
+# the filter is an ALLOWLIST — fail-closed.  A kind nobody classified is
+# excluded rather than injected, and every exclusion is counted in
+# ``recall_summary_excluded_kind_counts`` so an owner can see exactly what the
+# filter is holding back and widen it deliberately.  A denylist would silently
+# admit every future machine kind, which is the failure this field exists to
+# prevent.
+#
+# Contract with the pre-existing bookkeeping vocabulary: an allowlisted kind
+# must never also be bookkeeping per ``_BOOKKEEPING_FILL_KIND_MARKERS``.  The
+# two vocabularies are bound by a guard test so they cannot drift into
+# contradiction; the allowlist is strictly the stricter of the two (the
+# marker list does not exclude ``conversation_turn_mirrored``).
+#
+# The opposite polarity of the two lists is deliberate, not an inconsistency.
+# ``_BOOKKEEPING_FILL_KIND_MARKERS`` is fail-OPEN because it governs a
+# bounded recency *display*: hiding a kind requires opting into that list, so
+# an unknown kind stays visible rather than silently disappearing.  This
+# allowlist is fail-CLOSED because it governs *injection* into owner-facing
+# recall: there, an unknown kind that slips through is the harm, and the
+# excluded-kind counter keeps it visible instead of silent.  Same goal —
+# vocabulary drift must never be silent — opposite safe direction, because
+# the direction of the damage is opposite.
+RECALL_MEANINGFUL_EVENT_KINDS: frozenset[str] = frozenset({"conversation_turn"})
+
+# Max summaries carried in recall_event_summaries.
+RECALL_SUMMARY_LIMIT = 5
+
+# Max events scanned backwards while filling recall_event_summaries.  Bounds
+# the cost on a large event set; a truncated scan is reported rather than
+# silently treated as "no eligible input".
+RECALL_SUMMARY_SCAN_LIMIT = 500
 
 
 class EventStats:
@@ -43,6 +86,10 @@ class EventStats:
         updated_at: str | None = None,
         recent_event_summaries: list[dict[str, str]] | None = None,
         continuity_selector: dict[str, object] | None = None,
+        recall_event_summaries: list[dict[str, str]] | None = None,
+        recall_summary_scanned_count: int = 0,
+        recall_summary_excluded_kind_counts: dict[str, int] | None = None,
+        recall_summary_scan_truncated: bool = False,
     ) -> None:
         self.total_event_count = total_event_count
         self.latest_event_id = latest_event_id
@@ -53,6 +100,12 @@ class EventStats:
         self.updated_at = updated_at or datetime.now(timezone.utc).isoformat()
         self.recent_event_summaries: list[dict[str, str]] = recent_event_summaries or []
         self.continuity_selector: dict[str, object] = continuity_selector or {}
+        self.recall_event_summaries: list[dict[str, str]] = recall_event_summaries or []
+        self.recall_summary_scanned_count = recall_summary_scanned_count
+        self.recall_summary_excluded_kind_counts: dict[str, int] = (
+            recall_summary_excluded_kind_counts or {}
+        )
+        self.recall_summary_scan_truncated = recall_summary_scan_truncated
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +119,10 @@ class EventStats:
             "events_root": self.events_root,
             "recent_event_summaries": self.recent_event_summaries,
             "continuity_selector": self.continuity_selector,
+            "recall_event_summaries": self.recall_event_summaries,
+            "recall_summary_scanned_count": self.recall_summary_scanned_count,
+            "recall_summary_excluded_kind_counts": self.recall_summary_excluded_kind_counts,
+            "recall_summary_scan_truncated": self.recall_summary_scan_truncated,
         }
 
 
@@ -220,6 +277,56 @@ def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, obj
     }
 
 
+def _build_recall_event_summaries(
+    events: list[dict[str, object]],
+) -> tuple[list[dict[str, str]], int, dict[str, int], bool]:
+    """Select the most recent recall-meaningful event summaries.
+
+    Scans backwards from the newest event, keeping at most
+    ``RECALL_SUMMARY_LIMIT`` entries whose ``kind`` is in
+    ``RECALL_MEANINGFUL_EVENT_KINDS`` and whose ``summary`` is non-empty.
+    The scan is bounded by ``RECALL_SUMMARY_SCAN_LIMIT``.
+
+    Returns ``(summaries, scanned_count, excluded_kind_counts, truncated)``.
+    Summaries are returned oldest-first, matching ``recent_event_summaries``
+    ordering so consumers can treat both fields identically.
+
+    Every skipped record is counted by kind: a caller must be able to tell
+    "no eligible input existed" from "input existed and the filter held it
+    back" without re-running anything.  An unclassified kind is excluded
+    (fail-closed) and counted, never injected.
+    """
+    selected: list[dict[str, str]] = []
+    excluded: dict[str, int] = {}
+    scanned = 0
+    truncated = False
+    for evt in reversed(events):
+        if len(selected) >= RECALL_SUMMARY_LIMIT:
+            break
+        if scanned >= RECALL_SUMMARY_SCAN_LIMIT:
+            truncated = True
+            break
+        scanned += 1
+        kind = str(evt.get("kind", ""))
+        summary = str(evt.get("summary", ""))
+        if kind not in RECALL_MEANINGFUL_EVENT_KINDS or not summary.strip():
+            bucket = kind or "unknown"
+            if not summary.strip() and kind in RECALL_MEANINGFUL_EVENT_KINDS:
+                bucket = f"{bucket}:empty_summary"
+            excluded[bucket] = excluded.get(bucket, 0) + 1
+            continue
+        selected.append(
+            {
+                "id": str(evt.get("id", "")),
+                "ts": str(evt.get("ts", "")),
+                "kind": kind,
+                "summary": summary,
+            }
+        )
+    selected.reverse()
+    return selected, scanned, excluded, truncated
+
+
 def build_event_stats(events: list[dict[str, object]]) -> EventStats:
     """Build EventStats from a list of event records (assumed sorted by ts).
 
@@ -245,6 +352,12 @@ def build_event_stats(events: list[dict[str, object]]) -> EventStats:
         }
         for evt in events[-5:]
     ]
+    (
+        stats.recall_event_summaries,
+        stats.recall_summary_scanned_count,
+        stats.recall_summary_excluded_kind_counts,
+        stats.recall_summary_scan_truncated,
+    ) = _build_recall_event_summaries(events)
     stats.continuity_selector = _build_continuity_selector(events)
     return stats
 
@@ -309,6 +422,17 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
                     "kind": str(item.get("kind", "")),
                     "summary": str(item.get("summary", "")),
                 })
+    recall_summaries: list[dict[str, str]] = []
+    raw_recall = data.get("recall_event_summaries")
+    if isinstance(raw_recall, list):
+        for item in raw_recall:
+            if isinstance(item, dict):
+                recall_summaries.append({
+                    "id": str(item.get("id", "")),
+                    "ts": str(item.get("ts", "")),
+                    "kind": str(item.get("kind", "")),
+                    "summary": str(item.get("summary", "")),
+                })
     continuity_selector: dict[str, object] = {}
     raw_cs = data.get("continuity_selector")
     if isinstance(raw_cs, dict):
@@ -331,4 +455,10 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
         updated_at=str(updated_at),
         recent_event_summaries=recent_summaries,
         continuity_selector=continuity_selector,
+        recall_event_summaries=recall_summaries,
+        recall_summary_scanned_count=int(data.get("recall_summary_scanned_count", 0) or 0),
+        recall_summary_excluded_kind_counts=dict(
+            data.get("recall_summary_excluded_kind_counts") or {}
+        ),
+        recall_summary_scan_truncated=bool(data.get("recall_summary_scan_truncated", False)),
     ), freshness

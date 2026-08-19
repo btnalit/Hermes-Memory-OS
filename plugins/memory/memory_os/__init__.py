@@ -35,10 +35,17 @@ from .owner_actions import (
     owner_review_surface_report,
     parse_owner_review_reply,
 )
+from .jsonl_io import compact_jsonl_tail
 from .prefetch import build_prefetch, set_fast_path_keywords
 from .recall_facade import RetrieverFacade
 from .recall_types import RecallType
-from .roots import MemoryOSRoots
+from .roots import (
+    LAST_SESSION_ANCHOR_COMPACT_MIN_BYTES,
+    LAST_SESSION_ANCHOR_KEEP_RECORDS,
+    MemoryOSRoots,
+    last_session_anchor_archive_path,
+    last_session_anchor_path,
+)
 from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
 from .session_approval import build_session_review_block, build_session_feedback_block
 from .status_tool_contract import (
@@ -915,12 +922,31 @@ class MemoryOSProvider(MemoryProvider):
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
+        # Size-gated compaction.  The ledger is append-only and was never
+        # bounded: production grew it to 316 KB / 378 records at ~4.8 KB/day
+        # with no compaction anywhere.  The readers are now tail-bounded, so
+        # this is about the file itself, not read cost — and it runs at
+        # session end (a few times a day), never on the per-turn path.
+        # Above the gate, aged-out records are archived before being dropped.
+        compaction = compact_jsonl_tail(
+            path,
+            keep_records=LAST_SESSION_ANCHOR_KEEP_RECORDS,
+            min_bytes=LAST_SESSION_ANCHOR_COMPACT_MIN_BYTES,
+            archive_path=last_session_anchor_archive_path(self._roots),
+            component="provider",
+            operation="last_session_anchor_compaction",
+        )
         self._audit(
             "last_session_anchor_recorded",
             "ok",
             {
                 "session_id": record["session_id"],
                 "ended_at": record["ended_at"],
+                # Recorded on every write, including the common no-op: a
+                # compaction that did nothing must say which nothing it was.
+                "compaction_reason": compaction["reason"],
+                "compaction_records_archived": compaction["records_archived"],
+                "compaction_suppressed_error_count": len(compaction["error_records"]),
             },
         )
 
@@ -2521,7 +2547,10 @@ def _active_task_anchor_record(
 
 
 def _last_session_anchor_path(roots: MemoryOSRoots) -> Any:
-    return roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+    # Delegates to the shared accessor: the readers of this ledger live in
+    # four other modules, and a path literal repeated per call site is how a
+    # writer and its readers drift apart without an error record.
+    return last_session_anchor_path(roots)
 
 
 def _last_session_anchor_record(

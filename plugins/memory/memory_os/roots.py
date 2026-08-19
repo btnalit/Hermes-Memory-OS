@@ -170,3 +170,37 @@ class MemoryOSRoots:
             identity_sources=identity_sources,
             external_state_roots=external_roots,
         )
+
+
+# ── Shared ledger addressing ─────────────────────────────────────────
+# Path helpers live here, next to root resolution, so a file that several
+# modules read is addressed through one accessor instead of a string literal
+# repeated at each call site.  A literal repeated per reader is how a
+# producer and its consumers drift onto different directories without any
+# error record: exists() simply returns False forever.
+
+# Bounded tail window for the append-only last-session anchor ledger.  The
+# hot-path readers need at most three records (prefetch needs one); 50 leaves
+# a wide margin for out-of-order appends while keeping the read cost flat as
+# the ledger grows.
+LAST_SESSION_ANCHOR_TAIL_RECORDS = 50
+
+# Size gate for compacting the ledger at session end.  Kept well above the
+# retained-record footprint so compaction is rare (roughly once a quarter at
+# the observed ~4.8 KB/day) rather than a per-session rewrite.
+LAST_SESSION_ANCHOR_COMPACT_MIN_BYTES = 1_048_576
+
+# Records retained by compaction.  Must stay >= the widest reader window
+# (state_overlay reads up to 500) so compaction can never change what any
+# reader sees — it only bounds what nobody reads.
+LAST_SESSION_ANCHOR_KEEP_RECORDS = 500
+
+
+def last_session_anchor_path(roots: "MemoryOSRoots") -> Path:
+    """Return the path to the append-only last-session anchor ledger."""
+    return roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+
+
+def last_session_anchor_archive_path(roots: "MemoryOSRoots") -> Path:
+    """Return the path holding anchors aged out of the live ledger."""
+    return roots.memory_os_root / "system" / "last_session_anchor.archive.jsonl"

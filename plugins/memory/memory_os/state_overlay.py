@@ -13,6 +13,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .event_stats import read_event_stats
+from .jsonl_io import read_jsonl_tail
+from .roots import last_session_anchor_path
 from .state_overlay_schema import (
     StateOverlay,
     OverlayEntry,
@@ -23,6 +26,22 @@ from .timeutil import ensure_utc_aware
 
 if TYPE_CHECKING:
     from .roots import MemoryOSRoots
+
+
+# Closed reason set for the event_stats source's contribution to
+# recent_events.  Pinned as a constant (and asserted by a guard test) for the
+# same reason COMPACT_JSONL_TAIL_REASONS is: a reason vocabulary that is
+# closed only "by construction" is one edit away from growing an unlisted
+# value, and an unlisted reason is exactly the silence this field exists to
+# remove.
+EVENT_STATS_HEALTH_REASONS: frozenset[str] = frozenset({
+    "produced",
+    "no_events",
+    "no_recall_meaningful_events",
+    "cache_predates_recall_field",
+    "cache_missing",
+    "cache_corrupt",
+})
 
 
 _NOISE_LINE_MARKERS = (
@@ -150,7 +169,7 @@ def build_state_overlay(
         overlay.active_projects.status = "ok"
 
     # ── open_threads + recent_events: from last session anchors ────
-    lsa_path = roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+    lsa_path = last_session_anchor_path(roots)
     last_sessions = _read_last_session_anchors(
         lsa_path, limit=max_recent_sessions, exclude_session_id=session_id,
     )
@@ -205,28 +224,58 @@ def build_state_overlay(
         overlay.open_threads.status = "ok"
 
     # ── recent_events: also from event_stats summaries ─────────────
-    event_stats_path = roots.memory_os_root / "system" / "event_stats.json"
-    if event_stats_path.exists():
-        try:
-            es = json.loads(event_stats_path.read_text(encoding="utf-8"))
-            summaries = es.get("recent_event_summaries", [])
-            if isinstance(summaries, list):
-                added = 0
-                for s in summaries:
-                    if not isinstance(s, dict):
-                        continue
-                    summary = _clean_overlay_text(s.get("summary", ""))
-                    if summary and added < max_recent_events:
-                        overlay.recent_events.data.append(
-                            OverlayEntry(
-                                text=summary[:200],
-                                source=f"event_stats:{s.get('kind', 'event')}",
-                                source_kind="event",
-                            )
-                        )
-                        added += 1
-        except (json.JSONDecodeError, OSError):
-            pass  # fail-open
+    #
+    # Addressed through read_event_stats, which owns the file's location.
+    # This branch previously built its own path literal pointing at
+    # system/event_stats.json while the producer wrote runtime/, so exists()
+    # was False on every run this deployment has ever had: recent_events has
+    # been running on its last_session source alone (1 entry against a cap of
+    # 5) while reporting status "ok".
+    #
+    # The field read is recall_event_summaries — kind-filtered — because the
+    # raw tail is machine bookkeeping on production and would put cron-mirror
+    # and governance rows into owner-facing context.
+    stats, freshness = read_event_stats(roots)
+    event_stats_health: dict[str, Any] = {
+        "freshness": freshness,
+        "excluded_kind_counts": {},
+        "injected_count": 0,
+    }
+    if stats is None:
+        # A lane that contributes nothing must say which kind of nothing it
+        # is: an absent cache and an empty one are different failures and
+        # were previously indistinguishable from the artifact alone.
+        event_stats_health["reason"] = (
+            "cache_corrupt" if freshness == "corrupt" else "cache_missing"
+        )
+    else:
+        event_stats_health["excluded_kind_counts"] = dict(
+            stats.recall_summary_excluded_kind_counts
+        )
+        added = 0
+        for s in stats.recall_event_summaries:
+            summary = _clean_overlay_text(s.get("summary", ""))
+            if summary and added < max_recent_events:
+                overlay.recent_events.data.append(
+                    OverlayEntry(
+                        text=summary[:200],
+                        source=f"event_stats:{s.get('kind', 'event')}",
+                        source_kind="event",
+                    )
+                )
+                added += 1
+        event_stats_health["injected_count"] = added
+        if added:
+            event_stats_health["reason"] = "produced"
+        elif stats.total_event_count <= 0:
+            event_stats_health["reason"] = "no_events"
+        elif stats.recall_summary_scanned_count <= 0:
+            # Events exist but the producer recorded no scan: the cache on
+            # disk was written before recall_event_summaries existed and will
+            # self-heal on the next event_stats_refresh run.
+            event_stats_health["reason"] = "cache_predates_recall_field"
+        else:
+            event_stats_health["reason"] = "no_recall_meaningful_events"
 
     if overlay.recent_events.data:
         overlay.recent_events.status = "ok"
@@ -249,7 +298,13 @@ def build_state_overlay(
     if overlay.owner_preferences.data:
         overlay.owner_preferences.status = "ok"
 
-    return overlay.to_dict()
+    result = overlay.to_dict()
+    # Carried outside the section schema: this is a source-health diagnostic,
+    # not overlay content.  Section consumers enumerate OVERLAY_SECTION_FIELDS
+    # and ignore it; the quality report reads it so a reader can tell a
+    # starved source from an idle one without re-running anything.
+    result["event_stats_health"] = event_stats_health
+    return result
 
 
 def write_state_overlay(roots: "MemoryOSRoots", overlay: dict[str, Any]) -> Path:
@@ -379,6 +434,11 @@ def _write_overlay_quality(out_dir: Path, overlay: dict[str, Any]) -> None:
         "source_refs_count": source_refs_count,
         "private_body_printed": False,
         "stale_sections": stale_sections,
+        # Why the event_stats source contributed what it did.  A section can
+        # report status "ok" while one of its two sources is silently dead —
+        # that is exactly what happened here for the deployment's whole life —
+        # so the per-source reason is recorded, not inferred from the count.
+        "event_stats_health": dict(overlay.get("event_stats_health") or {}),
     }
     try:
         _atomic_write_json(out_dir / "quality.json", quality)
@@ -425,28 +485,28 @@ def _read_last_session_anchors(
     When *exclude_session_id* is non-empty, anchors belonging to that
     session are skipped to avoid duplicating foreground task context.
 
-    *max_lines* caps the number of lines read from the file to avoid
+    *max_lines* caps the number of records read from the file to avoid
     unbounded I/O on long-running deployments.  Since the file is
     append-only, the most recent entries (which we care about) are at
     the end; 500 lines covers months of normal session cadence.
+
+    The cap is applied by seeking to the tail, not by reading the whole
+    file and slicing it: the previous ``read_text()[-max_lines:]`` bounded
+    the parse but left the I/O growing with the file forever, which is the
+    same unbounded-read defect the hot-path readers had.
 
     Fail-open: missing file, parse errors → empty list.
     """
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
-    all_lines = path.read_text(encoding="utf-8").splitlines()
-    # Only process the tail — the file is append-only so recent
-    # sessions (which we sort for) are at the end.
-    for line in all_lines[-max_lines:]:
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
+    tail = read_jsonl_tail(
+        path,
+        max_records=max_lines,
+        component="state_overlay",
+        operation="read_last_session_anchors",
+    )
+    for record in tail.records:
         if not record.get("foreground_summary"):
             continue
         if exclude_session_id and str(record.get("session_id", "")) == exclude_session_id:

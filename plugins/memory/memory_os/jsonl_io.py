@@ -170,6 +170,281 @@ def read_jsonl_result(
     return JsonlReadResult(records=records, error_records=error_records)
 
 
+def read_jsonl_tail(
+    path: str | Path,
+    *,
+    max_records: int,
+    max_bytes: int = 1_048_576,
+    component: str = "memory_os.jsonl_io",
+    operation: str = "read_jsonl_tail",
+) -> JsonlReadResult:
+    """Read the last *max_records* JSON objects from an append-only JSONL file.
+
+    Seeks backwards from EOF in chunks instead of reading the whole file, so
+    cost is bounded by the tail actually needed rather than by file size.
+    This is the reader for append-only ledgers consulted on the per-turn hot
+    path, where a full ``read_text()`` grows without bound as the file does.
+
+    *max_records* is required — a reader that forgets to bound itself is the
+    defect this helper exists to remove, so there is no "unbounded" default.
+    *max_bytes* caps how far back the scan walks; when the cap is hit before
+    *max_records* records are found, the records found so far are returned
+    together with a ``jsonl_tail_scan_truncated`` error record rather than a
+    silently short result.
+
+    Records are returned oldest-first, matching ``read_jsonl`` ordering.
+    Malformed lines produce the same bounded ``error_record`` values as
+    ``read_jsonl_result``; ``line_number`` is omitted because a tail scan does
+    not know absolute line numbers.
+    """
+    target = Path(path)
+    if max_records <= 0:
+        return JsonlReadResult(records=[], error_records=[])
+    if not target.exists():
+        return JsonlReadResult(records=[], error_records=[])
+
+    error_records: list[dict[str, Any]] = []
+    chunks: list[bytes] = []
+    reached_start = False
+    scanned_bytes = 0
+    try:
+        with target.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunk_size = 65536
+            newline_count = 0
+            while position > 0 and scanned_bytes < max_bytes:
+                read_size = min(chunk_size, position, max_bytes - scanned_bytes)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.insert(0, chunk)
+                scanned_bytes += read_size
+                # Counted per chunk and accumulated: a newline never straddles
+                # a chunk boundary, so this is exact, and it avoids re-joining
+                # the whole buffer on every iteration.
+                # One extra newline beyond max_records so the first (possibly
+                # partial) line can be discarded without losing a record.
+                newline_count += chunk.count(b"\n")
+                if newline_count > max_records:
+                    break
+            reached_start = position <= 0
+    except OSError as exc:
+        return JsonlReadResult(
+            records=[],
+            error_records=[
+                build_error_record(
+                    component=component,
+                    operation=operation,
+                    error_code="jsonl_read_error",
+                    severity="error",
+                    recoverable=True,
+                    path=target,
+                    details={"error_type": type(exc).__name__},
+                )
+            ],
+        )
+
+    raw_lines = b"".join(chunks).splitlines()
+    if raw_lines and not reached_start:
+        # The backwards scan starts mid-file, so the first line is almost
+        # certainly truncated.  Dropping it is correct, not lossy: the scan
+        # only stops early once it has already seen more newlines than the
+        # caller asked for records.
+        raw_lines = raw_lines[1:]
+
+    records: list[dict[str, Any]] = []
+    for index, raw_line in enumerate(raw_lines):
+        try:
+            line = raw_line.decode("utf-8-sig" if reached_start and index == 0 else "utf-8")
+        except UnicodeDecodeError:
+            error_records.append(
+                build_error_record(
+                    component=component,
+                    operation=operation,
+                    error_code="jsonl_invalid_utf8",
+                    severity="warning",
+                    recoverable=True,
+                    path=target,
+                )
+            )
+            continue
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            error_records.append(
+                build_error_record(
+                    component=component,
+                    operation=operation,
+                    error_code="jsonl_malformed_line",
+                    severity="warning",
+                    recoverable=True,
+                    path=target,
+                )
+            )
+            continue
+        if not isinstance(parsed, dict):
+            error_records.append(
+                build_error_record(
+                    component=component,
+                    operation=operation,
+                    error_code="jsonl_non_object_line",
+                    severity="warning",
+                    recoverable=True,
+                    path=target,
+                )
+            )
+            continue
+        records.append(parsed)
+
+    if not reached_start and scanned_bytes >= max_bytes and len(records) < max_records:
+        error_records.append(
+            build_error_record(
+                component=component,
+                operation=operation,
+                error_code="jsonl_tail_scan_truncated",
+                severity="warning",
+                recoverable=True,
+                path=target,
+                details={"max_bytes": int(max_bytes), "records_found": len(records)},
+            )
+        )
+
+    return JsonlReadResult(records=records[-max_records:], error_records=error_records)
+
+
+COMPACT_JSONL_TAIL_REASONS: frozenset[str] = frozenset({
+    "no_file",
+    "below_threshold",
+    "nothing_to_drop",
+    "compacted",
+    "malformed_lines_present",
+    "read_failed",
+    "write_failed",
+})
+
+
+def compact_jsonl_tail(
+    path: str | Path,
+    *,
+    keep_records: int,
+    min_bytes: int,
+    archive_path: str | Path | None = None,
+    component: str = "memory_os.jsonl_io",
+    operation: str = "compact_jsonl_tail",
+) -> dict[str, Any]:
+    """Size-gate an append-only JSONL ledger to its newest *keep_records*.
+
+    Does nothing until the file exceeds *min_bytes*, so the common case costs
+    one ``stat()``.  Above the gate, records beyond the newest *keep_records*
+    are appended to *archive_path* first and only then dropped from the live
+    file, so a crash mid-compaction can duplicate archive rows but can never
+    lose a record.
+
+    Returns a result dict whose ``reason`` is always one of
+    ``COMPACT_JSONL_TAIL_REASONS``.  A compaction that does nothing must say
+    which nothing it is — an idle ledger and a ledger whose rewrite failed
+    are different states and must not leave identical evidence.
+    """
+    target = Path(path)
+    result: dict[str, Any] = {
+        "reason": "no_file",
+        "path": str(target),
+        "bytes_before": 0,
+        "records_before": 0,
+        "records_kept": 0,
+        "records_archived": 0,
+        "error_records": [],
+    }
+    if not target.exists():
+        return result
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        result["reason"] = "read_failed"
+        result["error_records"] = [
+            build_error_record(
+                component=component,
+                operation=operation,
+                error_code="jsonl_compact_stat_failed",
+                severity="warning",
+                recoverable=True,
+                path=target,
+                details={"error_type": type(exc).__name__},
+            )
+        ]
+        return result
+    result["bytes_before"] = int(size)
+    if size < min_bytes:
+        result["reason"] = "below_threshold"
+        return result
+
+    try:
+        with locked_jsonl_file(target) as locked_target:
+            read_result = read_jsonl_result(
+                locked_target, component=component, operation=operation
+            )
+            records = read_result.records
+            result["error_records"] = list(read_result.error_records)
+            result["records_before"] = len(records)
+            if read_result.error_records:
+                # A rewrite keeps only what parsed, so compacting a file with
+                # malformed lines would delete exactly the content nobody can
+                # reconstruct.  Refuse and say so: an unbounded ledger is a
+                # far smaller problem than a silently truncated one.
+                result["reason"] = "malformed_lines_present"
+                result["records_kept"] = len(records)
+                return result
+            if len(records) <= keep_records:
+                result["reason"] = "nothing_to_drop"
+                result["records_kept"] = len(records)
+                return result
+            dropped = records[:-keep_records]
+            kept = records[-keep_records:]
+            # Archive before dropping: a crash between the two duplicates
+            # archive rows (harmless — the archive is debris, not canonical)
+            # but can never lose a record from the live ledger.
+            if archive_path is not None:
+                archive_target = Path(archive_path)
+                archive_target.parent.mkdir(parents=True, exist_ok=True)
+                blob = "\n".join(
+                    json.dumps(r, ensure_ascii=False, sort_keys=True) for r in dropped
+                ) + "\n"
+                with archive_target.open("a", encoding="utf-8") as handle:
+                    handle.write(blob)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            tmp_path = locked_target.with_name(
+                f".{locked_target.name}.{uuid4().hex}.tmp"
+            )
+            tmp_path.write_text(
+                "\n".join(
+                    json.dumps(r, ensure_ascii=False, sort_keys=True) for r in kept
+                ) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, locked_target)
+            result["reason"] = "compacted"
+            result["records_kept"] = len(kept)
+            result["records_archived"] = len(dropped)
+    except OSError as exc:
+        result["reason"] = "write_failed"
+        result["error_records"] = list(result["error_records"]) + [
+            build_error_record(
+                component=component,
+                operation=operation,
+                error_code="jsonl_compact_write_failed",
+                severity="error",
+                recoverable=True,
+                path=target,
+                details={"error_type": type(exc).__name__},
+            )
+        ]
+    return result
+
+
 def latest_jsonl_record(path: str | Path) -> dict[str, Any] | None:
     records = read_jsonl(path)
     return records[-1] if records else None
