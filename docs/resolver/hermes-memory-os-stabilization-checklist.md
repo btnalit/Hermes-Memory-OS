@@ -7273,3 +7273,19 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
   破坏了 `build_status_report` 的 O(1) 路径，由全量套件抓出并改为惰性构建。
   +17 测试，全量 3622 passed/13 skipped（唯一 FAIL 为已知 flaky 并发用例，
   单跑 PASS），四门全绿。
+
+- `8ad1baf 部署 + 13dad46`：DC 部署与生产验证 + DD — PR #71 在 3.200 双 profile
+  落地并取得真因实证（main 真实语料：`store.read_events()` **242→1**、
+  `_candidate_review_items` **59.3s→0.28s**、`doctor` **46s→10s** 且输出同构；
+  monitor PASS **83→99**、WARN **14→7**，`doctor_not_ok` 与
+  `shell_alias_no_env_failed` 双双消失，doctor 的 findings 首次真正进入报告）。
+  验收中发现 DD：`_run_probe` 走 `ssh host "python3 -"` 不转发环境、生成脚本
+  从不写 `os.environ["HERMES_HOME"]`，致 8 处裸 `hermes ...` 调用（含驱动
+  index 健康的 `status` 与驱动 doctor 判定的 `doctor`）全部落回默认 home
+  ——sannai 实为 60 候选/53k audit，却被报成 main 的 240/99k。本地 cron 通道
+  自带该变量故夜间产物无恙，**失明只在远端 SSH 路径**。修法为脚本顶部一次性
+  导出（新增裸调用默认正确），并把 `shell_alias_no_env` 的"无 env"契约显式化
+  （此前靠环境恰好未定义，SSH 下侥幸成立）。此前所有 sannai monitor 数字
+  （含 PASS 90/94）均为 Python 段=sannai、CLI 段=main 的混合值，不回改历史小节。
+  +3 测试（2 个反事实成立、1 个钉既有正确行为如实记录），全量
+  **3626 passed / 13 skipped / 0 failed**，五门 + `git diff --check` 全绿。
