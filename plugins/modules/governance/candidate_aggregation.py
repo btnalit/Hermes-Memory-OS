@@ -711,11 +711,17 @@ def _skip_tainted_external_evidence(
     cluster_size: int = 0,
     envelope_id: str = "",
     now: datetime | None = None,
+    events_cache: Any = None,
 ) -> bool:
-    """Fail-closed auto path guard: tainted candidates need explicit owner ack."""
+    """Fail-closed auto path guard: tainted candidates need explicit owner ack.
+
+    *events_cache* is the per-run lookup built by the caller. This guard runs in
+    three per-candidate loops of one lane run, and without a shared cache each
+    call re-reads and re-parses the whole event corpus.
+    """
     from plugins.memory.memory_os.provenance import candidate_external_ref, is_tainted
 
-    if not is_tainted(candidate, store=store):
+    if not is_tainted(candidate, store=store, events_cache=events_cache):
         return False
     append_candidate_triage(
         store,
@@ -735,7 +741,7 @@ def _skip_tainted_external_evidence(
         target=candidate.candidate_id,
         details={
             "reason": "external_evidence_tainted_blocked",
-            "external_ref": candidate_external_ref(candidate, store=store) or "",
+            "external_ref": candidate_external_ref(candidate, store=store, events_cache=events_cache) or "",
             "cluster_key": cluster_key,
             "cluster_size": cluster_size,
         },
@@ -786,6 +792,16 @@ def _cluster_and_promote(
         if c.candidate_id not in processed_ids
         and c.bridge_state in ("", "inner_drive_candidate")
     ]
+    # One corpus read for the whole run: _skip_tainted_external_evidence runs in
+    # three per-candidate loops below, and store.read_events() re-reads and
+    # re-parses every event file on each call (same defect family as the owner
+    # review report build). Built here, the cache lives exactly one lane run.
+    #
+    # Guarded on there being work: all three loops derive from
+    # candidates_for_promote, so an idle tick must not pay a full corpus read
+    # just to build a cache nothing will consult.
+    from plugins.memory.memory_os.provenance import load_event_cache
+    events_cache = load_event_cache(store) if candidates_for_promote else None
 
     # Build cluster map: cluster_key -> list of candidates
     clusters: dict[str, list[CrystallizedCandidate]] = {}
@@ -841,6 +857,7 @@ def _cluster_and_promote(
                 cluster_size=len(members),
                 envelope_id=envelope_id,
                 now=_now,
+                events_cache=events_cache,
             ):
                 continue
             # P2: Index-based near-duplicate dedup — bump+renew existing provisional
@@ -1019,6 +1036,7 @@ def _cluster_and_promote(
                 cluster_size=1,
                 envelope_id=envelope_id,
                 now=_now,
+                events_cache=events_cache,
             ):
                 continue
 
@@ -1163,6 +1181,7 @@ def _cluster_and_promote(
             c, store, processed_ids,
             cluster_key="", cluster_size=1,
             envelope_id=envelope_id, now=_now,
+            events_cache=events_cache,
         ):
             continue
 

@@ -4869,12 +4869,32 @@ def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> l
 
 
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
-    from .provenance import candidate_external_ref, is_tainted
+    from .provenance import candidate_external_ref, is_tainted, load_event_cache
 
     items: list[dict[str, Any]] = []
+    # Both predicates below resolve source_event_ids against the full event
+    # corpus, and store.read_events() re-reads and re-parses every event file on
+    # each call. Built per candidate that is O(candidates x events): measured on
+    # the production main profile at 240 corpus reads / 1.87M json.loads / 58s
+    # of doctor's 66s. The cache is per report build, never module-level — this
+    # feeds a write-boundary predicate (see EventLookup).
+    #
+    # Built lazily, and that is load-bearing rather than tidy: build_status_report
+    # reaches here on its O(1) path, where a profile with no pending candidates
+    # must not touch the event corpus at all
+    # (test_build_status_report_uses_O1_index_health pins zero reads). Hoisting
+    # this above the loop costs one full corpus read on exactly the path that
+    # exists to avoid one.
+    events_cache = None
     for effective in read_effective_candidates(store):
+        if events_cache is None:
+            events_cache = load_event_cache(store)
         candidate = effective.candidate
-        external_ref = candidate_external_ref(candidate, store=store) if is_tainted(candidate, store=store) else None
+        external_ref = (
+            candidate_external_ref(candidate, store=store, events_cache=events_cache)
+            if is_tainted(candidate, store=store, events_cache=events_cache)
+            else None
+        )
         external_review_eligible = bool(external_ref)
         if not effective.owner_review_eligible and not external_review_eligible:
             continue

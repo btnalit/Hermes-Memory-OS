@@ -97,6 +97,27 @@ FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS = 300
 # budget from a caller-declared timeout (see collect_snapshot).
 FULL_MONITOR_PROBE_TIMEOUT_MARGIN_SECONDS = 30
 FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS = 120
+# Exit code the remote probe's run() returns when a single command exceeded its
+# per-command budget, and the marker it appends to that command's output.
+PROBE_COMMAND_TIMEOUT_EXIT_CODE = 124
+PROBE_COMMAND_TIMEOUT_MARKER = "command_timeout_seconds="
+
+
+def _probe_command_timed_out(section: Any) -> bool:
+    """True when a probe section is empty because its command ran out of budget.
+
+    A section that could not be collected and a section reporting a real problem
+    must not share an outcome -- that conflation is what let a 45s doctor read as
+    an unhealthy doctor. Both signals are checked because ``_code`` is the
+    authoritative one while the marker survives in text-shaped payloads.
+    """
+    if not isinstance(section, dict):
+        return False
+    if section.get("probe_exit_code") == PROBE_COMMAND_TIMEOUT_EXIT_CODE:
+        return True
+    return PROBE_COMMAND_TIMEOUT_MARKER in str(section.get("probe_error") or "")
+
+
 MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "hindsight_provider_stats": {
         "operation_count",
@@ -1898,6 +1919,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     doctor = doctor_raw if isinstance(doctor_raw, dict) else {}
     if doctor.get("status") == "ok":
         passed.append({"code": "doctor_ok"})
+    elif _probe_command_timed_out(doctor):
+        # "the probe ran out of budget" is not "doctor reported problems".
+        # Both used to land on doctor_not_ok with status=None/exit_code=None,
+        # so a merely slow doctor read as an unhealthy one -- production FAILed
+        # nightly on this while `hermes memory-os-agent-os doctor` returned
+        # exit_code 0 with zero findings. Still FAIL-class: losing the check is
+        # a real loss of visibility. It just has to say what actually happened.
+        fail.append({"code": "doctor_probe_timeout", "value": doctor})
     else:
         fail.append({"code": "doctor_not_ok", "value": doctor})
     for code, severity in doctor.get("findings", []) or []:
@@ -9299,6 +9328,13 @@ print(json.dumps({
     "status": doctor.get("status") if isinstance(doctor, dict) else None,
     "exit_code": doctor.get("exit_code") if isinstance(doctor, dict) else None,
     "findings": [(x.get("code"), x.get("severity")) for x in doctor.get("findings", [])] if isinstance(doctor, dict) else None,
+    # Carry *why* the section is empty. load_json_cmd() returns _error/_code
+    # when the command could not be run to completion, and dropping them here
+    # left a timed-out probe indistinguishable from a doctor that ran and
+    # reported problems -- both arrived as status=None. See the classifier's
+    # doctor_probe_timeout branch.
+    "probe_error": doctor.get("_error") if isinstance(doctor, dict) else None,
+    "probe_exit_code": doctor.get("_code") if isinstance(doctor, dict) else None,
   },
   "status_tool_contract": contract.get("validation") if isinstance(contract, dict) else contract,
   "shell_alias_no_env": shell_alias_no_env(),
