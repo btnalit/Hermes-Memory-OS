@@ -7028,3 +7028,21 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   其中批 B 第一版夹具"仅差标点"是空洞的（标点在旧正则本就是分隔符）——已换语气词变体并记入教训。
   部署须重启 gateway（provider 侧进程内缓存），纪元重置使 451/96 条旧观测 invalidated 为预期。
   全量 3559→3583 passed（+24）/13 skipped，四门全绿。
+- `8bf4877`：DB — owner 指出的两条缺陷经生产实测**均成立且更宽**，并牵出一整族。
+  ① `event_stats.json` 生产者写 `runtime/`、消费者硬编码 `system/`（**3 处**非 1 处）；3.200 双
+  profile 与回溯到 07-11 的 5 份备份**都不存在** `system/` 副本 → 自出生即死。活受害者是
+  **overlay→prefetch 而非 temporal**：`recent_events` 恒 1 条（上限 5）却报 `status=ok`；
+  temporal 为 shadow，成本每轮照付、收益为零。两处旧夹具把文件写到**消费者的错路径**，
+  测试与 bug 自洽通过——已改走真实生产者。② 只修路径会**变差**：生产最近窗口 97.7% 是机器
+  记账（回溯 214 条才凑满 5 条真实对话，163 条是 cron 镜像），故同批加**生产者侧 fail-closed
+  允许表**+逐 kind 排除计数；极性与既有 fail-open 记账表相反且写明缘由，守卫测试绑定两表。
+  ③ 锚点账本全读的活受害者是 **prefetch 非 temporal**（生产实测 6.41 ms/轮，+4.8 KB/天）；
+  新增 `jsonl_io.read_jsonl_tail`（seek 尾读，`max_records` **无默认值**）接三处读者，会话结束
+  加尺寸门压缩（先归档后丢弃；遇畸形行拒绝压缩）。④ **Rule-5 扫描出同族共 4 例**，另 3 例
+  同样生产坐实：`session_mirror_state.json`（capability 在每台主机永远报缺席）、
+  `write_audit.jsonl`（`system/` 下建起平行月度审计轨，8 月片 22 KB 仍在写，monitor/dashboard
+  全读不到）、`candidates.jsonl`（探针目录错）——新增全项目守卫"同一数据文件名不得出现在两个
+  目录"。顺带断掉 `event_stats→prefetch→state_overlay` 导入环（常量下沉
+  `continuity_constants.py`，`cycle_count` 1→0）。7 项反事实实测 revert→FAIL→restore→PASS。
+  **仅仓库验证**：prefetch/temporal/state_overlay 属 provider 侧，生效需重启 gateway（owner 步骤）。
+  全量 3583→3606 passed（+23）/13 skipped，四门全绿。
