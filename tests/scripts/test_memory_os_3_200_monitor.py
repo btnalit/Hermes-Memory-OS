@@ -9012,3 +9012,88 @@ def test_recall_shadow_empty_window_still_reports_no_sample():
         if item["code"] == "recall_arbitration_shadow_window"
     ]
     assert entries and entries[0]["value"]["sample_state"] == "healthy_no_sample"
+
+
+# -- DC: probe budget exhausted is not "doctor reported problems" ------------
+
+
+def test_doctor_probe_timeout_is_classified_apart_from_doctor_not_ok():
+    """Counterfactual for the misattribution fix.
+
+    A doctor command killed at the probe's per-command budget arrives with
+    status=None/exit_code=None -- byte-identical to a doctor that ran and
+    reported nothing. Before the fix both produced ``doctor_not_ok``, so the
+    production host FAILed nightly while `hermes memory-os-agent-os doctor`
+    itself returned exit_code 0 with zero findings (measured: 45s against a 20s
+    cap). The outcome must name what actually happened.
+    """
+    snapshot = _healthy_snapshot()
+    snapshot["doctor"] = {
+        "status": None,
+        "exit_code": None,
+        "findings": [],
+        "probe_error": "command_timeout_seconds=20",
+        "probe_exit_code": 124,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    fail_codes = [item["code"] for item in classification["fail"]]
+    assert "doctor_probe_timeout" in fail_codes
+    assert "doctor_not_ok" not in fail_codes
+    assert "doctor_ok" not in [item["code"] for item in classification["pass"]]
+
+
+def test_doctor_probe_timeout_detected_from_marker_without_exit_code():
+    """The text marker alone is enough; _code is not always carried."""
+    snapshot = _healthy_snapshot()
+    snapshot["doctor"] = {
+        "status": None,
+        "exit_code": None,
+        "findings": [],
+        "probe_error": "some output\ncommand_timeout_seconds=20",
+        "probe_exit_code": None,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert "doctor_probe_timeout" in [item["code"] for item in classification["fail"]]
+
+
+def test_genuinely_unhealthy_doctor_still_reports_doctor_not_ok():
+    """The new branch must not swallow real doctor failures."""
+    snapshot = _healthy_snapshot()
+    snapshot["doctor"] = {
+        "status": "error",
+        "exit_code": 1,
+        "findings": [],
+        "probe_error": None,
+        "probe_exit_code": None,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    fail_codes = [item["code"] for item in classification["fail"]]
+    assert "doctor_not_ok" in fail_codes
+    assert "doctor_probe_timeout" not in fail_codes
+
+
+def test_probe_command_timed_out_predicate_is_conservative():
+    """Only a real timeout signal counts; absence must never imply timeout."""
+    assert monitor._probe_command_timed_out({"probe_exit_code": 124}) is True
+    assert monitor._probe_command_timed_out({"probe_error": "command_timeout_seconds=20"}) is True
+    assert monitor._probe_command_timed_out({"probe_exit_code": 1}) is False
+    assert monitor._probe_command_timed_out({"probe_error": "boom"}) is False
+    assert monitor._probe_command_timed_out({}) is False
+    assert monitor._probe_command_timed_out(None) is False
+
+
+def test_remote_probe_doctor_section_carries_probe_failure_fields():
+    """The probe must emit the fields the classifier reads.
+
+    Guards the producer/consumer pair: the classifier branch is unreachable if
+    the remote probe stops carrying _error/_code into the doctor section.
+    """
+    script = monitor._remote_probe_script("/root/.hermes")
+    assert '"probe_error": doctor.get("_error")' in script
+    assert '"probe_exit_code": doctor.get("_code")' in script

@@ -6975,6 +6975,142 @@ gating (required=False)"是**假的**：`_require_cognitive_loop_timer_active`
 12 个反事实测试对 origin/main 预修复实现实测 revert→**12 FAIL**（每个都
 以预期原因失败）→restore→PASS。全量 **3408 passed / 13 skipped / 0
 failed**（11:46），四静态门 + `git diff --check` 全绿。
+### DB 部署与生产验证（2026-08-19，main+sannai 双 profile，`9824db2`）
+
+DB 本身标注"仅仓库验证"——prefetch/temporal/state_overlay 属 provider 侧，
+生效需重启 gateway。本节补上这一步并取得生产实证。
+
+- `/opt/Hermes-Memory-OS` ff `263c623 → 9824db2`（PR #70 merge）。
+- `deploy_memory_os.py` production-safe upgrade **×2 home**，逐阶段：
+  main `preflight pass(30/0/0) → dry-run pass → apply applied → postcheck pass`，
+  三探针（cron_adapter/boundary_runtime/manifest）pass，唯一 WARN
+  `llm_judge_probe=ambiguous`；sannai `preflight pass(29/0/0)` 起全绿，
+  `llm_judge_probe=pass`。**该 WARN 与 CN 节记载同型**：bounded_vote/
+  gpt-5.6-luna 对低线索探针 query `继续昨天那个。` 裁 `ask_choice`
+  （confidence 0.98），属合理裁决非故障。
+- **配置写入先核实为行为等价空操作**（安装器会整段替换 preset 子树，
+  不核实就部署等于拿 preset 覆盖线上手工值）：deep_reflection /
+  memory_sources / low_clue_recall 三处 preset 值与两 home 线上逐字段相同；
+  main 的 `session_mirror` 三个手工键（`auto_apply_after_owner_home_graduation`
+  / `auto_apply_max_sessions_per_run` / `platform_denylist`）被 preset 写掉后，
+  由 `config.py::_merge_session_mirror_config` 以同值默认（True/1/[]）原样补回，
+  判定无行为差；`--hindsight auto`：main 命中 `preserve_existing_active`
+  保住 active/retain/reflect，sannai 无 `hindsight/config.json` →
+  `not_configured` 不写。`config_defaults` 两 home 均 `already_current`。
+- **hash 核验（不信 manifest，逐文件 `git hash-object` 对
+  `git rev-parse 9824db2:<path>`）**：9 个 provider 文件 × 每 home 2 份副本
+  × 2 home = **36/36 一致**；modules `override_sweep.py` ×2、
+  `scripts/memory_os_3_200_monitor.py` ×2 一致。即**四份 provider + 两份
+  modules + scripts 全覆盖**，由 deploy 脚本两次调用（每 home 一次）完成——
+  `install_memory_os.sh` 的 `default_system_modules="yes"` 是覆盖
+  `memory-os/runtime/python/plugins` 那两份的前提。
+- gateway 重启（provider 侧进程内缓存，见 DA 同款要求）：
+  `hermes-gateway.service` 11:54:59、`hermes-gateway-sannai.service` 12:00:57，
+  均 active / NRestarts=0 / journal 无 traceback 无 memory_os 错误。
+- **DB 三项修复的生产实证**：
+  ① `runtime/event_stats.json` 两 home 均新增 `recall_event_summaries` /
+  `recall_summary_excluded_kind_counts` / `recall_summary_scanned_count` /
+  `recall_summary_scan_truncated`。main 扫 266 条排除 **261** 条
+  （conversation_turn_mirrored 195、governance_resolver_approved 30、
+  governance_resolver_invalidated 27、session_fact_extracted 6、
+  governance_evidence_scored 3）得 5 条真实 `conversation_turn`；
+  sannai 扫 35 排除 30 得 5 条。
+  ② overlay `recent_events` **1 → 6**（1 锚点 + 5 事件），两 home 一致；
+  `event_stats_health={freshness:fresh, reason:"produced", injected_count:5}`，
+  reason ∈ `EVENT_STATS_HEALTH_REASONS`；`quality.json`
+  `recent_events_count=6`、`sections.recent_events=ok`。
+  ③ 锚点条目仍在 → 尾读有界未误伤。
+  **并且直接证实了"只修路径会变差"这一判断**：同窗口未过滤的
+  `recent_event_summaries` 仍旧是 governance/mirror 行——允许表是必需的，
+  不是保险。
+- monitor 对照（关键：与**各自** profile 的历史基线比，不与对方比）：
+  main 部署前当夜 nightly FAIL 4 → 本次 **FAIL 2**，WARN 14 不变、PASS 83 不变；
+  消失的 `session_mirror_auto_apply_permit_integrity_invalid` /
+  `index_not_healthy_in_production` 记为"本次运行未出现"，**不记为已修**
+  （PR #70 未触及这两条路径，午间/02:30 时点差与重启重置 catchup 窗口都是
+  活着的解释，以今夜 nightly 为准）。sannai PASS **90**（历史最高：07-28 73、
+  08-12 87），FAIL 7 全部命中其自身历史既有码。**两 profile 均无新增 FAIL/WARN**。
+- 证据级别：`local_pass` 3607/13 skipped、`deploy_pass` ×2、
+  `live_monitor_fail`（被下节 DC 的先存 FAIL 挡住，非本批回归）。
+- **工具坑两条（都曾伪装成缺陷）**：① 从 Git Bash 调 deploy/monitor 必须带
+  `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 MSYS 把 `/root/.hermes`
+  改写成 `D:/Git/root/.hermes`——`--phase plan` 的 commands 里肉眼可见，
+  **plan 阶段存在的意义之一就是抓这个**；② 双 profile 主机跑 full monitor 必须
+  `--caller-timeout-seconds ≥600`，否则探针吃 300s 地板直接
+  `probe_script_timeout` FAIL 且全 section 为 None（CO 已把预算做成可声明，
+  但默认地板仍是 300）。
+
+### DC — doctor 45s 的真因：taint 谓词按项重读全量事件语料；顺带修掉 monitor 把"探针超时"误报成"doctor 不健康"（2026-08-19）
+
+DB 部署后 main+sannai 的 `doctor_not_ok` + `shell_alias_no_env_failed` 仍 FAIL，
+考古证实**连续 ≥4 夜同型**（08-15/16/17/18），先于本次部署。顺着查下去发现
+被举报的症状和真因隔着两层。
+
+**① 症状层：monitor 把两种事实塞进同一个 code。** 生产 `hermes
+memory-os-agent-os doctor` 实测 **rc=0 / exit_code=0 / findings=[]**，即健康；
+但它要跑 **45s**，而远端探针每命令上限 20s（`MEMORY_OS_MONITOR_COMMAND_
+TIMEOUT_SECONDS` 默认 20）。超时后 `load_json_cmd` 返回 `{_error, _code:124}`，
+而 doctor section 只摘 `status/exit_code/findings` 三个字段，**把 `_error`/
+`_code` 丢在快照边界外**——于是"探针没跑完"与"doctor 跑完了且有问题"都以
+`status=None` 抵达分类器，同判 `doctor_not_ok`。这正是本仓库 `_smoke_status`
+docstring 写死的那条禁令（"not run" 与 "ran and failed" 不得共用 outcome）
+在另一处复发。修法**不是抬高 20s**（那是跑步机，见 ②），而是让 outcome
+说实话：probe section 带上 `probe_error`/`probe_exit_code`，分类器新增
+`doctor_probe_timeout`（仍属 FAIL 级——丢失检查确实是可见性损失——只是不再
+诬告 doctor）。守卫测试钉住生产者/消费者这一对：探针不再带这两个字段时，
+分类分支即不可达。
+
+**② 真因层：与 PR #70 同族的"按项重读"缺陷，只是深了一层。** cProfile
+（生产 main home）：`build_doctor_result` 66.5s 中 **59.3s 在
+`_candidate_review_items`**，其下 `provenance.is_tainted` 被调 470 次、
+`store.read_events()` 被调 **242 次**、`schema.from_dict` **154 万次**、
+`json.loads` **187 万次**。根因是缓存作用域小了一层：`_load_events` 的
+docstring 明写"每次**顶层** is_tainted 调用读一次语料"，而热点 caller
+（`owner_actions.py` 的 `external_ref = candidate_external_ref(...) if
+is_tainted(...) else None`）是**按候选**调用的——两个谓词各读一遍全量语料，
+成本 O(候选 × 事件)，且 `_resolve_event_from_store` 还在其上做线性扫描。
+修法：`provenance` 暴露 `load_event_cache()` + `EventLookup`（id→event 索引，
+**首个 id 命中优先，与被替换的线性扫描逐字同义**），`is_tainted` 的私有
+`_events_cache` 提升为公开 `events_cache`（全仓 grep 确认无测试引用旧私有名），
+`candidate_external_ref` 补同款参数——**两个都要补**，只补一个等于语料照读。
+caller 在循环外建一次缓存。
+- **有意保留的行为差并写进 docstring**：共享缓存后，一次读失败会污染整批
+  而非逐项重试——方向是 fail-closed，且"整批语料读不出来"正是这道闸不该
+  放行的情形。
+- **Rule 5 扫描**：同型 caller 还有 `candidate_aggregation._skip_tainted_
+  external_evidence`，位于 `_cluster_and_promote` 的**三个**按候选循环里
+  （evidence tick 每小时付一次同样的 O(N×M)），一并接上同一缓存。
+  而 `crystallized.write_approved_record` / `_ensure_crystallized_approval`
+  的读**有意不缓存并加测试钉住**：结晶过程会追加事件，拿循环前的缓存回答
+  **写边界**问题就是拿陈旧语料放行——便宜不值得换错。
+- **反事实（copy 备份 revert，非 `git checkout --`）**：provenance 批
+  revert → 9 个新测试 **8 FAIL**（review build 读 6 次而非 1 次、lane 守卫读
+  8 次而非 1 次，另 6 个 ImportError），restore → PASS；monitor 批 revert →
+  4 FAIL（关键断言现形为 `'doctor_probe_timeout' in ['doctor_not_ok']`），
+  restore → PASS。**计数而非计时**：耗时断言天生 flaky，而本缺陷问的本就是
+  "语料被读了几次"。
+- 预期生产观测（**须待合入并部署后复核，本节不予认领**）：doctor 落到
+  20s 上限以内后 `doctor_not_ok` / `shell_alias_no_env_failed` 应一并消失；
+  若 doctor 仍超时，则应看到的是 `doctor_probe_timeout` 而不再是诬告。
+- **测试**：+17（provenance 事件缓存 11、monitor 归因 6）。全量
+  **3622 passed / 1 failed / 13 skipped**——唯一 FAIL 是已知 flaky 的
+  `test_execution_gate_runner_serializes_parallel_sidecar_updates`（并发
+  sidecar 用例，单独复跑 PASS，与本批无关，见 memory
+  `ci-flaky-sidecar-concurrency-test`）。四静态门（import cycle / write
+  surface / static hygiene / public checkout probe）+ `git diff --check` 全绿。
+- **Rule 5（归因族）扫描记账**：monitor 里"探针没跑成"与"跑完了有问题"
+  的混淆不止 doctor 一处，但形态**不同**，据实分开记：`shell_alias_no_env`
+  并列跑 ~22 条命令，**确实**把每条的 `_error` 透出（`doctor_error` /
+  `review_aging_error` 的 `command_timeout_seconds=20` 正是本次定位的证据来源），
+  它的弱点是**分类粒度**——超时与真失败共用一个 `shell_alias_no_env_failed`
+  FAIL 码。按"大文件最小改动"原则本批只动 doctor 段（它是**丢证据**那一类，
+  更严重），`shell_alias_no_env` 记录不改；且真因（①）修好后，这两个生产实例
+  预计一并消失，粒度问题届时不再有活样本，留待有真实样本时再动。
+- **本批自身踩坑并记账**：缓存第一版**提到循环外**，`build_status_report`
+  的 O(1) 路径（无候选 profile 不得碰事件语料）随即回归——
+  `test_build_status_report_uses_O1_index_health` 抓到。**只跑改动相关测试
+  不会发现**，是全量套件抓的；已改为惰性构建并补两个"无候选=0 次读取"
+  回归钉。这正是 Section W 第 1 条与"测试只证明做了的是对的"的又一次实证。
 
 - `26f4a80..d4bc158（CV，本节）`：PR #57 评审 14 项发现收口——dashboard
   `--profile main` 默认值 crash-loop（主场景级）、孤儿 day-count 键接上
@@ -7052,3 +7188,19 @@ failed**（11:46），四静态门 + `git diff --check` 全绿。
   `continuity_constants.py`，`cycle_count` 1→0）。7 项反事实实测 revert→FAIL→restore→PASS。
   **仅仓库验证**：prefetch/temporal/state_overlay 属 provider 侧，生效需重启 gateway（owner 步骤）。
   全量 3583→3607 passed（+24）/13 skipped，四门全绿。
+
+- `9824db2 部署 + 790bd76`：DB 部署与生产验证 + DC — PR #70 的 provider 侧修复
+  经 gateway 重启在 3.200 双 profile 落地并实证（四份 provider + 两份 modules +
+  scripts 逐文件 hash 全一致；`recent_events` 1→6、注入 5 条真实 conversation_turn、
+  main 排除 261 条记账行；两 profile 无新增 FAIL/WARN，sannai PASS 90 为历史最高）。
+  部署中暴露的 `doctor_not_ok` 经考古证实连续 ≥4 夜先存，剖析出真因是
+  `provenance` 的 taint 谓词**按候选**重读全量事件语料（doctor 66.5s 中 59.3s、
+  242 次 read_events、187 万次 json.loads）——改为 caller 持有的批级
+  `load_event_cache()` + `EventLookup` id 索引，`is_tainted` 私有
+  `_events_cache` 提为公开、`candidate_external_ref` 补同参（两个都补），
+  Rule-5 同步接上 `candidate_aggregation` 三个循环，结晶写路径**有意不缓存**
+  并加测试钉住；顺带把 monitor "探针超时"与"doctor 不健康"分成两个 code
+  （新增 `doctor_probe_timeout`，20s 默认**不抬**）。缓存第一版提到循环外
+  破坏了 `build_status_report` 的 O(1) 路径，由全量套件抓出并改为惰性构建。
+  +17 测试，全量 3622 passed/13 skipped（唯一 FAIL 为已知 flaky 并发用例，
+  单跑 PASS），四门全绿。
