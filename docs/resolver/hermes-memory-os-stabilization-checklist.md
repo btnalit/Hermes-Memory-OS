@@ -4968,6 +4968,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `1ed7ded..HEAD`：RAGFlow v0.27 retrieval adapter 兼容修复——首选 `/api/v1/retrieval`、解析 `data.chunks`、保留旧接口回退；新增反事实测试，28 seam tests / 3639 full-suite tests 全部通过。
+
 - （BD 之前的条目随原文件丢失，区间散见上方历史摘要；最后已推送提交为 `abcce26`。）
 - `abcce26..074be97`：BC 评审 P0 三项重做——monitor WARN 分类循环移至函数末尾恢复
   fail_if_production 生产契约；digest 去重加 provenance upgrade（manual/legacy→cron 不再
@@ -7289,3 +7291,21 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
   （含 PASS 90/94）均为 Python 段=sannai、CLI 段=main 的混合值，不回改历史小节。
   +3 测试（2 个反事实成立、1 个钉既有正确行为如实记录），全量
   **3626 passed / 13 skipped / 0 failed**，五门 + `git diff --check` 全绿。
+
+## DE — RAGFlow v0.27 retrieval adapter 兼容修复（2026-08-26）
+
+- **根因**：RAGFlow v0.27.0 的正式 retrieval API 返回 `data.chunks`，并要求通过
+  `POST /api/v1/retrieval` 传递 `question`、`dataset_ids`、`page_size`；adapter
+  原先只调用旧的 `datasets/{id}/documents/search`，导致真实 v0.27 返回被静默丢弃。
+- **修复**：`plugins/seam/external_evidence/ragflow_adapter.py` 首选 v0.27 retrieval
+  contract，解析 `data.chunks`，并保留旧 documents/search 作为兼容回退；网络/非 200
+  仍 fail-open，不改变 external-evidence 污染和 Owner 审批边界。
+- **反事实覆盖**：新增测试验证 v0.27 请求 URL/body、`similarity` 到 score 的解析、dataset/
+  document/chunk provenance、稳定 `external_ref`，以及主接口失败时旧接口回退；反事实测试
+  在移除新路径/解析支持时失败，恢复后通过。
+- **测试结果**：目标 seam 测试 `28 passed`；全量 `3639 passed / 9 skipped / 0 failed`；
+  import-cycle、write-surface、static-hygiene、public-checkout、py_compile 和
+  `git diff --check` 全部通过；独立 code review 无 BLOCKER/HIGH。
+- **运行验证**：RAGFlow v0.27.0 `healthz` 正常，正式 adapter 返回 3 个带 provenance 的
+  chunks；sannai RAGFlow 只读探针 `status=ok` 且 `canonical_unchanged=true`；Hindsight
+  sannai health 正常；不写入 Memory-OS canonical store。

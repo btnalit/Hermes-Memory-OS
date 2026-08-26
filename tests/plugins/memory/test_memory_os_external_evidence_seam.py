@@ -234,6 +234,116 @@ class TestRAGFlowAdapter:
         assert results[0].source.provider == "ragflow"
         assert results[1].external_ref == "ragflow:doc-002:chunk-002"
 
+    def test_adapter_uses_v027_retrieval_contract_and_parses_chunks(self):
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        calls = []
+
+        class RetrievalResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "code": 0,
+                    "data": {
+                        "chunks": [
+                            {
+                                "content": "Current retrieval contract",
+                                "document_id": "doc-v027",
+                                "id": "chunk-v027",
+                                "similarity": 0.91,
+                            },
+                        ],
+                        "total": 1,
+                    },
+                }
+
+        class RetrievalClient:
+            def post(self, url, *, json, headers, timeout):
+                calls.append((url, json))
+                return RetrievalResponse()
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-v027",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=RetrievalClient())
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("retrieval contract", top_k=1)
+
+        assert len(results) == 1
+        assert results[0].external_ref == "ragflow:doc-v027:chunk-v027"
+        assert results[0].source.dataset_id == "dataset-v027"
+        assert calls == [
+            (
+                "http://localhost:9380/api/v1/retrieval",
+                {
+                    "question": "retrieval contract",
+                    "dataset_ids": ["dataset-v027"],
+                    "page_size": 1,
+                },
+            ),
+        ]
+
+    def test_adapter_falls_back_to_legacy_search_when_primary_fails(self):
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        calls = []
+
+        class Response:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        class FallbackClient:
+            def post(self, url, *, json, headers, timeout):
+                calls.append((url, json))
+                if url.endswith("/api/v1/retrieval"):
+                    return Response(404, {})
+                return Response(
+                    200,
+                    {
+                        "data": {
+                            "documents": [
+                                {
+                                    "content": "Legacy fallback",
+                                    "document_id": "doc-legacy",
+                                    "chunk_id": "chunk-legacy",
+                                    "score": 0.8,
+                                },
+                            ],
+                        },
+                    },
+                )
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-legacy",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=FallbackClient())
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("legacy compatibility", top_k=1)
+
+        assert len(results) == 1
+        assert results[0].external_ref == "ragflow:doc-legacy:chunk-legacy"
+        assert calls[0][0].endswith("/api/v1/retrieval")
+        assert calls[1][0].endswith("/api/v1/datasets/dataset-legacy/documents/search")
+
     def test_adapter_search_empty_on_http_error(self):
         from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
 
