@@ -46,6 +46,54 @@ hermes memory-os-agent-os memory-sources stats --hours 24
 hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"
 ```
 
+## Optional Remote Embedding and Reranking
+
+The open-source core keeps external model services optional and disabled by
+default. No model-serving or ML dependency is required by the core package.
+
+A deployment may provide an OpenAI-compatible embedding endpoint for online
+vector queries and a small `/rerank` endpoint for post-retrieval display
+ranking. The embedding endpoint must return `data[].embedding`; the reranker
+must return `results[]` entries with `index` and `relevance_score` (or `score`).
+
+The embedding endpoint is configured through the reversible `vector_embedder_endpoint`
+knob. When it is empty, the existing local embedder behavior is preserved. The
+`vector_embedder_model` and `vector_embedder_device` knobs remain deployment
+owned; the endpoint may represent a remote GPU or CPU service. Batch/index-sync
+callers continue using the local path unless the deployment explicitly adds a
+separate batch adapter.
+
+The optional reranker is configured under `memory_reranker` and remains
+fail-open to the original RRF result:
+
+```json
+{
+  "memory_reranker": {
+    "enabled": false,
+    "mode": "disabled",
+    "provider": "http",
+    "endpoint": "",
+    "model": "",
+    "candidate_limit": 12,
+    "rerank_candidate_limit": 12,
+    "output_limit": 5,
+    "timeout_ms": 12000,
+    "fallback": "rrf"
+  }
+}
+```
+
+When enabled, the reranker receives only the query and bounded candidate text
+from the existing retrieval result. It can change the display order of the
+current crystallized-memory candidates only. It does not change FTS5, vector
+retrieval, RRF semantics, internal truncation, deduplication, context routing,
+canonical memory, graph state, candidate state, or approval state. Provider
+failure, timeout, invalid JSON, or empty results return the original RRF path.
+
+Keep service addresses, model paths, credentials, and profile-specific values
+outside the public repository. The production overlay should be applied by the
+operator after installing or upgrading the open-source core.
+
 ## Installer Presets
 
 | Preset | Use when | Effect |

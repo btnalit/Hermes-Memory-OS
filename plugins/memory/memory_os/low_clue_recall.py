@@ -1124,6 +1124,25 @@ def _call_hermes_runtime_model(prompt: str, config: dict[str, Any]) -> str:
 def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
     if str(config.get("provider") or "hermes_default") != "hermes_default":
         return {"ok": False, "code": "unsupported_provider", "reason_codes": ["unsupported_provider"]}
+    original_sys_path = list(sys.path)
+    original_host_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if (name == "agent" or name.startswith("agent.")
+            or name == "hermes_cli" or name.startswith("hermes_cli."))
+        and getattr(module, "__file__", None) is not None
+    }
+
+    def _restore_import_state() -> None:
+        sys.path[:] = original_sys_path
+        for name in list(sys.modules):
+            if (name == "agent" or name.startswith("agent.")
+                    or name == "hermes_cli" or name.startswith("hermes_cli.")):
+                if name not in original_host_modules:
+                    del sys.modules[name]
+        for name, module in original_host_modules.items():
+            sys.modules.setdefault(name, module)
+
     try:
         from hermes_cli.config import load_config
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1148,26 +1167,31 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
             _mod = sys.modules.get(_name)
             if _mod is not None and getattr(_mod, "__file__", None) is None:
                 del sys.modules[_name]
-        for candidate in (
-            os.environ.get("HERMES_AGENT_ROOT"),
-            "/usr/local/lib/hermes-agent",
-        ):
-            if candidate and Path(candidate).exists() and candidate not in sys.path:
-                # If the Memory-OS REPO_ROOT is at position 0, insert after it
-                # so plugins.memory continues to resolve from Memory-OS, not the
-                # agent root. Both roots ship a plugins/ top-level package;
-                # inserting the agent root at position 0 would shadow
-                # Memory-OS's plugins.memory.memory_os.
-                _insert_pos = 0
-                if sys.path and (
-                    Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
-                ).exists():
-                    _insert_pos = 1
-                sys.path.insert(_insert_pos, candidate)
+        explicit_root = os.environ.get("HERMES_AGENT_ROOT")
+        candidates = [explicit_root, "/usr/local/lib/hermes-agent"]
+        for candidate in candidates:
+            if not candidate or not Path(candidate).exists():
+                continue
+            # An explicit test/operator root must win over an already-present
+            # Hermes installation.  Merely checking ``candidate not in
+            # sys.path`` leaves the existing installation ahead of it, so a
+            # retry after phantom-package eviction can still import the wrong
+            # hermes_cli package.
+            if candidate in sys.path:
+                sys.path.remove(candidate)
+            _insert_pos = 0
+            if sys.path and (
+                Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
+            ).exists():
+                _insert_pos = 1
+            sys.path.insert(_insert_pos, candidate)
+            if explicit_root:
+                break
         try:
             from hermes_cli.config import load_config
             from hermes_cli.runtime_provider import resolve_runtime_provider
         except Exception:
+            _restore_import_state()
             return {
                 "ok": False,
                 "code": "hermes_runtime_adapter_unavailable",
@@ -1187,11 +1211,13 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
             configured_provider = None
         runtime = resolve_runtime_provider(requested=configured_provider, target_model=effective_model or None)
     except Exception:
+        _restore_import_state()
         return {
             "ok": False,
             "code": "runtime_resolve_failed",
             "reason_codes": ["runtime_resolve_failed"],
         }
+    _restore_import_state()
     return {
         "ok": True,
         "runtime": runtime,

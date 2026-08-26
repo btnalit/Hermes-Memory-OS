@@ -13,6 +13,8 @@ to FTS5 without crashing.
 from __future__ import annotations
 
 import sys
+import json
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -142,21 +144,54 @@ class LocalEmbedder:
         return self._ensure_model()
 
 
-def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
-    """Factory: build a LocalEmbedder from knob configuration.
+class HttpEmbedder:
+    """Stdlib-only client for a shared embedding service."""
 
-    Reads vector_retrieval_enabled, vector_embedder_model, and
-    vector_embedder_device from the knob override store. Returns None
-    when vector retrieval is disabled or the embedder is unavailable.
+    def __init__(self, *, endpoint: str, model_name: str, timeout_seconds: float = 8.0) -> None:
+        self.endpoint = endpoint.strip()
+        self._model_name = model_name
+        self._device = "cuda"
+        self.timeout_seconds = max(float(timeout_seconds), 0.1)
+        if not self.endpoint:
+            raise ValueError("embedding endpoint must not be empty")
 
-    When *batch* is True, the legacy vector_embedder_batch_device knob is
-    read for audit/compatibility but not honored.  Memory-OS embedding and
-    vector retrieval always instantiate on CPU; CUDA belongs to the gateway /
-    model-serving path, not Memory-OS vector jobs on 4GB GPUs.
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
-    This is the single entry point for all embedder instantiation —
-    replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
-    """
+    def is_available(self) -> bool:
+        return bool(self.endpoint)
+
+    def _request(self, text: str) -> np.ndarray | None:
+        payload = {"input": [text], "model": self._model_name}
+        request = Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            vector = body["data"][0]["embedding"]
+            array = np.asarray(vector, dtype=np.float32)
+            return array if array.ndim == 1 and array.size else None
+        except (OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def embed(self, text: str) -> bytes:
+        vector = self._request(text)
+        return vector.tobytes() if vector is not None else b""
+
+    def embed_query(self, text: str) -> np.ndarray | None:
+        return self._request(text)
+
+    def warmup(self) -> bool:
+        return self._request("warmup") is not None
+
+
+def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | HttpEmbedder | None:
+    """Factory for the online embedder; batch callers remain CPU-local."""
     if roots is None:
         # No injected store means there is no governed knob context. The
         # vector lane is disabled by default; never consult ambient ~/.hermes.
@@ -197,7 +232,12 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
         default="paraphrase-multilingual-MiniLM-L12-v2",
         roots=roots,
     )
-    # Memory-OS embedding/vector retrieval is forced to CPU on this code path.
+    endpoint = str(resolve_knob("vector_embedder_endpoint", default="", roots=roots) or "").strip()
+    if endpoint and not batch:
+        service_model = "BAAI/bge-m3" if "bge-m3" in str(model).lower() else str(model)
+        return HttpEmbedder(endpoint=endpoint, model_name=service_model)
+    # Batch/index-sync remains local CPU; online requests may use the shared
+    # GPU embedding gateway above.
     # Earlier production overrides split online gateway CUDA from batch CPU, but
     # online prefetch can still instantiate a second BGE-M3 model and OOM 4GB GPUs.
     # Keep reading legacy knobs for audit/compatibility, but do not honor GPU
