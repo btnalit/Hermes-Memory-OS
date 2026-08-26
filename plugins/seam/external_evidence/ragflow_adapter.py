@@ -114,26 +114,43 @@ class RAGFlowAdapter:
         if not base_url or not dataset_id or not api_key:
             return []
 
-        url = f"{base_url}/api/v1/datasets/{dataset_id}/documents/search"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
-        try:
-            resp = self._client.post(
-                url,
-                json={"query": query, "top_k": top_k},
-                headers=headers,
-                timeout=timeout,
-            )
-            if resp.status_code != 200:
-                return []
-            data = resp.json()
-        except Exception:
-            return []  # fail-open — network issues must not block recall
+        # RAGFlow's current retrieval API is dataset-scoped through the
+        # request body.  Keep the older dataset search route as a fallback
+        # for deployments that still expose it.
+        attempts = (
+            (
+                f"{base_url}/api/v1/retrieval",
+                {"question": query, "dataset_ids": [dataset_id], "page_size": top_k},
+            ),
+            (
+                f"{base_url}/api/v1/datasets/{dataset_id}/documents/search",
+                {"query": query, "top_k": top_k},
+            ),
+        )
 
-        return self._parse_response(data, top_k)
+        for url, body in attempts:
+            try:
+                resp = self._client.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                parsed = self._parse_response(data, top_k)
+                if parsed:
+                    return parsed
+            except Exception:
+                continue  # fail-open — try compatibility fallback
+
+        return []  # network/API issues must not block recall
 
     # ── Internal ────────────────────────────────────────────────────
 
@@ -153,7 +170,7 @@ class RAGFlowAdapter:
         # RAGFlow returns results in "data.documents" or "data"
         results = data.get("data", {})
         if isinstance(results, dict):
-            docs = results.get("documents", [])
+            docs = results.get("documents") or results.get("chunks") or []
         elif isinstance(results, list):
             docs = results
         else:
