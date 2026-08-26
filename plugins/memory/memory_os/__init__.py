@@ -479,6 +479,7 @@ class MemoryOSProvider(MemoryProvider):
             context_router_config=self._config.get("context_router"),
             memory_sources_config=self._config.get("memory_sources"),
             low_clue_recall_config=low_clue_raw,
+            memory_reranker_config=self._config.get("memory_reranker"),
             substrate_recall_report=substrate_recall_report,
             recall_facade=facade,
         )

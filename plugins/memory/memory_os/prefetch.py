@@ -31,6 +31,8 @@ from .low_clue_recall import (
     build_low_clue_guard_lines,
     normalize_low_clue_recall_config,
 )
+from .config import normalize_memory_reranker_config
+from .reranker import RerankCandidate, RerankerError, build_reranker
 from .jsonl_io import build_error_record, read_jsonl_tail
 from .memory_sources import (
     GUARD_RECALL_CLARIFICATION,
@@ -202,12 +204,14 @@ def build_prefetch(
     context_router_config: dict[str, Any] | None = None,
     memory_sources_config: dict[str, Any] | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     recall_facade: object | None = None,  # Phase 3: RetrieverFacade (provider-cached)
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
     low_clue_config = normalize_low_clue_recall_config(low_clue_recall_config)
+    reranker_config = normalize_memory_reranker_config(memory_reranker_config)
     # Graded before any early return, so every prefetch path (diagnostic
     # grounding, foreground-only, router-apply, normal) is covered by the same
     # disclosure.  This must not influence anything below it — see the
@@ -234,6 +238,7 @@ def build_prefetch(
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_config,
+            memory_reranker_config=reranker_config,
             substrate_recall_report=substrate_recall_report,
             recall_facade=recall_facade,
         )
@@ -300,6 +305,7 @@ def build_prefetch(
             current_task_anchor=current_task_anchor,
             context_router_config=router_config,
             low_clue_recall_config=low_clue_config,
+            memory_reranker_config=reranker_config,
             substrate_recall_report=substrate_recall_report,
             recall_facade=recall_facade,
         )
@@ -321,6 +327,7 @@ def build_prefetch(
         session_id=session_id,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_config,
+        memory_reranker_config=reranker_config,
         substrate_recall_report=substrate_recall_report,
         recall_facade=recall_facade,
     )
@@ -380,6 +387,7 @@ def build_prefetch_with_observability(
     session_id: str = "",
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error_records: list[dict[str, Any]] = []
@@ -390,6 +398,7 @@ def build_prefetch_with_observability(
         session_id=session_id,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
+        memory_reranker_config=memory_reranker_config,
         substrate_recall_report=substrate_recall_report,
         error_records=error_records,
     )
@@ -417,6 +426,7 @@ def build_prefetch_section_candidates(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     recall_facade: object | None = None,  # Phase 3: provider-cached RetrieverFacade
 ) -> list[ContextSection]:
@@ -438,6 +448,7 @@ def build_prefetch_section_candidates(
         session_id=session_id,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
+        memory_reranker_config=memory_reranker_config,
         substrate_recall_report=substrate_recall_report,
         recall_facade=recall_facade,
     )
@@ -494,6 +505,7 @@ def _build_context_router_apply_prefetch(
     current_task_anchor: str | None = None,
     context_router_config: dict[str, Any],
     low_clue_recall_config: dict[str, Any] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     recall_facade: object | None = None,
 ) -> dict[str, Any] | None:
@@ -506,6 +518,7 @@ def _build_context_router_apply_prefetch(
         runtime_facts=runtime_facts,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
+        memory_reranker_config=memory_reranker_config,
         substrate_recall_report=substrate_recall_report,
         recall_facade=recall_facade,
     )
@@ -571,6 +584,7 @@ def _build_prefetch_sections(
     session_id: str = "",
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     error_records: list[dict[str, Any]] | None = None,
     recall_facade: object | None = None,  # Phase 3: provider-cached RetrieverFacade
@@ -643,7 +657,14 @@ def _build_prefetch_sections(
     )
     if candidate_ids:
         section_source_ids["Crystallized Review Candidates"] = candidate_ids
-    cryst_lines, cryst_degradation, cryst_ids = _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records)
+    cryst_lines, cryst_degradation, cryst_ids = _crystallized_lines(
+        store,
+        query=query,
+        index=index,
+        seen=seen,
+        error_records=error_records,
+        memory_reranker_config=memory_reranker_config,
+    )
     if cryst_degradation >= 2:
         cryst_header = "Crystallized Memory (deterministic floor recall)"
     elif cryst_degradation == 1:
@@ -1645,6 +1666,94 @@ def _rrf_union(
     return set(sorted_ids[:top_n])
 
 
+def _rrf_ordered_ids(
+    fts_ids: list[str],
+    vec_ids: list[str],
+    *,
+    k: int = 60,
+    top_n: int = 60,
+) -> list[str]:
+    scores: dict[str, float] = {}
+    for rank, rid in enumerate(fts_ids):
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+    for rank, rid in enumerate(vec_ids):
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores, key=lambda rid: scores[rid], reverse=True)[:top_n]
+
+
+def _reranker_query_allowed(query: str, route: str) -> bool:
+    if route in {"diagnostic"}:
+        return False
+    lowered = query.lower()
+    return any(
+        term in lowered
+        for term in (
+            "记忆", "之前", "上次", "上回", "偏好", "项目", "部署", "环境",
+            "memory", "remember", "recall", "history", "preference",
+        )
+    )
+
+
+def _try_rerank_crystallized_entries(
+    query: str,
+    *,
+    route: str,
+    permanent_entries: list[tuple[str, str, int, int]],
+    provisional_entries: list[tuple[datetime, str, str, int, int]],
+    candidate_order: list[str] | None,
+    config: dict[str, Any] | None,
+    error_records: list[dict[str, Any]] | None,
+) -> list[tuple[str, str, int, int]] | list[tuple[datetime, str, str, int, int]] | None:
+    """Return a display-only Top-N reranked slice, or None for RRF fallback."""
+    normalized = normalize_memory_reranker_config(config)
+    if (
+        not normalized["enabled"]
+        or normalized["mode"] != "gated_active"
+        or len(permanent_entries) + len(provisional_entries) < 3
+        or not _reranker_query_allowed(query, route)
+    ):
+        return None
+    try:
+        provider = build_reranker(normalized)
+        if provider is None:
+            return None
+        entries: list[tuple[str, Any]] = []
+        entries.extend(("permanent", entry) for entry in permanent_entries)
+        entries.extend(("provisional", entry) for entry in provisional_entries)
+        if candidate_order:
+            order = {rid: position for position, rid in enumerate(candidate_order)}
+            entries.sort(key=lambda item: order.get(str(item[1][0] if item[0] == "permanent" else item[1][1]), len(order)))
+        selected = entries[: int(normalized["rerank_candidate_limit"])]
+        candidates = [
+            RerankCandidate(
+                record_id=str(entry[0] if kind == "permanent" else entry[1]),
+                text=str(entry[1] if kind == "permanent" else entry[2]),
+            )
+            for kind, entry in selected
+        ]
+        ranked = provider.rank(query, candidates, top_n=int(normalized["output_limit"]))
+        by_id = {candidate.record_id: (kind, entry) for (kind, entry), candidate in zip(selected, candidates)}
+        output: list[Any] = []
+        for item in ranked:
+            match = by_id.get(item.record_id)
+            if match is not None:
+                output.append(match[1])
+        if not output:
+            raise RerankerError("reranker produced an empty display selection")
+        return output
+    except (RerankerError, ValueError, TypeError) as exc:
+        if error_records is not None:
+            error_records.append(build_error_record(
+                component="prefetch._crystallized_lines",
+                operation="memory_reranker",
+                error_code="memory_reranker_fallback_rrf",
+                severity="warning",
+                recoverable=True,
+                details={"error_type": type(exc).__name__},
+            ))
+        return None
+
+
 def _crystallized_lines(
     store: MemoryOSStore,
     *,
@@ -1652,6 +1761,7 @@ def _crystallized_lines(
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
     error_records: list[dict[str, Any]] | None = None,
+    memory_reranker_config: dict[str, Any] | None = None,
 ) -> tuple[list[str], int, list[str]]:
     """Record-level crystallized memory lines with relevance filtering and caps.
 
@@ -1699,6 +1809,7 @@ def _crystallized_lines(
     search_query = str(route.get("search_query", ""))
     relevant_ids: set[str] | None = None
     fts_ids: list[str] = []
+    candidate_order: list[str] | None = None
     if index is not None and search_query and hasattr(index, "search"):
         try:
             result = index.search(search_query, limit=60)
@@ -1752,8 +1863,10 @@ def _crystallized_lines(
     degradation_level = 0
     if vec_ids:
         relevant_ids = _rrf_union(fts_ids, vec_ids, top_n=60)
+        candidate_order = _rrf_ordered_ids(fts_ids, vec_ids, top_n=60)
     elif fts_ids:
         relevant_ids = set(fts_ids)
+        candidate_order = list(fts_ids)
     else:
         # No FTS5 or vector hits — fallback path.
         # Distinguish: empty query → level 1 (pure recency, no search intent);
@@ -1764,9 +1877,9 @@ def _crystallized_lines(
             degradation_level = 1
     # else: leave relevant_ids=None so all on-disk records are included
 
-    # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
-    permanent_entries: list[tuple[str, str, int]] = []  # (rid, line, recurrence)
-    provisional_entries: list[tuple[datetime, str, str, int]] = []
+    # (rid, line, recurrence, floor_score) for permanent, (expires_at_sort_key, rid, line, recurrence, floor_score) for provisional
+    permanent_entries: list[tuple[str, str, int, int]] = []
+    provisional_entries: list[tuple[datetime, str, str, int, int]] = []
     # Injection-time dedup by normalized body. Production audit: the same
     # proposal-approval fact appeared NINE times in one injection (repeated
     # provisional extraction of one session), each copy burning a cap slot
@@ -1895,6 +2008,31 @@ def _crystallized_lines(
                 except (ValueError, TypeError):
                     pass
                 permanent_entries.append((rid, f"- {path.name}/{kind}: {text}", recurrence, rec_score))
+
+    # Optional display-only reranking.  This branch is disabled by default and
+    # never writes to the index, canonical records, graph, or candidate state.
+    reranked_entries = _try_rerank_crystallized_entries(
+        query,
+        route=str(route.get("route") or ""),
+        permanent_entries=permanent_entries,
+        provisional_entries=provisional_entries,
+        candidate_order=candidate_order,
+        config=memory_reranker_config,
+        error_records=error_records,
+    ) if degradation_level == 0 else None
+    if reranked_entries is not None:
+        result: list[str] = []
+        record_ids: list[str] = []
+        for entry in reranked_entries:
+            if len(entry) == 4:
+                rid, line, _recurrence, _score = entry
+            else:
+                _expires, rid, line, _recurrence, _score = entry
+            result.append(line)
+            record_ids.append(f"crystallized:{rid}")
+            if seen is not None and rid:
+                seen.add(("crystallized_record", rid))
+        return result, degradation_level, record_ids
 
     # ── Sort entries ─────────────────────────────────────────────
     # At degradation_level=2 (deterministic floor recall), sort entries

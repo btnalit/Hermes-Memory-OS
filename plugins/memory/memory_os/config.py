@@ -87,6 +87,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "on_error": "deterministic_fallback",
         },
     },
+    # Optional post-retrieval ranking.  Disabled in the open-source default;
+    # deployments may provide a provider such as an HTTP sidecar without
+    # adding ML dependencies to the Memory-OS core.
+    "memory_reranker": {
+        "enabled": False,
+        "mode": "disabled",
+        "provider": "http",
+        "endpoint": "",
+        "model": "",
+        "candidate_limit": 12,
+        "rerank_candidate_limit": 12,
+        "output_limit": 5,
+        "timeout_ms": 12000,
+        "fallback": "rrf",
+    },
     "owner_review": {
         "enabled": False,
         "mode": "dry_run",
@@ -231,6 +246,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["low_clue_recall"],
         },
         {
+            "key": "memory_reranker",
+            "description": "Optional post-retrieval reranker; disabled by default",
+            "default": DEFAULT_CONFIG["memory_reranker"],
+        },
+        {
             "key": "owner_review",
             "description": "Owner review digest and channel resolver settings",
             "default": DEFAULT_CONFIG["owner_review"],
@@ -297,6 +317,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["recall_arbitration"] = _merge_recall_arbitration_config(merged.get("recall_arbitration"))
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
+    merged["memory_reranker"] = _merge_memory_reranker_config(merged.get("memory_reranker"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
     merged["right_brain_expression"] = _merge_right_brain_expression_config(merged.get("right_brain_expression"))
     merged["v3_inner_life"] = _merge_v3_inner_life_config(merged.get("v3_inner_life"))
@@ -307,6 +328,48 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
 
 def _known_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: values[key] for key in DEFAULT_CONFIG if key in values}
+
+
+def _merge_memory_reranker_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["memory_reranker"])
+    if not isinstance(value, dict):
+        return default
+    for key in default:
+        if key in value:
+            default[key] = value[key]
+    default["enabled"] = bool(default.get("enabled", False))
+    if default.get("mode") not in {"disabled", "gated_active"}:
+        default["mode"] = "disabled"
+    if default.get("provider") != "http":
+        default["provider"] = "http"
+    if default.get("fallback") != "rrf":
+        default["fallback"] = "rrf"
+    try:
+        default["candidate_limit"] = max(1, min(int(default.get("candidate_limit") or 12), 60))
+    except (TypeError, ValueError):
+        default["candidate_limit"] = 12
+    try:
+        default["rerank_candidate_limit"] = max(1, min(int(default.get("rerank_candidate_limit") or default["candidate_limit"]), default["candidate_limit"]))
+    except (TypeError, ValueError):
+        default["rerank_candidate_limit"] = default["candidate_limit"]
+    try:
+        default["output_limit"] = max(1, min(int(default.get("output_limit") or 5), default["candidate_limit"]))
+    except (TypeError, ValueError):
+        default["output_limit"] = min(5, default["candidate_limit"])
+    try:
+        default["timeout_ms"] = max(100, min(int(default.get("timeout_ms") or 12000), 120000))
+    except (TypeError, ValueError):
+        default["timeout_ms"] = 12000
+    default["endpoint"] = str(default.get("endpoint") or "").strip()
+    default["model"] = str(default.get("model") or "").strip()
+    if not default["enabled"]:
+        default["mode"] = "disabled"
+    return default
+
+
+def normalize_memory_reranker_config(value: Any) -> dict[str, Any]:
+    """Normalize optional reranker settings without enabling them."""
+    return _merge_memory_reranker_config(value)
 
 
 def _merge_substrate_providers_config(value: Any) -> dict[str, Any]:
