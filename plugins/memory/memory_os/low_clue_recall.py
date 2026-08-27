@@ -1144,88 +1144,88 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
             sys.modules.setdefault(name, module)
 
     try:
-        from hermes_cli.config import load_config
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-    except Exception:
-        # ── W5/E4: evict a phantom namespace `agent` package ───────────
-        # 43da529 renamed agent/ -> memory_os_agent/, but a checkout can
-        # keep an untracked agent/__pycache__ shell directory behind — an
-        # importable NAMESPACE package.  The provider-ABC probe import
-        # (memory_os/__init__) caches it in sys.modules, and a cached
-        # namespace package permanently blocks the real hermes-agent
-        # regular package: its dynamic __path__ only collects portions
-        # WITHOUT __init__.py, so `import agent.portal_tags` inside
-        # hermes_cli fails even after the agent root joins sys.path.
-        # Measured on production: llm_edge_proposer skipped on every run
-        # since 2026-07-07 with hermes_runtime_import_failed.  Only
-        # phantoms are evicted (__file__ is None) — a real host agent
-        # package imported inside the Hermes process is never touched.
-        for _name in [
-            n for n in list(sys.modules)
-            if n == "agent" or n.startswith("agent.")
-        ]:
-            _mod = sys.modules.get(_name)
-            if _mod is not None and getattr(_mod, "__file__", None) is None:
-                del sys.modules[_name]
-        explicit_root = os.environ.get("HERMES_AGENT_ROOT")
-        candidates = [explicit_root, "/usr/local/lib/hermes-agent"]
-        for candidate in candidates:
-            if not candidate or not Path(candidate).exists():
-                continue
-            # An explicit test/operator root must win over an already-present
-            # Hermes installation.  Merely checking ``candidate not in
-            # sys.path`` leaves the existing installation ahead of it, so a
-            # retry after phantom-package eviction can still import the wrong
-            # hermes_cli package.
-            if candidate in sys.path:
-                sys.path.remove(candidate)
-            _insert_pos = 0
-            if sys.path and (
-                Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
-            ).exists():
-                _insert_pos = 1
-            sys.path.insert(_insert_pos, candidate)
-            if explicit_root:
-                break
         try:
             from hermes_cli.config import load_config
             from hermes_cli.runtime_provider import resolve_runtime_provider
         except Exception:
-            _restore_import_state()
+            # ── W5/E4: evict a phantom namespace `agent` package ───────────
+            # 43da529 renamed agent/ -> memory_os_agent/, but a checkout can
+            # keep an untracked agent/__pycache__ shell directory behind — an
+            # importable NAMESPACE package.  The provider-ABC probe import
+            # (memory_os/__init__) caches it in sys.modules, and a cached
+            # namespace package permanently blocks the real hermes-agent
+            # regular package: its dynamic __path__ only collects portions
+            # WITHOUT __init__.py, so `import agent.portal_tags` inside
+            # hermes_cli fails even after the agent root joins sys.path.
+            # Measured on production: llm_edge_proposer skipped on every run
+            # since 2026-07-07 with hermes_runtime_import_failed.  Only
+            # phantoms are evicted (__file__ is None) — a real host agent
+            # package imported inside the Hermes process is never touched.
+            for _name in [
+                n for n in list(sys.modules)
+                if n == "agent" or n.startswith("agent.")
+            ]:
+                _mod = sys.modules.get(_name)
+                if _mod is not None and getattr(_mod, "__file__", None) is None:
+                    del sys.modules[_name]
+            explicit_root = os.environ.get("HERMES_AGENT_ROOT")
+            candidates = [explicit_root, "/usr/local/lib/hermes-agent"]
+            for candidate in candidates:
+                if not candidate or not Path(candidate).exists():
+                    continue
+                # An explicit test/operator root must win over an already-present
+                # Hermes installation.  Merely checking ``candidate not in
+                # sys.path`` leaves the existing installation ahead of it, so a
+                # retry after phantom-package eviction can still import the wrong
+                # hermes_cli package.
+                if candidate in sys.path:
+                    sys.path.remove(candidate)
+                _insert_pos = 0
+                if sys.path and (
+                    Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
+                ).exists():
+                    _insert_pos = 1
+                sys.path.insert(_insert_pos, candidate)
+                if explicit_root:
+                    break
+            try:
+                from hermes_cli.config import load_config
+                from hermes_cli.runtime_provider import resolve_runtime_provider
+            except Exception:
+                return {
+                    "ok": False,
+                    "code": "hermes_runtime_adapter_unavailable",
+                    "reason_codes": ["hermes_runtime_import_failed"],
+                }
+        try:
+            hermes_config = load_config()
+            model_cfg = hermes_config.get("model") if isinstance(hermes_config, dict) else {}
+            if isinstance(model_cfg, str):
+                effective_model = model_cfg.strip()
+                configured_provider = None
+            elif isinstance(model_cfg, dict):
+                effective_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+                configured_provider = str(model_cfg.get("provider") or "").strip() or None
+            else:
+                effective_model = ""
+                configured_provider = None
+            runtime = resolve_runtime_provider(requested=configured_provider, target_model=effective_model or None)
+        except Exception:
             return {
                 "ok": False,
-                "code": "hermes_runtime_adapter_unavailable",
-                "reason_codes": ["hermes_runtime_import_failed"],
+                "code": "runtime_resolve_failed",
+                "reason_codes": ["runtime_resolve_failed"],
             }
-    try:
-        hermes_config = load_config()
-        model_cfg = hermes_config.get("model") if isinstance(hermes_config, dict) else {}
-        if isinstance(model_cfg, str):
-            effective_model = model_cfg.strip()
-            configured_provider = None
-        elif isinstance(model_cfg, dict):
-            effective_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
-            configured_provider = str(model_cfg.get("provider") or "").strip() or None
-        else:
-            effective_model = ""
-            configured_provider = None
-        runtime = resolve_runtime_provider(requested=configured_provider, target_model=effective_model or None)
-    except Exception:
-        _restore_import_state()
         return {
-            "ok": False,
-            "code": "runtime_resolve_failed",
-            "reason_codes": ["runtime_resolve_failed"],
+            "ok": True,
+            "runtime": runtime,
+            "api_mode": runtime.get("api_mode"),
+            "provider": runtime.get("provider") or configured_provider,
+            "model": runtime.get("model") or effective_model,
+            "credential_present": bool(runtime.get("api_key")),
         }
-    _restore_import_state()
-    return {
-        "ok": True,
-        "runtime": runtime,
-        "api_mode": runtime.get("api_mode"),
-        "provider": runtime.get("provider") or configured_provider,
-        "model": runtime.get("model") or effective_model,
-        "credential_present": bool(runtime.get("api_key")),
-    }
+    finally:
+        _restore_import_state()
 
 
 def _call_openai_chat(

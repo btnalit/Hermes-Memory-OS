@@ -84,11 +84,14 @@ fail-open to the original RRF result:
 ```
 
 When enabled, the reranker receives only the query and bounded candidate text
-from the existing retrieval result. It can change the display order of the
-current crystallized-memory candidates only. It does not change FTS5, vector
-retrieval, RRF semantics, internal truncation, deduplication, context routing,
-canonical memory, graph state, candidate state, or approval state. Provider
-failure, timeout, invalid JSON, or empty results return the original RRF path.
+from the existing retrieval result, and reorders the current crystallized-memory
+candidates only — it does not change FTS5, vector retrieval, RRF semantics,
+deduplication, context routing, canonical memory, graph state, candidate state,
+or approval state. It does replace the crystallized-section truncation policy:
+the pre-existing MAX_TOTAL=20 record cap is bypassed, and the section is capped
+at `memory_reranker.output_limit` (default 5) instead. Provider failure,
+timeout, invalid JSON, or empty results return the original RRF path and
+restore the MAX_TOTAL=20 cap.
 
 Keep service addresses, model paths, credentials, and profile-specific values
 outside the public repository. The production overlay should be applied by the

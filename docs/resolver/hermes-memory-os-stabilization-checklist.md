@@ -4968,6 +4968,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `3f447dc..HEAD`：#74/#75 评审修复（DF）——embedder 失败类型化 + `memory_embedder_fallback_fts` error_record、RAGFlow 空结果权威化 + 畸形 chunk 免连坐、import-state finally 化、INV-5 豁免记录、rerank 截断文档如实化；+11 测试，全量 3646 passed / 13 skipped / 0 failed。
+
 - `1ed7ded..HEAD`：RAGFlow v0.27 retrieval adapter 兼容修复——首选 `/api/v1/retrieval`、解析 `data.chunks`、保留旧接口回退；新增反事实测试，28 seam tests / 3639 full-suite tests 全部通过。
 
 - （BD 之前的条目随原文件丢失，区间散见上方历史摘要；最后已推送提交为 `abcce26`。）
@@ -7309,3 +7311,59 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
 - **运行验证**：RAGFlow v0.27.0 `healthz` 正常，正式 adapter 返回 3 个带 provenance 的
   chunks；sannai RAGFlow 只读探针 `status=ok` 且 `canonical_unchanged=true`；Hindsight
   sannai health 正常；不写入 Memory-OS canonical store。
+
+## DF — #74/#75 合并后评审修复：远程调用失败可观测化 + RAGFlow 空结果权威化（2026-08-27）
+
+- **背景**：#74（可选远程 embedding/reranking）与 #75（RAGFlow v0.27 adapter）合并后
+  双子代理 code review 复核，发现 4 项代码缺陷与 2 项文档失实。本节同时补记流程欠账：
+  **#74 未按 definition-of-done 写入本清单**（无章节、无 footer 条目），其范围为
+  `1ed7ded`（HttpEmbedder/HttpReranker、RRF 后 rerank、phantom namespace 修复），以本节
+  E1/E3/E5 的修复记录一并覆盖。
+- **E1 embedder 静默失败（HIGH）**：`HttpEmbedder._request` 把全部远程失败吞成 `None`，
+  与合法空结果不可区分，`is_available()` 恒真——正是"Completion Is Not Output"点名的
+  缺陷类别，且同 PR 的 `HttpReranker` 已示范正确做法（不对称本身即证据）。修复：新增
+  `EmbedderError(reason)`（闭集 timeout/http_error/network_error/malformed_response），
+  `_request` 按类抛出；`embed()`/`warmup()` 内部捕获保契约（`b""`/`False`），
+  `embed_query` 上传；`prefetch._crystallized_lines` 捕获后记
+  `memory_embedder_fallback_fts` error_record（warning/recoverable），随后按"向量为空"
+  fail-open 到 FTS-only。`LocalEmbedder` 返回 `None`（非异常）不产生该记录（有测试钉住）。
+  生产相关性：main 与 sannai 两 profile 自 2026-08-26 起均 active 了
+  `vector_embedder_endpoint`（127.0.0.1:8091 BGE-M3），此缺陷在产线是真实哑火面。
+- **E2 修复自身引入、当场被全量拦下的 import 链回归**：prefetch 顶层
+  `from .embedder import EmbedderError` 把 embedder 的顶层 `import numpy` 拉进包
+  import 链，cron 干净子进程（stripped env，user-site 不可达）`ModuleNotFoundError`
+  ——全量 2 FAIL（monitor ingress guard 与 exposure_rollup helper 的 clean-child 测试）。
+  修法：改函数内 import，与 `cli.py`/`cognitive_loop.py`/`__init__.py` 三处既有惯例对齐
+  （全库 embedder import 本就全部函数内，惯例存在的理由正是包导入不得依赖 numpy）。
+  教训重申：**目标测试全绿 ≠ 集成安全；import 链回归只有全量能拦**（W"永不只跑自己
+  加的测试"再次兑现——本轮定向 173 passed 时该回归已存在）。
+- **E3 rerank 截断声称失实（文档）**：`docs/configuration.md` 与 #74 PR body 声称"仅改
+  显示顺序、不改 truncation"，实测 rerank 命中即 early-return 跳过 MAX_TOTAL=20 截断、
+  改用 `output_limit`（默认 5）——选择集大小变化且被裁记录退出归因输入。文档已改口
+  如实；行为未动（output_limit 量级留待 owner 另裁）。
+- **E4 INV-5 显式豁免记录**：CLAUDE.md INV-5 下新增例外条目：prefetch 内两个远程调用
+  （embed 8s 硬编码不可配 + rerank 默认 12s/knob 上限 120s）同轮串行最坏 20s/128s；
+  接受理由（输入有界、typed fail-open、零写面）与两条不许可（8s 数字不得作为新热路径
+  预算先例——它的安全性来自 fact_judge 的离线属性，数字不继承出身；新增热路径网络
+  调用需自己的裁决记录）。
+- **E5 import-state 恢复 finally 化（MEDIUM）**：`_resolve_hermes_default_runtime` 原靠
+  3 处手工 `_restore_import_state()`，幽灵包驱逐 + `sys.path` 段完全无 try 保护，异常
+  即泄漏。改整体 try/finally（分支语义逐字节保持）；新增 2 反事实测试：mid-mutation
+  异常后 `sys.path`/`sys.modules` 完全恢复且异常仍上传；显式 `HERMES_AGENT_ROOT` 去重
+  前置——#74 标题自称的修复里唯一无测试的逻辑首次被钉住。
+- **E6 RAGFlow fallback 过宽（HIGH）+ 畸形 chunk 连坐（MEDIUM）**：`if parsed:` 把
+  200+空 chunks 当失败再打一次 legacy 请求（空/挂掉语义混淆、成本延迟翻倍）；单 chunk
+  `similarity:"N/A"` 令 `float()` 抛错整批丢弃、再被 legacy 结果掩盖（`float` 行是
+  pre-existing，#75 的重试结构放大了后果）。修复：`_parse_response` 以"信封是否被识别"
+  为判据返回 `None`（alien）/list（空 list 是权威空），循环判 `is not None`；单 chunk
+  字段提取 per-chunk try/except 跳过、兄弟存活。`search()` 仍 fail-open、目前无生产
+  调用方（休眠）。4 条 URL-aware 反事实测试（含调用次数与顺序断言；既有 MockClient
+  URL-blind，测不出第二次调用）。
+- **反事实覆盖**：全部修复经 cp 备份还原旧代码验证测试必挂（embedder 族 4 挂、
+  finally 1 挂、RAGFlow 2 挂），恢复后全绿；未用 `git checkout --`。
+- **测试结果**：+11 测试（embedder 3、prefetch 2、low_clue_recall 2、seam 4）；全量
+  **3646 passed / 13 skipped / 0 failed**；五门（import-cycle、write-surface
+  `unclassified_count=0`、static-hygiene、public-checkout `--strict`、
+  `git diff --check`）全绿。
+- **更正**：DE 节"独立 code review 无 BLOCKER/HIGH"与本次复核矛盾（E6 的 fallback
+  过宽即为可复现 HIGH），以本节为准。

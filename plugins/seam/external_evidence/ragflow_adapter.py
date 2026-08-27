@@ -145,7 +145,13 @@ class RAGFlowAdapter:
                     continue
                 data = resp.json()
                 parsed = self._parse_response(data, top_k)
-                if parsed:
+                # ``None`` means the envelope shape was unrecognized (alien
+                # or malformed) — try the next attempt.  A list — even an
+                # EMPTY one — means the contract envelope was found and the
+                # result is authoritative: zero chunks is a legitimate
+                # "no results", not a failure, and must not trigger the
+                # fallback call.
+                if parsed is not None:
                     return parsed
             except Exception:
                 continue  # fail-open — try compatibility fallback
@@ -165,27 +171,48 @@ class RAGFlowAdapter:
 
     def _parse_response(
         self, data: dict[str, Any], top_k: int,
-    ) -> list[EvidenceChunk]:
+    ) -> list[EvidenceChunk] | None:
+        """Parse a RAGFlow response envelope into chunks.
+
+        Returns ``None`` when the envelope shape itself is unrecognized —
+        neither the v0.27 retrieval shape (``data.chunks``) nor the legacy
+        shape (``data.documents`` / ``data`` as a bare list) is present, or
+        the recognized key's value isn't a list.  That is the caller's
+        signal to try the next attempt.
+
+        Returns a list — possibly EMPTY — when a recognized envelope was
+        found.  An empty list here is an authoritative "no results", not a
+        failure, and must not be conflated with an unrecognized envelope.
+        """
         chunks: list[EvidenceChunk] = []
-        # RAGFlow returns results in "data.documents" or "data"
+        # RAGFlow returns results in "data.chunks" (v0.27 retrieval) or
+        # "data.documents" (legacy dataset search) or "data" as a bare list.
         results = data.get("data", {})
         if isinstance(results, dict):
-            docs = results.get("documents") or results.get("chunks") or []
+            if "documents" in results:
+                docs = results.get("documents")
+            elif "chunks" in results:
+                docs = results.get("chunks")
+            else:
+                return None  # alien envelope — neither known shape present
         elif isinstance(results, list):
             docs = results
         else:
-            return []
+            return None
 
         if not isinstance(docs, list):
-            return []
+            return None
 
         for doc in docs[:top_k]:
             if not isinstance(doc, dict):
                 continue
-            content = str(doc.get("content") or doc.get("text") or "")
-            doc_id = str(doc.get("document_id") or doc.get("id") or "")
-            chunk_id = str(doc.get("chunk_id") or doc.get("id") or "")
-            score = float(doc.get("score") or doc.get("similarity") or 0.0)
+            try:
+                content = str(doc.get("content") or doc.get("text") or "")
+                doc_id = str(doc.get("document_id") or doc.get("id") or "")
+                chunk_id = str(doc.get("chunk_id") or doc.get("id") or "")
+                score = float(doc.get("score") or doc.get("similarity") or 0.0)
+            except (TypeError, ValueError):
+                continue  # malformed chunk — skip it, siblings survive
 
             external_ref = f"ragflow:{doc_id}:{chunk_id}" if doc_id else ""
             if not content.strip() or not external_ref:
