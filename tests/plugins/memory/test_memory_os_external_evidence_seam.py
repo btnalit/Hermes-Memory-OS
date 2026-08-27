@@ -170,6 +170,42 @@ class TestSeamConfig:
 # ── D3: ragflow_adapter mock tests ───────────────────────────────────
 
 
+class _CannedResponse:
+    """Generic mock HTTP response — fixed status_code + JSON body."""
+
+    def __init__(self, status_code, data):
+        self.status_code = status_code
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+class _UrlAwareClient:
+    """Mock HTTP client that records every requested URL and dispatches a
+    canned response (or raises an exception instance) keyed by URL suffix.
+
+    Unlike the URL-blind ``MockClient``/``FallbackClient`` used elsewhere in
+    this file, this lets a test assert both which endpoint(s) were called
+    and in what order — required to prove the v0.27-empty-is-authoritative
+    and alien-envelope-falls-through semantics.
+    """
+
+    def __init__(self, responses):
+        # responses: {url_suffix: _CannedResponse | Exception}
+        self._responses = responses
+        self.calls: list[str] = []
+
+    def post(self, url, *, json, headers, timeout):
+        self.calls.append(url)
+        for suffix, outcome in self._responses.items():
+            if url.endswith(suffix):
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+        raise AssertionError(f"unexpected URL requested: {url}")
+
+
 class TestRAGFlowAdapter:
     def test_adapter_disabled_by_default(self):
         from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
@@ -407,6 +443,182 @@ class TestRAGFlowAdapter:
         chunks = adapter._parse_response(data, 5)
         assert len(chunks) == 1
         assert chunks[0].content == "Valid"
+
+    def test_v027_authoritative_empty_no_fallback(self):
+        """Fix 1 (HIGH): HTTP 200 + valid v0.27 envelope + zero chunks is an
+        authoritative empty result — must NOT trigger the legacy fallback
+        call. Reverting to `if parsed:` makes this FAIL (two calls)."""
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        client = _UrlAwareClient({
+            "/api/v1/retrieval": _CannedResponse(
+                200, {"code": 0, "data": {"chunks": [], "total": 0}},
+            ),
+            "/documents/search": _CannedResponse(
+                200,
+                {"data": {"documents": [
+                    {"content": "must not be reached", "document_id": "x", "id": "y"},
+                ]}},
+            ),
+        })
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-empty",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=client)
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("no results query", top_k=5)
+
+        assert results == []
+        assert client.calls == ["http://localhost:9380/api/v1/retrieval"]
+
+    def test_malformed_chunk_skipped_siblings_survive(self):
+        """Fix 2 (MEDIUM): a single malformed chunk (non-numeric score)
+        must not abort the whole parse — sibling valid chunks survive, and
+        the envelope is still recognized (no fallback). Reverting to the
+        unguarded `float(...)` makes this FAIL (ValueError propagates)."""
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        client = _UrlAwareClient({
+            "/api/v1/retrieval": _CannedResponse(
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "chunks": [
+                            {
+                                "content": "Valid chunk",
+                                "document_id": "doc-ok",
+                                "id": "chunk-ok",
+                                "similarity": 0.8,
+                            },
+                            {
+                                "content": "Malformed chunk",
+                                "document_id": "doc-bad",
+                                "id": "chunk-bad",
+                                "similarity": "N/A",
+                            },
+                        ],
+                        "total": 2,
+                    },
+                },
+            ),
+            "/documents/search": _CannedResponse(
+                200,
+                {"data": {"documents": [
+                    {"content": "must not be reached", "document_id": "z", "id": "z"},
+                ]}},
+            ),
+        })
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-malformed",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=client)
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("malformed score query", top_k=5)
+
+        assert len(results) == 1
+        assert results[0].content == "Valid chunk"
+        assert results[0].external_ref == "ragflow:doc-ok:chunk-ok"
+        assert client.calls == ["http://localhost:9380/api/v1/retrieval"]
+
+    def test_v027_failure_falls_back_to_legacy_ordered_calls(self):
+        """Regression-preserve: v0.27 endpoint raising must still fall back
+        to the legacy endpoint, with calls made in the right order."""
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        client = _UrlAwareClient({
+            "/api/v1/retrieval": ConnectionError("unreachable"),
+            "/documents/search": _CannedResponse(
+                200,
+                {"data": {"documents": [
+                    {
+                        "content": "Legacy fallback result",
+                        "document_id": "doc-legacy2",
+                        "chunk_id": "chunk-legacy2",
+                        "score": 0.7,
+                    },
+                ]}},
+            ),
+        })
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-legacy2",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=client)
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("legacy raise fallback", top_k=1)
+
+        assert len(results) == 1
+        assert results[0].external_ref == "ragflow:doc-legacy2:chunk-legacy2"
+        assert client.calls == [
+            "http://localhost:9380/api/v1/retrieval",
+            "http://localhost:9380/api/v1/datasets/dataset-legacy2/documents/search",
+        ]
+
+    def test_alien_envelope_falls_through_to_legacy(self):
+        """Fix 1 discriminator: an unrecognized envelope shape (neither the
+        v0.27 nor the legacy shape) must be treated as inconclusive, not as
+        an authoritative empty — falls through to the legacy attempt."""
+        from plugins.seam.external_evidence.ragflow_adapter import RAGFlowAdapter
+
+        client = _UrlAwareClient({
+            "/api/v1/retrieval": _CannedResponse(200, {"weird": True}),
+            "/documents/search": _CannedResponse(
+                200,
+                {"data": {"documents": [
+                    {
+                        "content": "Legacy after alien envelope",
+                        "document_id": "doc-alien",
+                        "chunk_id": "chunk-alien",
+                        "score": 0.6,
+                    },
+                ]}},
+            ),
+        })
+
+        config = {
+            "providers": {
+                "ragflow": {
+                    "enabled": True,
+                    "base_url": "http://localhost:9380",
+                    "dataset_id": "dataset-alien",
+                },
+            },
+        }
+        adapter = RAGFlowAdapter(config, client=client)
+        adapter._read_api_key = lambda: "test-key"
+
+        results = adapter.search("alien envelope query", top_k=1)
+
+        assert len(results) == 1
+        assert results[0].external_ref == "ragflow:doc-alien:chunk-alien"
+        assert client.calls == [
+            "http://localhost:9380/api/v1/retrieval",
+            "http://localhost:9380/api/v1/datasets/dataset-alien/documents/search",
+        ]
 
 
 # ── D4: reconcile tests ──────────────────────────────────────────────

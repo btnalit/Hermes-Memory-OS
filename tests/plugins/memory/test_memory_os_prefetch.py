@@ -1408,6 +1408,139 @@ def test_deterministic_floor_recall_header_annotation(tmp_path):
     )
 
 
+def test_crystallized_lines_embedder_failure_falls_back_to_fts(tmp_path):
+    """HttpEmbedder failure in the vector lane must fail open to FTS, not crash.
+
+    Counterfactual: without an `EmbedderError` catch around
+    `embedder.embed_query(...)` in `_crystallized_lines`, a dead embedding
+    endpoint raises uncaught and the caller loses the crystallized section
+    entirely instead of degrading to FTS-only results. The fix must also
+    leave a typed error_record so the degradation is observable — a silent
+    catch that produces no record would be indistinguishable from a legit
+    empty vector result (the same defect class documented in CLAUDE.md's
+    "Completion Is Not Output" section).
+    """
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.embedder import HttpEmbedder
+    from plugins.memory.memory_os.knob_overrides import register_override
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="embed_fail_001",
+        kind="note",
+        body="Python 编程语言相关的内容",
+        source_event_ids=["evt_embed_fail"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="embed_fail_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-25T12:00:00Z",
+        provisional=False,
+    )
+    service.write_approved_record(candidate, decision, file_name="embed_fail.md")
+
+    # A dead endpoint: connection refused, tiny timeout so the test stays fast.
+    index = MemoryOSIndex(store.roots)
+    index._embedder = HttpEmbedder(
+        endpoint="http://127.0.0.1:1", model_name="test-model", timeout_seconds=0.5,
+    )
+    index.rebuild_from_store(store)
+
+    expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+    register_override(
+        "vector_retrieval_enabled", True,
+        prior=False, proposed_by="test", approved_via="test",
+        expires_at=expires, roots=store.roots,
+    )
+
+    error_records: list = []
+    lines, degradation_level, _record_ids = _crystallized_lines(
+        store, query="Python", index=index, error_records=error_records,
+    )
+
+    # FTS-derived output must still be present — fail-open intact.
+    assert any("Python" in ln for ln in lines), (
+        f"Expected FTS-derived output despite embedder failure. Lines: {lines}"
+    )
+    assert degradation_level == 0, (
+        f"FTS hits should keep degradation_level at 0, got {degradation_level}"
+    )
+
+    embedder_errors = [
+        r for r in error_records if r.get("error_code") == "memory_embedder_fallback_fts"
+    ]
+    assert len(embedder_errors) == 1, (
+        f"Expected exactly 1 memory_embedder_fallback_fts error_record, got "
+        f"{len(embedder_errors)}. error_records={error_records}"
+    )
+    assert embedder_errors[0]["schema_version"] == "memory-os.error_record.v0"
+    assert embedder_errors[0]["severity"] == "warning"
+    assert embedder_errors[0]["recoverable"] is True
+
+
+def test_crystallized_lines_local_embedder_none_produces_no_error_record(tmp_path):
+    """LocalEmbedder returning None (no dependency installed) is legit — no error_record.
+
+    Counterfactual: if the embedder failure handling were widened to treat
+    any None/failed `embed_query` result as an error (rather than catching
+    only `EmbedderError`), a plain unavailable LocalEmbedder would start
+    spuriously emitting `memory_embedder_fallback_fts` records on every
+    query, which is not a failure — it's the documented degrade path.
+    """
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.knob_overrides import register_override
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="local_none_001",
+        kind="note",
+        body="Python 编程语言相关的内容",
+        source_event_ids=["evt_local_none"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="local_none_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-25T12:00:00Z",
+        provisional=False,
+    )
+    service.write_approved_record(candidate, decision, file_name="local_none.md")
+
+    class NoneEmbedder:
+        def is_available(self):
+            return True
+
+        def embed_query(self, _text):
+            return None
+
+        def embed(self, _text):
+            return b""
+
+    index = MemoryOSIndex(store.roots)
+    index._embedder = NoneEmbedder()
+    index.rebuild_from_store(store)
+
+    expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+    register_override(
+        "vector_retrieval_enabled", True,
+        prior=False, proposed_by="test", approved_via="test",
+        expires_at=expires, roots=store.roots,
+    )
+
+    error_records: list = []
+    lines, _degradation_level, _record_ids = _crystallized_lines(
+        store, query="Python", index=index, error_records=error_records,
+    )
+
+    assert any("Python" in ln for ln in lines)
+    assert not [r for r in error_records if r.get("error_code") == "memory_embedder_fallback_fts"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # P1a Graph Layer Injection — Task 3 integration tests
 # ═══════════════════════════════════════════════════════════════════════════

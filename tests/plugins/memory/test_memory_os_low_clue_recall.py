@@ -1,6 +1,8 @@
 import argparse
 import json
 
+import pytest
+
 from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.fixtures import build_event, build_working_item
@@ -1034,6 +1036,175 @@ def test_w5_resolver_evicts_phantom_namespace_agent(tmp_path, monkeypatch):
             f"resolver must survive the phantom namespace agent package: {result}"
         )
         assert result.get("model") == "w5-test-model"
+    finally:
+        for name in [n for n in list(_sys.modules)
+                     if n == "agent" or n.startswith("agent.")
+                     or n == "hermes_cli" or n.startswith("hermes_cli.")]:
+            del _sys.modules[name]
+        _sys.modules.update(saved_modules)
+        _sys.path[:] = saved_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR #74/75 review — _resolve_hermes_default_runtime exception-safety
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_resolve_hermes_default_runtime_restores_state_on_mid_mutation_exception(tmp_path, monkeypatch):
+    """The phantom-eviction / sys.path mutation block must be exception-safe.
+
+    Before the fix, `_restore_import_state()` was called explicitly before
+    three return points, but the block that evicts phantom `agent` modules
+    from sys.modules and splices `HERMES_AGENT_ROOT` into sys.path had no
+    try/except covering it at all. An exception raised there propagated out
+    of `_resolve_hermes_default_runtime` with sys.path/sys.modules left
+    mutated — leaking into every subsequent import in the process.
+
+    Counterfactual: this test forces an exception via a monkeypatched
+    `Path.exists` AFTER the candidate has already been removed from
+    sys.path (a genuine mid-mutation state) but BEFORE it is reinserted
+    at the front. Without the fix (no try/finally around the mutation),
+    sys.path is left short one entry and this test fails. With the fix,
+    the exception still propagates (this test asserts that too — the
+    fix must not silently swallow it) but sys.path/sys.modules are fully
+    restored first.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    root = tmp_path / "stale-root"
+    root.mkdir()
+
+    saved_modules = {
+        name: _sys.modules.pop(name)
+        for name in list(_sys.modules)
+        if name == "agent" or name.startswith("agent.")
+        or name == "hermes_cli" or name.startswith("hermes_cli.")
+    }
+    saved_path = list(_sys.path)
+    try:
+        # Pre-existing stale entry: the same root the function will be
+        # told to use via HERMES_AGENT_ROOT is already present, deep in
+        # sys.path, so the `sys.path.remove(candidate)` branch actually
+        # executes (a real mutation) before the injected failure.
+        _sys.path.append(str(root))
+        pre_call_sys_path = list(_sys.path)
+        pre_call_agent_hermes_modules = {
+            name: mod for name, mod in _sys.modules.items()
+            if name == "agent" or name.startswith("agent.")
+            or name == "hermes_cli" or name.startswith("hermes_cli.")
+        }
+
+        monkeypatch.setenv("HERMES_AGENT_ROOT", str(root))
+
+        call_count = {"n": 0}
+        real_exists = _Path.exists
+
+        def _flaky_exists(self):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("synthetic mid-mutation failure")
+            return real_exists(self)
+
+        monkeypatch.setattr(_Path, "exists", _flaky_exists)
+
+        with pytest.raises(RuntimeError, match="synthetic mid-mutation failure"):
+            low_clue_recall_module._resolve_hermes_default_runtime({"provider": "hermes_default"})
+
+        assert _sys.path == pre_call_sys_path, (
+            f"sys.path leaked after an exception mid-mutation. "
+            f"pre-call={pre_call_sys_path[:5]}... post-call={_sys.path[:5]}..."
+        )
+        post_call_agent_hermes_modules = {
+            name: mod for name, mod in _sys.modules.items()
+            if name == "agent" or name.startswith("agent.")
+            or name == "hermes_cli" or name.startswith("hermes_cli.")
+        }
+        assert post_call_agent_hermes_modules == pre_call_agent_hermes_modules, (
+            "sys.modules leaked agent/hermes_cli entries after mid-mutation exception"
+        )
+    finally:
+        for name in [n for n in list(_sys.modules)
+                     if n == "agent" or n.startswith("agent.")
+                     or n == "hermes_cli" or n.startswith("hermes_cli.")]:
+            del _sys.modules[name]
+        _sys.modules.update(saved_modules)
+        _sys.path[:] = saved_path
+
+
+def test_resolve_hermes_default_runtime_dedupes_stale_explicit_root_to_front(tmp_path, monkeypatch):
+    """PR #74 untested logic: `sys.path.remove(candidate)` before reinsert.
+
+    When HERMES_AGENT_ROOT is already present in sys.path (a stale entry
+    left over from a previous call/process) but not at the front, the
+    resolver must still move it to the front rather than leaving the
+    stale copy in place and inserting a second one. Without the
+    `sys.path.remove(candidate)` guard before the insert, the explicit
+    root would end up duplicated -- one stale copy at its old position,
+    one new copy at the front -- rather than canonicalized to a single
+    front entry.
+    """
+    import sys as _sys
+
+    from plugins.memory.memory_os.low_clue_recall import _resolve_hermes_default_runtime
+
+    root = tmp_path / "hermes-agent"
+    (root / "agent").mkdir(parents=True)
+    (root / "agent" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "agent" / "portal_tags.py").write_text("TAGS = ['ok']\n", encoding="utf-8")
+    (root / "hermes_cli").mkdir()
+    (root / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "hermes_cli" / "config.py").write_text(
+        "import agent.portal_tags\n"
+        "def load_config():\n"
+        "    return {'model': {'default': 'w5-test-model', 'provider': 'w5'}}\n",
+        encoding="utf-8",
+    )
+    (root / "hermes_cli" / "runtime_provider.py").write_text(
+        "import sys\n"
+        "def resolve_runtime_provider(requested=None, target_model=None):\n"
+        "    return {'api_mode': 'chat_completions', 'provider': 'w5',"
+        " 'model': target_model or 'w5-test-model', 'api_key': 'k',"
+        " 'sys_path_snapshot': list(sys.path)}\n",
+        encoding="utf-8",
+    )
+
+    checkout = tmp_path / "checkout"
+    (checkout / "agent" / "__pycache__").mkdir(parents=True)
+
+    saved_modules = {
+        name: _sys.modules.pop(name)
+        for name in list(_sys.modules)
+        if name == "agent" or name.startswith("agent.")
+        or name == "hermes_cli" or name.startswith("hermes_cli.")
+    }
+    saved_path = list(_sys.path)
+    try:
+        _sys.path.insert(0, str(checkout))
+        import agent  # ABC-probe equivalent: caches the phantom namespace
+        assert getattr(agent, "__file__", None) is None, "precondition: namespace phantom"
+
+        # Stale: root already sits deep in sys.path before the call, as
+        # if left over from an earlier resolver invocation in this process.
+        _sys.path.append(str(root))
+        stale_position = _sys.path.index(str(root))
+        assert stale_position > 1, "precondition: root must start deep in sys.path"
+
+        monkeypatch.setenv("HERMES_AGENT_ROOT", str(root))
+        result = _resolve_hermes_default_runtime({"provider": "hermes_default"})
+
+        assert result.get("ok") is True, f"resolver must succeed: {result}"
+        assert result.get("model") == "w5-test-model"
+
+        snapshot = result["runtime"]["sys_path_snapshot"]
+        assert snapshot.count(str(root)) == 1, (
+            f"explicit root must appear exactly once (deduped) in sys.path, "
+            f"got {snapshot.count(str(root))}: {snapshot[:5]}"
+        )
+        assert snapshot[0] == str(root) or snapshot[1] == str(root), (
+            f"explicit root must be moved to the front of sys.path, not left "
+            f"at its stale position: {snapshot[:5]}"
+        )
     finally:
         for name in [n for n in list(_sys.modules)
                      if n == "agent" or n.startswith("agent.")

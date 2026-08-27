@@ -14,12 +14,26 @@ from __future__ import annotations
 
 import sys
 import json
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import numpy as np
 
 
 _WINDOWS = sys.platform == "win32"
+
+
+class EmbedderError(RuntimeError):
+    """A remote embedding request failed or returned an invalid response.
+
+    ``reason`` is a stable machine-readable code (``timeout``,
+    ``http_error``, ``network_error``, ``malformed_response``) so callers
+    can record a typed error_record without parsing the message text.
+    """
+
+    def __init__(self, reason: str, message: str | None = None) -> None:
+        self.reason = reason
+        super().__init__(message or reason)
 
 
 class LocalEmbedder:
@@ -162,7 +176,7 @@ class HttpEmbedder:
     def is_available(self) -> bool:
         return bool(self.endpoint)
 
-    def _request(self, text: str) -> np.ndarray | None:
+    def _request(self, text: str) -> np.ndarray:
         payload = {"input": [text], "model": self._model_name}
         request = Request(
             self.endpoint,
@@ -172,22 +186,44 @@ class HttpEmbedder:
         )
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
-                body = json.loads(response.read().decode("utf-8"))
+                raw = response.read()
+        except HTTPError as exc:
+            raise EmbedderError("http_error", f"embedding request failed: HTTP {exc.code}") from exc
+        except TimeoutError as exc:
+            raise EmbedderError("timeout", f"embedding request timed out: {exc}") from exc
+        except URLError as exc:
+            reason = "timeout" if isinstance(exc.reason, TimeoutError) else "network_error"
+            raise EmbedderError(reason, f"embedding request failed: {exc.reason}") from exc
+        except OSError as exc:
+            raise EmbedderError("network_error", f"embedding request failed: {exc}") from exc
+        try:
+            body = json.loads(raw.decode("utf-8"))
             vector = body["data"][0]["embedding"]
             array = np.asarray(vector, dtype=np.float32)
-            return array if array.ndim == 1 and array.size else None
-        except (OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-            return None
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise EmbedderError(
+                "malformed_response", f"embedding response malformed: {type(exc).__name__}"
+            ) from exc
+        if not (array.ndim == 1 and array.size):
+            raise EmbedderError("malformed_response", "embedding response vector was empty")
+        return array
 
     def embed(self, text: str) -> bytes:
-        vector = self._request(text)
-        return vector.tobytes() if vector is not None else b""
+        try:
+            vector = self._request(text)
+        except EmbedderError:
+            return b""
+        return vector.tobytes()
 
-    def embed_query(self, text: str) -> np.ndarray | None:
+    def embed_query(self, text: str) -> np.ndarray:
         return self._request(text)
 
     def warmup(self) -> bool:
-        return self._request("warmup") is not None
+        try:
+            self._request("warmup")
+        except EmbedderError:
+            return False
+        return True
 
 
 def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | HttpEmbedder | None:

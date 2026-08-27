@@ -1841,7 +1841,29 @@ def _crystallized_lines(
         "vector_retrieval_enabled", default=False, roots=store.roots,
     )
     if vector_enabled and embedder is not None and hasattr(embedder, "is_available") and embedder.is_available():
-        qvec = embedder.embed_query(search_query) if search_query else None
+        qvec = None
+        if search_query:
+            # Local import: embedder.py imports numpy at module scope, and the
+            # package import chain must stay importable in cron child processes
+            # that run without it.  Reaching this branch means an embedder
+            # instance exists, so the module is already loaded.
+            from .embedder import EmbedderError
+
+            try:
+                qvec = embedder.embed_query(search_query)
+            except EmbedderError as exc:
+                if error_records is not None:
+                    error_records.append(
+                        build_error_record(
+                            component="prefetch._crystallized_lines",
+                            operation="memory_embedder",
+                            error_code="memory_embedder_fallback_fts",
+                            severity="warning",
+                            recoverable=True,
+                            details={"error_type": type(exc).__name__, "reason": getattr(exc, "reason", "")},
+                        )
+                    )
+                qvec = None
         if qvec is not None and hasattr(index, "vector_search"):
             try:
                 vec_ids = index.vector_search(qvec, limit=60)
