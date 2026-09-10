@@ -39,6 +39,20 @@ _CRON_PROMPT = (
         ("取消吧", "cjk_imperative"),
         ("取消安装", "cjk_imperative"),
         ("我想取消这个任务", "cjk_imperative"),
+        # The object is not whitelisted. An earlier draft required one of ~20
+        # task nouns after the verb and rejected all of these — a false
+        # negative is worse than the bug being fixed here, because the
+        # cancellation sentence then becomes a new *active* anchor.
+        ("取消掉这个渲染任务", "cjk_imperative"),
+        ("停止安装插件", "cjk_imperative"),
+        ("停止渲染视频", "cjk_imperative"),
+        ("放弃这个方案", "cjk_imperative"),
+        ("取消这个视频的渲染", "cjk_imperative"),
+        ("取消下载模型", "cjk_imperative"),
+        ("停下手上的活", "cjk_imperative"),
+        ("那个渲染任务先取消掉吧", "cjk_imperative"),
+        # 后台 contains 后 but is not the "取消…后多久" descriptive frame.
+        ("停止后台任务", "cjk_imperative"),
         ("Please stop this task.", "ascii_imperative"),
         ("abort", "ascii_imperative"),
         ("never mind, skip it", "ascii_imperative"),
@@ -76,9 +90,17 @@ def test_cancellation_imperatives_match_with_rule_id(text, rule):
         # questions are never commands
         "这个任务取消了吗？",
         "是不是取消了",
+        # ops instructions issued *while* the foreground task continues —
+        # stopping a service is not cancelling the work (production shapes,
+        # reworded)
+        "在这次迁移里停止远端 3.14 的 source gateway，其余不动",
+        "旧服务该停止的要确保停止了",
+        # a cancellation word buried in a long clause is a mention, not an order
+        "在政府宣布取消限购之后各地房价出现明显波动，市场需要时间消化这一政策变化",
         # machine-authored frames
         _CRON_PROMPT,
         "Cronjob Response: job-x (job_id: 1) ⚠️ stop",
+        "[ASYNC DELEGATION BATCH COMPLETE — deleg_abc123] 3 subagents finished; one was stopped.",
         "",
     ],
 )

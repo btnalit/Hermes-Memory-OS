@@ -4972,7 +4972,8 @@ sannai-community 仓库 README。）
   （整词 ASCII + CJK 否定/报告/疑问/宾语守卫，返回规则 id 落 audit）、新增 cron 会话与
   Hermes 机器提示词双守卫（`initialize` 不再让 cron 会话继承并墓碑主人锚点）、删除
   `context_router.py` 三份逐字词表副本与兜底分支；生产实测 sannai 113/121、main 586/731
-  条 cancelled 锚点由 cron 提示词写入。+42 测试，全量 3688 passed / 13 skipped / 0 failed，
+  条 cancelled 锚点由 cron 提示词写入；判定器用 153 条生产语料复验（拒 98、自然取消 32/32），
+  白名单宾语初版漏判 8 条已改为子句有界规则。+55 测试，全量 3701 passed / 13 skipped / 0 failed，
   五门全绿；仅 `local_pass`，待两 profile 部署 + 网关重启。
 
 - `3f447dc..HEAD`：#74/#75 评审修复（DF）——embedder 失败类型化 + `memory_embedder_fallback_fts` error_record、RAGFlow 空结果权威化 + 畸形 chunk 免连坐、import-state finally 化、INV-5 豁免记录、rerank 截断文档如实化；+11 测试，全量 3646 passed / 13 skipped / 0 failed。
@@ -7412,6 +7413,37 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
     cancelled 写入的 audit `active_task_anchor_recorded` 增 `ingress_rule`（唯一能回答
     "为什么取消"的耐久字段）。
   - `context_router.py`：删除三份私有词表、`_has_cancellation` 及三条兜底分支。
+- **合入前用生产语料复验，抓到本批最严重的一次自伤（CL 教训第二次兑现）**：初版规则只用
+  手写语料验证就准备推送。按 CL 节「验证样本自带幸存者偏差」把两个账本里**非 cron** 的 153 条
+  真实取消文本拉下来，跑真函数逐条看，结果分两半：
+
+  **好消息**——97 条被正确拒绝，且其中若干条证明旧代码不只是"噪音"而是**反向执行主人意图**：
+  `继续最小闭环，没全部完成不要停止下来！`、`已授权直接迁移……没完全迁移任务不能停止循环！`、
+  `sannai 迁移可以完全先停止后再操作迁移！按方案开干吧`——主人明说"**不要停止**""**不能停止**"
+  "开干吧"，旧代码逐条记成了取消。另有约 40 条 `[ASYNC DELEGATION BATCH COMPLETE]`、
+  9 条 `[Continuing toward your standing goal]`、12 条 `[The user sent a text document: …]`、
+  2 条 `Loading weights: 100%|…` 终端输出——**全是 Hermes 自己的框架文本**，与 cron 前导语同类，
+  说明"机器输入被当成主人话语"这个面比只看 cron 更宽。
+
+  **坏消息**——初版规则要求动词后跟一个白名单任务名词，于是 `取消掉这个渲染任务`、
+  `停止安装插件`、`停止渲染视频`、`放弃这个方案`、`取消下载模型`、`停下手上的活` **全部漏判**
+  （手工边界探针 22 条里漏 8 条）。**漏判比原缺陷更糟**：未命中的取消句会掉进
+  `_format_current_task_anchor`，把"取消这个渲染任务"本身变成一条新的 **active** 锚点。
+  白名单宾语正是本项目反复吃亏的那类反模式（CLAUDE.md「A gate whose vocabulary drifts from
+  its producer's checks nothing」的近亲：这里是**词表试图穷举世界**）。
+
+  **改法**：宾语不再枚举，改用**子句形状有界 + 拒绝式尾部**——动词须领起一个短子句
+  （动词后 ≤12 字、整子句 ≤30 字），尾部不得是描述框架（`的` 紧跟动词 / `时$` / `后多久|再|会` /
+  `吗么$`），整子句不得含业务对象（订单/订阅/开机启动…）或运维对象（服务/gateway/进程/容器…）。
+  两个对象类**扫整个子句而非仅尾部**，因为对象可以在动词之前（`旧服务该停止的要确保停止了`）；
+  裸 `.` 移出子句终止符，否则 `停止远端 2.88 的 gateway` 会在 `2` 处断句而绕过长度门。
+
+  **三个语料的最终数字**：自然取消 32/32 命中、必拒 17/17 拒绝、生产 153 条中 **98 条拒绝**
+  （初版白名单 97、中间放宽版 96——三版里这版同时最松又最准）。**残留误判约 3 条（2%）**
+  并如实登记：`不要做多余的操作！！！`（工作方式指令被 `不要做` 命中）、`先停下汇报`
+  （agent 自己的汇报文落在主人轮位置）、`……部分可以完全停止抛弃了`（停某个组件、该轮以
+  `继续修改` 结尾）。相较旧代码的 97/153（63%）加上 cron 侧 113/121 与 586/731，
+  **不声称完美，只声称已测量**。
 - **自审补加固（写完 diff 反向评审时发现）**：`machine_authored` 提前 return 会**继承上一轮
   残留的** `_foreground_task_only_prefetch=True`（该标志跨轮粘滞，既有的"零特征跟随语"
   分支也是这个形状）——即同一 provider 实例里主人先说"取消这个任务"、随后一条 cron 提示词
@@ -7428,7 +7460,7 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
 - **反事实**：HEAD 源码下新增 8 个 provider/router 测试全挂（ingress 测试文件因新符号
   collection 即错）；恢复 ingress+provider、仅保留旧 router → 3 个 router 测试仍挂；仅
   sabotage `initialize` 守卫 → 继承/墓碑测试挂。全部 cp 备份还原，未用 `git checkout --`。
-- **测试**：+42（ingress 33、anchor 6、router 3）；全量 **3688 passed / 13 skipped / 0 failed**；
+- **测试**：+55（ingress 46、anchor 6、router 3）；全量 **3701 passed / 13 skipped / 0 failed**；
   五门（import-cycle、write-surface `unclassified_count=0`、static-hygiene、public-checkout
   `--strict` PASS、`git diff --check`）全绿。仅 `local_pass`，未部署。
 - **部署要求**：provider 侧改动，**两 profile 网关都要重启**（main 也有 586 条）；部署后按

@@ -68,21 +68,53 @@ _ASCII_TOKEN_PATTERN = re.compile(r"[a-z']+")
 
 # CJK verbs are imperative only when they are neither negated / reported /
 # questioned by what precedes them ("不要停止", "已取消", "为什么取消") nor
-# attached to an object outside the foreground-task frame ("取消订单",
-# "取消前台任务时", "取消的那件事").
+# framed descriptively by what follows ("取消前台任务时", "取消订单后多久").
+#
+# The object is NOT whitelisted. An earlier draft required the verb to be
+# followed by one of ~20 task nouns, which rejected "取消掉这个渲染任务",
+# "停止安装插件" and "放弃这个方案" — natural cancellations every one. That
+# failure direction is worse than the bug this module fixes: an unmatched
+# cancellation falls through to `_format_current_task_anchor` and becomes a
+# new *active* anchor whose task is the cancellation sentence itself.
+#
+# What bounds the match instead is clause shape: an imperative is a short
+# clause that the verb heads. A cancellation word buried in a pasted article
+# or a long report sits inside a long clause and is rejected by the two
+# length bounds, without any vocabulary having to anticipate the topic.
 _CJK_CANCEL_VERBS = ("停止", "停下", "取消", "放弃", "收手")
 _CJK_PRE_NEGATION = (
     "不要", "别", "不能", "不许", "不会", "不可", "不用", "没有", "没", "未", "已",
     "已经", "是否", "会不会", "要不要", "能不能", "可否", "如何", "怎么", "为什么",
     "为何", "自动", "被", "如果", "一旦", "会", "可能",
 )
-_CJK_CANCEL_TAIL = re.compile(
-    r"^(?:来|掉|吧|了|啦|呀|啊|它|这个|那个|这项|那项|这件|那件|这条|那条|这|那|当前|前台|全部|所有|一切|一下|先)*"
-    # Task-like objects only: "取消安装" is a foreground cancellation,
-    # "取消订单" / "取消订阅" are business requests.
-    r"(?:任务|工作|操作|事|计划|安装|部署|构建|渲染|下载|运行|执行|生成|处理|同步|迁移|升级|测试)?"
-    r"(?:吧|了|啦|呀|啊)?"
-    r"(?:$|[\s，,。.！!？?；;、：:~～…）)\]】])"
+# A bare "." is deliberately absent: it splits version and decimal numbers
+# ("停止远端 2.88 的 gateway" would otherwise end its clause at "2"), and an
+# English sentence break is already handled by the ASCII rule.
+_CJK_CLAUSE_TERMINATORS = "，,。！!？?；;、\n"
+# The verb heads a short clause: at most this many characters follow it
+# before the clause ends, and the whole clause stays this short.
+_CJK_MAX_CHARS_AFTER_VERB = 12
+_CJK_MAX_CLAUSE_CHARS = 30
+_CJK_TAIL_REJECT = (
+    # "取消的那件事" / "停止的原因" — the verb is being referred to, not issued.
+    re.compile(r"^[掉了啦呀啊吧]*的"),
+    # "取消前台任务时，同时清除…" — a temporal clause about cancelling.
+    re.compile(r"时$"),
+    # "取消订单后多久到账" — note 后 alone is not enough ("停止后台任务").
+    re.compile(r"后(?:多久|再|会|能|怎|才|就)"),
+    # "这个任务取消了吗？" — an interrogative particle, not the bare mark.
+    re.compile(r"[吗么]$"),
+)
+
+# Object classes checked across the WHOLE clause, not just the tail: the object
+# can precede the verb ("旧服务该永远停止的要确保停止了").
+_CJK_CLAUSE_REJECT = (
+    # Business objects: cancelling one of these is not a foreground-task action.
+    re.compile(r"(订单|订阅|预约|会员|挂号|开机启动|自动启动|计费|合同|机票|酒店|快递|保险|课程)"),
+    # Ops objects: "停止远端 gateway" / "旧服务确保停止了" are instructions about
+    # a service, issued *while* the foreground task continues. Deliberately
+    # narrow — "停止安装插件" and "停止渲染视频" must still cancel.
+    re.compile(r"(服务|service|gateway|网关|进程|process|容器|container|systemd|timer|daemon|守护|端口|\bport\b)"),
 )
 
 # Resignation forms already carry their negation ("别做视频了" cancels the
@@ -263,6 +295,34 @@ def _ascii_negated(lower: str, start: int) -> bool:
     return any(token in _ASCII_NEGATION_TOKENS for token in preceding)
 
 
+def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Return the span of the clause containing ``text[start:end]``."""
+    left = start
+    while left > 0 and text[left - 1] not in _CJK_CLAUSE_TERMINATORS:
+        left -= 1
+    right = end
+    while right < len(text) and text[right] not in _CJK_CLAUSE_TERMINATORS:
+        right += 1
+    return left, right
+
+
+def _cjk_verb_heads_an_imperative_clause(text: str, start: int, end: int) -> bool:
+    """True when the cancellation verb at ``text[start:end]`` issues an order.
+
+    Two bounds and a reject list, in place of a whitelist of objects: the verb
+    must head a short clause (so a cancellation word inside a pasted article or
+    a long report cannot match), and the tail must not turn it into a
+    description, a question, or a business request.
+    """
+    left, right = _clause_bounds(text, start, end)
+    tail = text[end:right]
+    if len(tail) > _CJK_MAX_CHARS_AFTER_VERB or (right - left) > _CJK_MAX_CLAUSE_CHARS:
+        return False
+    if any(pattern.search(tail) for pattern in _CJK_TAIL_REJECT):
+        return False
+    return not any(pattern.search(text[left:right]) for pattern in _CJK_CLAUSE_REJECT)
+
+
 def match_cancellation(text: str) -> str:
     """Return the id of the cancellation rule the text satisfies, or ``""``.
 
@@ -285,7 +345,7 @@ def match_cancellation(text: str) -> str:
             preceding = lower[: found.start()].rstrip()
             if any(preceding.endswith(negation) for negation in _CJK_PRE_NEGATION):
                 continue
-            if _CJK_CANCEL_TAIL.match(lower[found.end():]):
+            if _cjk_verb_heads_an_imperative_clause(lower, found.start(), found.end()):
                 return "cjk_imperative"
 
     for marker in _CJK_RESIGNATION_MARKERS:
