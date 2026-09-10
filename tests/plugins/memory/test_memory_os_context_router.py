@@ -836,3 +836,45 @@ def test_ck_graph_provenance_requires_nonempty_text_and_not_indexed():
     score, reasons = _score_section(empty, query="随便聊聊", current_task_anchor="")
     assert "graph_anchor_provenance" not in reasons
     assert score < 0.30
+
+
+# ── Foreground-control vocabulary is owned by ingress, not the router ──────
+# Counterfactual (2026-09-10): the router kept byte-identical private copies of
+# the cancellation / deferral / vague-continue markers as a fallback after
+# ``_classify_ingress``. Unreachable while the vocabularies matched, they became
+# live the moment ingress stopped reading "取消订单" as a cancellation — the
+# router copy would have routed it to foreground_control anyway.
+
+
+def test_router_does_not_route_descriptive_cancel_mentions_to_foreground_control():
+    anchor = "Current task: render ComfyUI tutorial video."
+    for query in ("取消订单后多久到账", "服务不要停止，修一下就好", "取消前台任务时要清掉全局锚点吗"):
+        report = plan_context_route(query, current_task_anchor=anchor)
+        assert report["route"] != "foreground_control", query
+        assert "cancellation" not in report["reason_codes"], query
+
+
+def test_router_routes_scheduled_job_prompt_without_foreground_control():
+    prompt = (
+        "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Your final "
+        "response will be automatically delivered to the user.] 涉及不可逆的事，再停下来询问主人。"
+        "如果跳过 → 停止。不读其他文件。晚点再看看。"
+    )
+    report = plan_context_route(prompt, current_task_anchor="Current task: render ComfyUI tutorial video.")
+    assert report["route"] != "foreground_control"
+    assert not {"cancellation", "deferred_cancellation_open", "vague_continue_with_anchor"} & set(report["reason_codes"])
+
+
+def test_router_has_no_private_foreground_control_vocabulary():
+    import inspect
+
+    from plugins.memory.memory_os import context_router
+
+    source = inspect.getsource(context_router)
+    for forbidden in (
+        "_CANCELLATION_MARKERS =",
+        "_VAGUE_CONTINUE_MARKERS =",
+        "_DEFERRED_CANCELLATION_PATTERNS =",
+        "def _has_cancellation",
+    ):
+        assert forbidden not in source, forbidden
