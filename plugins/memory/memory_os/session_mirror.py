@@ -680,6 +680,7 @@ class SessionMirror:
                 skipped_by_limit_count=skipped_by_limit_count,
                 skipped_by_owner_rejection_count=skipped_by_owner_rejection_count,
                 platform_allowlist=platforms,
+                platform_denylist=sorted(denied),
                 max_sessions=limit,
                 selected_sessions=selected_safe_sessions,
                 selected_session_fingerprints=selected_fingerprints,
@@ -916,6 +917,7 @@ class SessionMirror:
         skipped_by_limit_count: int,
         skipped_by_owner_rejection_count: int,
         platform_allowlist: list[str],
+        platform_denylist: list[str],
         max_sessions: int,
         selected_sessions: list[dict[str, Any]],
         selected_session_fingerprints: list[str],
@@ -935,6 +937,11 @@ class SessionMirror:
             "apply_bounded": bool(max_sessions or platform_allowlist),
             "max_sessions": max_sessions,
             "platform_allowlist": platform_allowlist,
+            # Recorded so an external verifier can rebuild the SAME scope the
+            # permit was minted from. `_session_mirror_auto_apply_scope` is the
+            # single source of truth for that shape and it hashes six fields;
+            # a reader that can only source five can never reproduce the hash.
+            "platform_denylist": platform_denylist,
             "candidate_session_count": candidate_session_count,
             "selected_session_count": selected_session_count,
             "skipped_by_platform_count": skipped_by_platform_count,
@@ -1345,6 +1352,11 @@ def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
         "apply_bounded": bool(record.get("apply_bounded")),
         "max_sessions": record.get("max_sessions"),
         "platform_allowlist": record.get("platform_allowlist") if isinstance(record.get("platform_allowlist"), list) else [],
+        # Absent on records written before the field existed. The projection
+        # keeps that absence visible (None, not []) so a verifier can tell
+        # "no denylist" from "this record predates the field" — the second
+        # cannot be scope-checked and must not be reported as a mismatch.
+        "platform_denylist": record.get("platform_denylist") if isinstance(record.get("platform_denylist"), list) else None,
         "candidate_session_count": record.get("candidate_session_count"),
         "selected_session_count": record.get("selected_session_count"),
         "skipped_by_platform_count": record.get("skipped_by_platform_count"),
