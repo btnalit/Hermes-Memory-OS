@@ -432,6 +432,102 @@ def test_scheduled_session_neither_inherits_nor_tombstones_owner_anchor(tmp_path
         owner_again.shutdown()
 
 
+def test_scheduled_session_end_does_not_supersede_owner_anchor(tmp_path):
+    """A cron session finishing must not tombstone the owner's live anchor.
+
+    Production 2026-09-10: `on_session_end`'s layer-2 safety net
+    (`_supersede_active_anchors`) ran unconditionally, so a sannai cron job
+    finishing at 08:03:10Z superseded the owner's 05:17Z active anchor. The
+    net exists for an owner session that lost its own anchor in memory, not
+    for a machine session that never had one.
+    """
+    owner = _owner_provider(tmp_path, "session-owner")
+    try:
+        owner._current_task_anchor = _OWNER_ANCHOR
+        owner._write_active_task_anchor(anchor=_OWNER_ANCHOR)
+    finally:
+        owner.shutdown()
+    assert _anchor_records(tmp_path)[-1]["status"] == "active"
+
+    cron = _owner_provider(tmp_path, _CRON_SESSION)
+    try:
+        cron.prefetch(_CRON_PROMPT, session_id=_CRON_SESSION)
+        cron.on_session_end([{"role": "user", "content": _CRON_PROMPT}])
+    finally:
+        cron.shutdown()
+
+    records = _anchor_records(tmp_path)
+    assert [r for r in records if r.get("status") == "superseded"] == []
+    assert records[-1]["status"] == "active"
+
+    # the owner's next session still recovers it
+    owner_again = _owner_provider(tmp_path, "session-owner-2")
+    try:
+        assert "ComfyUI" in owner_again._current_task_anchor
+    finally:
+        owner_again.shutdown()
+
+
+def test_scheduled_session_pre_compress_writes_no_anchor(tmp_path):
+    """Compaction of a cron session must not anchor the machine's own work.
+
+    `on_pre_compress` builds an anchor from the transcript and persists it.
+    For a cron session that transcript is machine work, and the write also
+    supersedes the owner's real anchor on its way through
+    `_write_active_task_anchor`.
+    """
+    owner = _owner_provider(tmp_path, "session-owner")
+    try:
+        owner._current_task_anchor = _OWNER_ANCHOR
+        owner._write_active_task_anchor(anchor=_OWNER_ANCHOR)
+    finally:
+        owner.shutdown()
+    before = len(_anchor_records(tmp_path))
+
+    cron = _owner_provider(tmp_path, _CRON_SESSION)
+    try:
+        returned = cron.on_pre_compress([
+            {"role": "user", "content": _CRON_PROMPT},
+            {"role": "assistant", "content": "terminal: cm_cli install some-plugin"},
+            {"role": "tool", "content": "proc_zzz running; downloading weights"},
+        ])
+    finally:
+        cron.shutdown()
+
+    assert returned == ""
+    records = _anchor_records(tmp_path)
+    assert len(records) == before
+    assert records[-1]["status"] == "active"
+    assert "ComfyUI" in records[-1]["anchor"]
+
+
+def test_owner_session_pre_compress_still_writes_anchor(tmp_path):
+    """The compaction anchor must keep working for owner sessions."""
+    provider = _owner_provider(tmp_path, "session-owner")
+    try:
+        anchor = provider.on_pre_compress([
+            {"role": "user", "content": "安装 ComfyUI 并配置 IPAdapter 插件"},
+            {"role": "assistant", "content": "terminal: cm_cli install ComfyUI_IPAdapter_plus"},
+        ])
+    finally:
+        provider.shutdown()
+    assert "ComfyUI" in anchor
+    assert [r for r in _anchor_records(tmp_path) if r.get("status") == "active"]
+
+
+def test_owner_session_end_still_supersedes_when_anchor_lost(tmp_path):
+    """The layer-2 safety net must keep working for owner sessions."""
+    provider = _owner_provider(tmp_path, "session-owner")
+    try:
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider._write_active_task_anchor(anchor=_OWNER_ANCHOR)
+        provider._current_task_anchor = ""  # anchor lost in memory
+        provider.on_session_end([{"role": "user", "content": "安装 ComfyUI"}])
+    finally:
+        provider.shutdown()
+    assert [r for r in _anchor_records(tmp_path) if r.get("status") == "superseded"]
+
+
 def test_descriptive_cancel_mention_keeps_owner_anchor_active(tmp_path):
     provider = _owner_provider(tmp_path, "session-owner")
     try:
