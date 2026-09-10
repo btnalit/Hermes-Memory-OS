@@ -19,26 +19,119 @@ class IngressDecision:
     foreground_task_only: bool = False
     clear_current_task_anchor: bool = False
     open_issue: str = ""
+    matched_rule: str = ""
 
 
-_CANCELLATION_MARKERS = (
-    "算了",
-    "别做",
-    "不要做",
-    "不做了",
-    "停下",
-    "停止",
-    "收手",
-    "放弃",
-    "取消",
-    "别弄",
-    "不用做",
-    "cancel",
-    "stop",
-    "abort",
-    "give up",
-    "never mind",
+# ── Machine-authored queries ──────────────────────────────────────────────
+# Hermes drives scheduled jobs through the same provider hooks as owner turns:
+# the job prompt arrives as the prefetch ``query`` and the session id carries
+# the ``cron_<job_id>_<timestamp>`` shape (both verified on production
+# 2026-09-10, main and sannai profiles). Neither is an owner utterance, so
+# neither may drive a foreground-control decision (cancel / defer / continue /
+# anchor writes). Two seams, both load-bearing: the session-id prefix is the
+# primary metadata signal (the provider has it); the prompt preamble is the
+# fallback for callers that only see text (context router, monitor probes).
+# Both strings are Hermes contracts, not Memory-OS choices.
+SCHEDULED_SESSION_ID_PREFIX = "cron_"
+
+_MACHINE_AUTHORED_QUERY_PREFIXES = (
+    # Hermes cron runner prepends this preamble to every scheduled job prompt.
+    "[important: you are running as a scheduled cron job",
+    # Hermes cron delivery header (job output re-entering a chat as a turn).
+    "cronjob response:",
 )
+
+# ── Cancellation intent ───────────────────────────────────────────────────
+# Cancellation is an owner *imperative* aimed at the foreground task. The
+# pre-2026-09 test was a bare substring scan over these words, so it fired on
+# any mention of them — "取消订单后多久到账", "服务不要停止", "为什么有取消的
+# 提示词", and every scheduled prompt containing "停止" — and each hit wrote a
+# cancelled anchor plus a "stop the foreground task" instruction into the next
+# context. Production ledgers on 2026-09-10: 113/121 cancelled anchors on
+# sannai and 586/731 on main were cron prompts. The rules below form a closed
+# set; ``match_cancellation`` reports the rule id so the anchor audit can say
+# why an anchor was cancelled.
+#
+# Rule ids: ``ascii_imperative`` / ``cjk_imperative`` / ``cjk_resignation``.
+
+# ASCII markers must be whole words (``stopped``/``unstoppable``/``stop_reason``
+# never match) and not negated by the preceding tokens (``do not stop``).
+# The boundaries are ASCII-only on purpose: ``\w`` matches CJK in Python, so a
+# ``\b`` boundary would reject "请stop吧".
+_ASCII_CANCELLATION_PATTERN = re.compile(
+    r"(?<![a-z0-9_'])(never mind|give up|cancel|abort|stop)(?![a-z0-9_'])"
+)
+_ASCII_NEGATION_TOKENS = frozenset(
+    {"not", "don't", "dont", "never", "without", "cannot", "can't", "won't", "no"}
+)
+_ASCII_TOKEN_PATTERN = re.compile(r"[a-z']+")
+
+# CJK verbs are imperative only when they are neither negated / reported /
+# questioned by what precedes them ("不要停止", "已取消", "为什么取消") nor
+# framed descriptively by what follows ("取消前台任务时", "取消订单后多久").
+#
+# The object is NOT whitelisted. An earlier draft required the verb to be
+# followed by one of ~20 task nouns, which rejected "取消掉这个渲染任务",
+# "停止安装插件" and "放弃这个方案" — natural cancellations every one. That
+# failure direction is worse than the bug this module fixes: an unmatched
+# cancellation falls through to `_format_current_task_anchor` and becomes a
+# new *active* anchor whose task is the cancellation sentence itself.
+#
+# What bounds the match instead is clause shape: an imperative is a short
+# clause that the verb heads. A cancellation word buried in a pasted article
+# or a long report sits inside a long clause and is rejected by the two
+# length bounds, without any vocabulary having to anticipate the topic.
+_CJK_CANCEL_VERBS = ("停止", "停下", "取消", "放弃", "收手")
+_CJK_PRE_NEGATION = (
+    "不要", "别", "不能", "不许", "不会", "不可", "不用", "没有", "没", "未", "已",
+    "已经", "是否", "会不会", "要不要", "能不能", "可否", "如何", "怎么", "为什么",
+    "为何", "自动", "被", "如果", "一旦", "会", "可能",
+)
+# A bare "." is deliberately absent: it splits version and decimal numbers
+# ("停止远端 2.88 的 gateway" would otherwise end its clause at "2"), and an
+# English sentence break is already handled by the ASCII rule.
+_CJK_CLAUSE_TERMINATORS = "，,。！!？?；;、\n"
+# The verb heads a short clause: at most this many characters follow it
+# before the clause ends, and the whole clause stays this short.
+_CJK_MAX_CHARS_AFTER_VERB = 12
+_CJK_MAX_CLAUSE_CHARS = 30
+_CJK_TAIL_REJECT = (
+    # "取消的那件事" / "停止的原因" — the verb is being referred to, not issued.
+    re.compile(r"^[掉了啦呀啊吧]*的"),
+    # "取消前台任务时，同时清除…" — a temporal clause about cancelling.
+    re.compile(r"时$"),
+    # "取消订单后多久到账" — note 后 alone is not enough ("停止后台任务").
+    re.compile(r"后(?:多久|再|会|能|怎|才|就)"),
+    # "这个任务取消了吗？" — an interrogative particle, not the bare mark.
+    re.compile(r"[吗么]$"),
+)
+
+# Object classes checked across the WHOLE clause, not just the tail: the object
+# can precede the verb ("旧服务该永远停止的要确保停止了").
+_CJK_CLAUSE_REJECT = (
+    # Business objects: cancelling one of these is not a foreground-task action.
+    re.compile(r"(订单|订阅|预约|会员|挂号|开机启动|自动启动|计费|合同|机票|酒店|快递|保险|课程)"),
+    # Ops objects: "停止远端 gateway" / "旧服务确保停止了" are instructions about
+    # a service, issued *while* the foreground task continues. Deliberately
+    # narrow — "停止安装插件" and "停止渲染视频" must still cancel.
+    re.compile(r"(服务|service|gateway|网关|进程|process|容器|container|systemd|timer|daemon|守护|端口|\bport\b)"),
+)
+
+# Resignation forms already carry their negation ("别做视频了" cancels the
+# video task), so they accept any object; they are rejected only inside a
+# descriptive / conditional frame ("为什么不做了", "如果不做了") or when the
+# tail turns them into something else ("算了一下", "不要做成微服务").
+_CJK_RESIGNATION_MARKERS = (
+    "算了", "不做了", "别做", "不要做", "不用做", "别弄",
+    "别继续", "不要继续", "不用继续", "不继续了",
+)
+_CJK_RESIGNATION_PRE_GUARD = (
+    "为什么", "为啥", "怎么", "如何", "是否", "会不会", "要不要", "如果", "一旦",
+)
+_CJK_RESIGNATION_TAIL_GUARD = ("的", "时", "吗", "么", "成", "得", "为", "到", "一下", "一笔")
+
+# A question is never a command.
+_QUESTION_PATTERN = re.compile(r"(为什么|为啥|怎么回事|是不是|会不会|多久|\bwhy\b|how come)", re.I)
 
 _CURRENT_TASK_CONTINUE_MARKERS = {
     "continue",
@@ -93,18 +186,38 @@ _LOW_CLUE_DEICTIC_CONTINUE_PATTERNS = (
 )
 
 
-def classify_ingress(query: str, *, current_task_anchor: str | None = None) -> IngressDecision:
+def classify_ingress(
+    query: str,
+    *,
+    current_task_anchor: str | None = None,
+    session_id: str = "",
+) -> IngressDecision:
     text = normalize_query(query)
     lower = text.lower()
     has_anchor = bool(str(current_task_anchor or "").strip())
 
-    if text and has_cancellation(text):
+    # Scheduled-job prompts are not owner utterances: no foreground-control
+    # branch below may fire on them. ``route=""`` lets the context router
+    # plan the turn normally; the provider stops before any anchor write.
+    # ``session_id`` defaults to "" (= unknown) so callers that cannot know
+    # the session fall back to the text guard alone.
+    if is_scheduled_session_id(session_id) or is_machine_authored_query(text):
+        return IngressDecision(
+            intent="machine_authored",
+            route="",
+            hard_route=False,
+            reason_codes=["machine_authored_query"],
+        )
+
+    cancellation_rule = match_cancellation(text) if text else ""
+    if cancellation_rule:
         return IngressDecision(
             intent="cancellation",
             route="foreground_control",
             hard_route=True,
             reason_codes=["cancellation"],
             foreground_task_only=True,
+            matched_rule=cancellation_rule,
         )
 
     if is_explicit_deferred_resume_query(text):
@@ -164,9 +277,91 @@ def normalize_marker(text: str) -> str:
     return " ".join(str(text or "").strip().lower().rstrip("。.!！?？").split())
 
 
-def has_cancellation(text: str) -> bool:
+def is_scheduled_session_id(session_id: str) -> bool:
+    return str(session_id or "").strip().lower().startswith(SCHEDULED_SESSION_ID_PREFIX)
+
+
+def is_machine_authored_query(text: str) -> bool:
     lower = normalize_query(text).lower()
-    return any(marker in lower for marker in _CANCELLATION_MARKERS)
+    return any(lower.startswith(prefix) for prefix in _MACHINE_AUTHORED_QUERY_PREFIXES)
+
+
+def _looks_like_question(normalized: str) -> bool:
+    return normalized.endswith(("?", "？")) or bool(_QUESTION_PATTERN.search(normalized))
+
+
+def _ascii_negated(lower: str, start: int) -> bool:
+    preceding = _ASCII_TOKEN_PATTERN.findall(lower[:start])[-3:]
+    return any(token in _ASCII_NEGATION_TOKENS for token in preceding)
+
+
+def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Return the span of the clause containing ``text[start:end]``."""
+    left = start
+    while left > 0 and text[left - 1] not in _CJK_CLAUSE_TERMINATORS:
+        left -= 1
+    right = end
+    while right < len(text) and text[right] not in _CJK_CLAUSE_TERMINATORS:
+        right += 1
+    return left, right
+
+
+def _cjk_verb_heads_an_imperative_clause(text: str, start: int, end: int) -> bool:
+    """True when the cancellation verb at ``text[start:end]`` issues an order.
+
+    Two bounds and a reject list, in place of a whitelist of objects: the verb
+    must head a short clause (so a cancellation word inside a pasted article or
+    a long report cannot match), and the tail must not turn it into a
+    description, a question, or a business request.
+    """
+    left, right = _clause_bounds(text, start, end)
+    tail = text[end:right]
+    if len(tail) > _CJK_MAX_CHARS_AFTER_VERB or (right - left) > _CJK_MAX_CLAUSE_CHARS:
+        return False
+    if any(pattern.search(tail) for pattern in _CJK_TAIL_REJECT):
+        return False
+    return not any(pattern.search(text[left:right]) for pattern in _CJK_CLAUSE_REJECT)
+
+
+def match_cancellation(text: str) -> str:
+    """Return the id of the cancellation rule the text satisfies, or ``""``.
+
+    Rule ids are a closed set (``ascii_imperative`` / ``cjk_imperative`` /
+    ``cjk_resignation``) so the anchor audit can record *why* an owner turn
+    was read as a cancellation. Machine-authored prompts and questions never
+    match, whatever words they contain.
+    """
+    normalized = normalize_query(text)
+    if not normalized or is_machine_authored_query(normalized) or _looks_like_question(normalized):
+        return ""
+    lower = normalized.lower()
+
+    for found in _ASCII_CANCELLATION_PATTERN.finditer(lower):
+        if not _ascii_negated(lower, found.start()):
+            return "ascii_imperative"
+
+    for verb in _CJK_CANCEL_VERBS:
+        for found in re.finditer(re.escape(verb), lower):
+            preceding = lower[: found.start()].rstrip()
+            if any(preceding.endswith(negation) for negation in _CJK_PRE_NEGATION):
+                continue
+            if _cjk_verb_heads_an_imperative_clause(lower, found.start(), found.end()):
+                return "cjk_imperative"
+
+    for marker in _CJK_RESIGNATION_MARKERS:
+        for found in re.finditer(re.escape(marker), lower):
+            preceding = lower[: found.start()].rstrip()
+            if any(preceding.endswith(guard) for guard in _CJK_RESIGNATION_PRE_GUARD):
+                continue
+            if lower[found.end():].startswith(_CJK_RESIGNATION_TAIL_GUARD):
+                continue
+            return "cjk_resignation"
+
+    return ""
+
+
+def has_cancellation(text: str) -> bool:
+    return bool(match_cancellation(text))
 
 
 def matches_defer_current_task(text: str) -> bool:

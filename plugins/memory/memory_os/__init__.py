@@ -26,7 +26,7 @@ from .crystallized import read_candidate_queue, read_effective_candidates
 from .event_stats import build_event_stats, read_event_stats, write_event_stats
 from .ids import new_event_id
 from .index import MemoryOSIndex
-from .ingress import classify_ingress
+from .ingress import classify_ingress, is_scheduled_session_id
 from .low_clue_recall import low_clue_judge_availability
 from .operational_truth import project_public_counts, read_operational_truth_snapshot
 from .owner_actions import (
@@ -147,9 +147,14 @@ class MemoryOSProvider(MemoryProvider):
         # ANCHOR_RECOVERY_MAX_AGE_HOURS: anchors older than this are treated as stale
         # and discarded.
         self._current_task_anchor = ""
-        recovered = self._read_latest_active_task_anchor(
-            max_age_hours=ANCHOR_RECOVERY_MAX_AGE_HOURS,
-        )
+        # Scheduled (cron) sessions are not owner sessions: they must neither
+        # inherit the owner's foreground anchor into their context nor write
+        # the "superseded" tombstone below over it.
+        recovered = ""
+        if not is_scheduled_session_id(self.session_id):
+            recovered = self._read_latest_active_task_anchor(
+                max_age_hours=ANCHOR_RECOVERY_MAX_AGE_HOURS,
+            )
         if recovered:
             self._current_task_anchor = recovered
             # ── Compact-resume defense: Hermes may compact without calling
@@ -1339,7 +1344,18 @@ class MemoryOSProvider(MemoryProvider):
         text = " ".join(str(query or "").split())
         if not text:
             return
-        decision = classify_ingress(text, current_task_anchor=self._current_task_anchor)
+        decision = classify_ingress(
+            text,
+            current_task_anchor=self._current_task_anchor,
+            session_id=session_id or self.session_id,
+        )
+        if decision.intent == "machine_authored":
+            # Scheduled-job prompt: no cancel / defer / continue / topic-switch
+            # decision and no anchor ledger write may derive from it. The
+            # foreground-only flag is sticky across turns, so clear it too —
+            # a machine prompt must not inherit a previous turn's restriction.
+            self._foreground_task_only_prefetch = False
+            return
         if decision.intent == "defer_current_task" and self._current_task_anchor:
             self._write_deferred_current_task_anchor(
                 anchor=self._current_task_anchor,
@@ -1383,7 +1399,11 @@ class MemoryOSProvider(MemoryProvider):
                 session_id=session_id or self.session_id,
                 completed_operations=previous_completed,
             )
-            self._write_active_task_anchor(anchor=self._current_task_anchor, status="cancelled")
+            self._write_active_task_anchor(
+                anchor=self._current_task_anchor,
+                status="cancelled",
+                ingress_rule=decision.matched_rule,
+            )
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "continue_current_task":
@@ -1519,7 +1539,9 @@ class MemoryOSProvider(MemoryProvider):
 
     # ── Active task anchor persistence (C2) ────────────────────────────────
 
-    def _write_active_task_anchor(self, *, anchor: str, session_id: str = "", status: str = "active") -> None:
+    def _write_active_task_anchor(
+        self, *, anchor: str, session_id: str = "", status: str = "active", ingress_rule: str = "",
+    ) -> None:
         if self._roots is None:
             return
         self._supersede_active_anchors()
@@ -1534,16 +1556,18 @@ class MemoryOSProvider(MemoryProvider):
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
-        self._audit(
-            "active_task_anchor_recorded",
-            "ok",
-            {
-                "record_id": record["record_id"],
-                "session_id": record["session_id"],
-                "profile": record["profile"],
-                "status": status,
-            },
-        )
+        audit_details = {
+            "record_id": record["record_id"],
+            "session_id": record["session_id"],
+            "profile": record["profile"],
+            "status": status,
+        }
+        if ingress_rule:
+            # Which cancellation rule read the owner turn as a cancellation —
+            # the ledger clips the text to 240 chars, so this is the only
+            # durable answer to "why was this anchor cancelled?".
+            audit_details["ingress_rule"] = ingress_rule
+        self._audit("active_task_anchor_recorded", "ok", audit_details)
 
     def _read_latest_active_task_anchor(self, *, max_age_hours: int = 0) -> str:
         """Return the latest active (incomplete) foreground anchor from disk.

@@ -4968,6 +4968,14 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `9136bf0..HEAD`：取消意图误判族（DG）——`has_cancellation` 由裸子串改为封闭规则集
+  （整词 ASCII + CJK 否定/报告/疑问/宾语守卫，返回规则 id 落 audit）、新增 cron 会话与
+  Hermes 机器提示词双守卫（`initialize` 不再让 cron 会话继承并墓碑主人锚点）、删除
+  `context_router.py` 三份逐字词表副本与兜底分支；生产实测 sannai 113/121、main 586/731
+  条 cancelled 锚点由 cron 提示词写入；判定器用 153 条生产语料复验（拒 98、自然取消 32/32），
+  白名单宾语初版漏判 8 条已改为子句有界规则。+55 测试，全量 3701 passed / 13 skipped / 0 failed，
+  五门全绿；仅 `local_pass`，待两 profile 部署 + 网关重启。
+
 - `3f447dc..HEAD`：#74/#75 评审修复（DF）——embedder 失败类型化 + `memory_embedder_fallback_fts` error_record、RAGFlow 空结果权威化 + 畸形 chunk 免连坐、import-state finally 化、INV-5 豁免记录、rerank 截断文档如实化；+11 测试，全量 3646 passed / 13 skipped / 0 failed。
 
 - `1ed7ded..HEAD`：RAGFlow v0.27 retrieval adapter 兼容修复——首选 `/api/v1/retrieval`、解析 `data.chunks`、保留旧接口回退；新增反事实测试，28 seam tests / 3639 full-suite tests 全部通过。
@@ -7367,3 +7375,147 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
   `git diff --check`）全绿。
 - **更正**：DE 节"独立 code review 无 BLOCKER/HIGH"与本次复核矛盾（E6 的 fallback
   过宽即为可复现 HIGH），以本节为准。
+
+## DG — 取消意图误判族：cron 提示词被当成主人取消 + router 私有词表副本（2026-09-10）
+
+- **触发**：owner 转来 sannai 网关 agent（lumi）的报告：自由时间里"取消的那件事"的提示词
+  反复出现；lumi 定位到 `ingress.has_cancellation` 子串匹配并给出三处修法，但按其边界
+  无权改 Memory-OS 代码。
+- **核实（生产账本，不是复述）**：部署文件哈希 = 仓库 HEAD（main/sannai 两 profile 的
+  `ingress.py`/`context_router.py`/`owner_actions.py` 六个 md5 全对上）。sannai
+  `active_task_anchor.jsonl` 3823 行、cancelled 121，其中 **113 条（93%）的取消文本是
+  Hermes cron 前导语** `[IMPORTANT: You are running as a scheduled cron job…]`；main 7895
+  行、cancelled 731，其中 586（80%）同型。扫 `cron/jobs.json` 提示词：sannai「三奶的自由
+  时间」含"再停下来询问主人"，「余温检查·午/下午/晚」含"如果跳过 → 停止"——四个 persona
+  定时任务**每次运行**都被判成"主人取消了前台任务"，随即被注入 "Acknowledge the
+  cancellation and stop the foreground task"，这就是心跳候选
+  `cw019-s4b-20260905T032600-84f210f769-1`（"主人取消的那件事我已经停下来了…"）的来源。
+  lumi 报的"主人消息里的取消"只是 7% 尾部（histogram：取消 2、算了 1）。
+- **为什么账本看不出来**：`_format_cancelled_task_anchor` 把取消文本裁到 240 字，命中的
+  marker 在裁剪之外——对 113 条 cron 行逐条跑 marker 全为空。只有把 jobs.json 的提示词
+  全文过一遍词表才现形（同 CL 节教训：验证样本自带幸存者偏差）。
+- **根因三层**：① `has_cancellation` 裸子串（"取消订单""服务不要停止""stopped"全中）；
+  ② 无来源门：cron 会话的提示词与主人话语走同一条 `_refresh_current_task_anchor_from_query`，
+  且 `initialize` 的跨会话恢复对 cron 会话同样生效——cron 会话会**继承主人活跃锚点进
+  自己的上下文并给它写 superseded 墓碑**（兄弟缺陷，顾问 Rule-5 提示后实测）；
+  ③ `context_router.py` 保有与 ingress 逐字相同的三份私有词表（cancellation / deferred /
+  vague-continue）作 `_classify_ingress` 之后的兜底——词表相同时不可达，**ingress 一收紧
+  就变活**（实测：只修 ingress 不删副本，"取消订单"仍被 router 路由到 foreground_control）。
+- **修复**：
+  - `ingress.py`：`match_cancellation()` 封闭规则集，返回规则 id（`ascii_imperative`
+    整词 + 否定前缀守卫 / `cjk_imperative` 动词前否定·报告·疑问守卫 + 任务类宾语尾守卫 /
+    `cjk_resignation` 描述框架守卫）；问句永不为取消；新增 `SCHEDULED_SESSION_ID_PREFIX`
+    `="cron_"`、`is_scheduled_session_id`、`is_machine_authored_query`（Hermes cron 前导语
+    + `Cronjob Response:`），`classify_ingress(session_id=)` 对两者返回 `machine_authored`
+    （route 空，任何前台控制分支不触发）。`has_cancellation` 保留为 bool 门面。
+  - `__init__.py`：`initialize` 对 cron 会话跳过恢复与墓碑；`_refresh_current_task_anchor_from_query`
+    传 session_id、`machine_authored` 即返回（cancel/defer/continue/topic-switch 全不做）；
+    cancelled 写入的 audit `active_task_anchor_recorded` 增 `ingress_rule`（唯一能回答
+    "为什么取消"的耐久字段）。
+  - `context_router.py`：删除三份私有词表、`_has_cancellation` 及三条兜底分支。
+- **合入前用生产语料复验，抓到本批最严重的一次自伤（CL 教训第二次兑现）**：初版规则只用
+  手写语料验证就准备推送。按 CL 节「验证样本自带幸存者偏差」把两个账本里**非 cron** 的 153 条
+  真实取消文本拉下来，跑真函数逐条看，结果分两半：
+
+  **好消息**——97 条被正确拒绝，且其中若干条证明旧代码不只是"噪音"而是**反向执行主人意图**：
+  `继续最小闭环，没全部完成不要停止下来！`、`已授权直接迁移……没完全迁移任务不能停止循环！`、
+  `sannai 迁移可以完全先停止后再操作迁移！按方案开干吧`——主人明说"**不要停止**""**不能停止**"
+  "开干吧"，旧代码逐条记成了取消。另有约 40 条 `[ASYNC DELEGATION BATCH COMPLETE]`、
+  9 条 `[Continuing toward your standing goal]`、12 条 `[The user sent a text document: …]`、
+  2 条 `Loading weights: 100%|…` 终端输出——**全是 Hermes 自己的框架文本**，与 cron 前导语同类，
+  说明"机器输入被当成主人话语"这个面比只看 cron 更宽。
+
+  **坏消息**——初版规则要求动词后跟一个白名单任务名词，于是 `取消掉这个渲染任务`、
+  `停止安装插件`、`停止渲染视频`、`放弃这个方案`、`取消下载模型`、`停下手上的活` **全部漏判**
+  （手工边界探针 22 条里漏 8 条）。**漏判比原缺陷更糟**：未命中的取消句会掉进
+  `_format_current_task_anchor`，把"取消这个渲染任务"本身变成一条新的 **active** 锚点。
+  白名单宾语正是本项目反复吃亏的那类反模式（CLAUDE.md「A gate whose vocabulary drifts from
+  its producer's checks nothing」的近亲：这里是**词表试图穷举世界**）。
+
+  **改法**：宾语不再枚举，改用**子句形状有界 + 拒绝式尾部**——动词须领起一个短子句
+  （动词后 ≤12 字、整子句 ≤30 字），尾部不得是描述框架（`的` 紧跟动词 / `时$` / `后多久|再|会` /
+  `吗么$`），整子句不得含业务对象（订单/订阅/开机启动…）或运维对象（服务/gateway/进程/容器…）。
+  两个对象类**扫整个子句而非仅尾部**，因为对象可以在动词之前（`旧服务该停止的要确保停止了`）；
+  裸 `.` 移出子句终止符，否则 `停止远端 2.88 的 gateway` 会在 `2` 处断句而绕过长度门。
+
+  **三个语料的最终数字**：自然取消 32/32 命中、必拒 17/17 拒绝、生产 153 条中 **98 条拒绝**
+  （初版白名单 97、中间放宽版 96——三版里这版同时最松又最准）。**残留误判约 3 条（2%）**
+  并如实登记：`不要做多余的操作！！！`（工作方式指令被 `不要做` 命中）、`先停下汇报`
+  （agent 自己的汇报文落在主人轮位置）、`……部分可以完全停止抛弃了`（停某个组件、该轮以
+  `继续修改` 结尾）。相较旧代码的 97/153（63%）加上 cron 侧 113/121 与 586/731，
+  **不声称完美，只声称已测量**。
+- **自审补加固（写完 diff 反向评审时发现）**：`machine_authored` 提前 return 会**继承上一轮
+  残留的** `_foreground_task_only_prefetch=True`（该标志跨轮粘滞，既有的"零特征跟随语"
+  分支也是这个形状）——即同一 provider 实例里主人先说"取消这个任务"、随后一条 cron 提示词
+  进来，cron 轮会拿到 foreground-only 的注入。改为提前 return 前显式置 False，并配反事实
+  测试（去掉这一行即 `assert True is False`）。生产是每会话独立 provider 实例，故此路径
+  非当前故障成因，属边界收口。
+- **刻意不做**：lumi 的第 3 项（在 `/srv/sannai/modules/curation/sannai_cloud_heartbeat_live.py`
+  加 source_intent 过滤）——下游补丁修上游缺陷，注入停掉后无物可滤；该候选 2026-09-12
+  自然过期。sannai `crystallized/candidates.jsonl` 里两条 `cand_evt_20260910T05…` 是 owner
+  本人两句话抽出的候选，走 digest 正常 triage，不是缺陷。历史 cancelled 行为终态，不清理。
+- **Rule-5 扫描**：同型 `any(marker in …)` 另有 7 处，全为打分 / report-only / 去同步类，
+  无一写前台状态，不改；`__init__.py` 的 `_is_defer_current_task_query` /
+  `_is_deferred_continue_query` 是 ingress 词表的**零调用方**死副本（B3 不删，登记）。
+- **反事实**：HEAD 源码下新增 8 个 provider/router 测试全挂（ingress 测试文件因新符号
+  collection 即错）；恢复 ingress+provider、仅保留旧 router → 3 个 router 测试仍挂；仅
+  sabotage `initialize` 守卫 → 继承/墓碑测试挂。全部 cp 备份还原，未用 `git checkout --`。
+- **测试**：+55（ingress 46、anchor 6、router 3）；全量 **3701 passed / 13 skipped / 0 failed**；
+  五门（import-cycle、write-surface `unclassified_count=0`、static-hygiene、public-checkout
+  `--strict` PASS、`git diff --check`）全绿。仅 `local_pass`，未部署。
+- **部署要求**：provider 侧改动，**两 profile 网关都要重启**（main 也有 586 条）；部署后按
+  md5 核对三个文件，再看 24h 内 cancelled 新增行是否归零
+  （`grep -c '"status": "cancelled"' active_task_anchor.jsonl` 前后对比）。
+### DG 附带：三个遗留项的生产实测状态（2026-09-10，非估算）
+
+本轮顺手把 owner 问的"哪些遗留项可以闭环"逐条拿账本核了。**三条里只有一条能关，
+另一条查出了一个新的活故障**——记在这里以免下次又按印象排序。
+
+**① 待办 12（`session_fact_extraction` 部署）——不能关，反而是新 P0 线索。**
+部署这一步确实完成了：两 profile 的 `memory_os_cron_registry.json` 快照都含该 lane
+（22 成员），envelope main 280 / sannai 269 次，最近一次 09-10 当天。但按
+"Completion Is Not Output"往下看产出，`runs.jsonl` 的自带计数器（这个 lane 的计数契约
+写得是对的，问题在**没人读**）显示：
+
+| | 最近 30 次运行 | 最后一次真正产出事实 |
+|---|---|---|
+| sannai | `llm_calls=600`、`fallback_used_count=600`、`llm_failures_by_reason={"llm_empty_content": 600}`、`facts_extracted=0` | **2026-08-26T02:17** |
+| main | `llm_calls=0`、`skipped_reason=no_unprocessed_sessions` | 2026-08-24T01:12 |
+
+sannai 单次运行 `sessions_scanned=405 / sessions_eligible=252 / sessions_processed=2`，
+且 09-10 那次 `sessions_abandoned_after_max_attempts=2`——**输入不缺（252 个会话积压），
+是每一次模型调用都返回空**。这正是 CLAUDE.md「Completion Is Not Output」点名的
+`llm_empty_content` 形状，只是比记录在案的 27.5% 严重得多：**100%，已持续 15 天**。
+后果直接落在**待办 8（关键事实漏失）**上——那条待办要求先分离 A（没入库）/ B（入库没召回），
+现在 A 分支有了具体且当前的成因：08-26 起 sannai 的会话事实一条都没进候选管线。
+时间点与 DE/DF（RAGFlow v0.27、远程 embedding 08-26/08-27 启用）**重合**，但相关不等于
+因果——`_call_hermes_runtime_model` 与 embedder 不是同一条路径，下一步应先在 sannai
+直接单调用 `_call_hermes_runtime_model` 判定是主机级模型面故障还是本 lane 入参问题，
+再决定修法。**不在本批修**（本批是取消意图族，混入会破坏反事实归属）。
+
+**② V3 激活复查日——09-12 必不达标，新日期算得出来，别再估。**
+`activation_evidence_ready=False`。关键是 `consecutive_valid_day_count=12` 是**历史最长**
+连击（`first_valid_date=2026-08-12`→`last_valid_date=2026-08-23`），不是当前连击；
+按 `v3_seed_edges_daily.jsonl` 逐日重算，**当前连击是 8 天（09-01→09-08）**，
+`latest_natural_date=2026-09-08`。全史 13 个无效日里 11 个是早期
+`no_natural_production_input`，近期只有 **08-24 与 08-31** 两天，成因同为
+`edge_storage_cap_exceeded` + `coverage_below_threshold`（覆盖率 0.9174 / 0.7507，
+门槛 `minimum_valid_coverage_ratio=1.0`）。故 30 连续日**最早 2026-09-30 达成，
+复查日取 2026-10-01**。风险是那两次断档相隔仅 7 天，若 `edge_storage_cap_exceeded`
+再来一次，连击归零、日期继续顺延——**它本身应另立一项**（cap 是否偏低 / 是否只是
+边产出尖峰），不要再把它当作"等时间到"。
+
+**③ V2C 解冻门——门是诚实的，卡在流量不是卡在 bug。**
+`selection_pressure_streak_days=0`、`freeze_reasons=["selection_pressure_streak:0/7"]`，
+乍看像 2026-08-14 owner 裁定后计数器没接上（旧 `budget` 门就是那样死的）。逐日核账本
+否定了这个猜测：`budget_pressure_day_count=15`、`rank_pressure_day_count=29`、
+`cumulative_dropped_by_rank=1264`——**压力真实存在且以 rank 为主，裁定后的口径接对了**。
+0 是因为**不连续**：09-05、09-06、09-08、09-09 四天零压力。真正的成因是流量塌了，
+日 `selected` 从 09-01 的 415 掉到 09-08/09 的 28/25，段数不足自然无 rank 竞争。
+结论：**当前流量下 7 天连击不会达成，且这不是缺陷**。owner 二选一——等流量回升，
+或按"低流量期不计入连击"重定义门（后者需要新的裁定记录，勿默默改阈值）。
+
+**④ 待办 1（`vector_edge_proposer` 无 outcome）** 本轮未推进。附一条方法备注：
+按 envelope 探它会得到 main/sannai 各 0，**这不是证据**——它是 cognitive loop 的步骤，
+不开自己的 permit（loop 只有四个显式 envelope），0 是设计如此。下次核它要读
+边账本产出，别读 envelope。

@@ -338,3 +338,125 @@ def test_current_task_anchor_redacts_secrets(tmp_path):
     assert "ALSO_SECRET" not in anchor
     assert "NOPE" not in anchor
     assert "[redacted]" in anchor
+
+
+# ── Scheduled sessions and descriptive cancel mentions must not touch the
+# anchor ledger (2026-09-10 production defect: 113/121 cancelled anchors on
+# sannai and 586/731 on main were written by cron-job prompts) ──────────────
+
+_CRON_SESSION = "cron_9c0605348522_20260910_090002"
+_CRON_PROMPT = (
+    "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Your final "
+    "response will be automatically delivered to the user.] 涉及不可逆或超出个人边界的事，"
+    "再停下来询问主人。如果跳过 → 停止。不读其他文件。"
+)
+_OWNER_ANCHOR = "### Memory-OS Current Task Anchor\n- current task: 安装 ComfyUI 并配置 IPAdapter 插件"
+
+
+def _anchor_records(tmp_path):
+    import json
+
+    from plugins.memory.memory_os.__init__ import _active_task_anchor_path
+
+    path = _active_task_anchor_path(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _owner_provider(tmp_path, session_id):
+    provider = load_memory_provider("memory_os")
+    provider.initialize(session_id, hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    return provider
+
+
+def test_scheduled_session_prompt_writes_no_cancelled_anchor(tmp_path):
+    provider = _owner_provider(tmp_path, _CRON_SESSION)
+    try:
+        context = provider.prefetch(_CRON_PROMPT, session_id=_CRON_SESSION)
+        # session-id guard alone (no preamble in the text)
+        provider.prefetch("取消这个任务", session_id=_CRON_SESSION)
+    finally:
+        provider.shutdown()
+
+    assert "owner cancelled" not in context
+    assert provider._current_task_anchor == ""
+    assert [r for r in _anchor_records(tmp_path) if r.get("status") == "cancelled"] == []
+
+
+def test_machine_authored_prompt_clears_sticky_foreground_only_flag(tmp_path):
+    provider = _owner_provider(tmp_path, "session-owner")
+    try:
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="session-owner")
+        assert provider._foreground_task_only_prefetch is True
+        provider.prefetch(_CRON_PROMPT, session_id="session-owner")
+        assert provider._foreground_task_only_prefetch is False
+    finally:
+        provider.shutdown()
+
+
+def test_owner_session_preamble_prompt_writes_no_cancelled_anchor(tmp_path):
+    # text guard alone: an owner-shaped session id, but the Hermes cron preamble
+    provider = _owner_provider(tmp_path, "session-owner")
+    try:
+        provider.prefetch(_CRON_PROMPT, session_id="session-owner")
+    finally:
+        provider.shutdown()
+    assert [r for r in _anchor_records(tmp_path) if r.get("status") == "cancelled"] == []
+
+
+def test_scheduled_session_neither_inherits_nor_tombstones_owner_anchor(tmp_path):
+    owner = _owner_provider(tmp_path, "session-owner")
+    try:
+        owner._current_task_anchor = _OWNER_ANCHOR
+        owner._write_active_task_anchor(anchor=_OWNER_ANCHOR)
+    finally:
+        owner.shutdown()
+    assert _anchor_records(tmp_path)[-1]["status"] == "active"
+
+    cron = _owner_provider(tmp_path, _CRON_SESSION)
+    try:
+        assert cron._current_task_anchor == ""
+        context = cron.prefetch(_CRON_PROMPT, session_id=_CRON_SESSION)
+    finally:
+        cron.shutdown()
+    assert "ComfyUI" not in context
+    assert _anchor_records(tmp_path)[-1]["status"] == "active", "cron session must not tombstone the owner anchor"
+
+    # the owner anchor is still recoverable by the next owner session
+    owner_again = _owner_provider(tmp_path, "session-owner-2")
+    try:
+        assert "ComfyUI" in owner_again._current_task_anchor
+    finally:
+        owner_again.shutdown()
+
+
+def test_descriptive_cancel_mention_keeps_owner_anchor_active(tmp_path):
+    provider = _owner_provider(tmp_path, "session-owner")
+    try:
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider._write_active_task_anchor(anchor=_OWNER_ANCHOR)
+        provider.prefetch("取消订单后多久到账", session_id="session-owner")
+        provider.prefetch("为什么老是有取消的提示词？", session_id="session-owner")
+        assert "ComfyUI" in provider._current_task_anchor
+        assert "owner cancelled" not in provider._current_task_anchor
+    finally:
+        provider.shutdown()
+    assert [r for r in _anchor_records(tmp_path) if r.get("status") == "cancelled"] == []
+
+
+def test_real_cancellation_records_ingress_rule_in_audit(tmp_path):
+    provider = _owner_provider(tmp_path, "session-owner")
+    captured = []
+    provider._audit = lambda action, status, details: captured.append((action, status, details))
+    try:
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="session-owner")
+        assert "owner cancelled" in provider._current_task_anchor
+    finally:
+        provider.shutdown()
+    cancelled = [d for a, s, d in captured if a == "active_task_anchor_recorded" and d.get("status") == "cancelled"]
+    assert cancelled and cancelled[-1]["ingress_rule"] == "cjk_imperative"
+    active = [d for a, s, d in captured if a == "active_task_anchor_recorded" and d.get("status") == "active"]
+    assert all("ingress_rule" not in d for d in active)

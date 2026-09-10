@@ -79,41 +79,11 @@ EXCLUDE_REASONS = {
 
 _ASCII_ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
 
-_CANCELLATION_MARKERS = (
-    "算了",
-    "别做",
-    "不要做",
-    "不做了",
-    "停下",
-    "停止",
-    "收手",
-    "放弃",
-    "取消",
-    "别弄",
-    "不用做",
-    "cancel",
-    "stop",
-    "abort",
-    "give up",
-    "never mind",
-)
-
-_VAGUE_CONTINUE_MARKERS = {
-    "continue",
-    "resume",
-    "继续",
-    "继续当前任务",
-    "继续刚才的任务",
-    "接着来",
-    "接着做",
-    "继续上面那个",
-    "继续刚才那个",
-}
-
-_DEFERRED_CANCELLATION_PATTERNS = (
-    re.compile(r"(先放一下|先放着|暂时不做|晚点再|等下再|下次再|明天再说|回头再说)"),
-    re.compile(r"(pause|defer|later|tomorrow)", re.I),
-)
+# Foreground-control vocabulary (cancellation / deferral / vague continue)
+# lives in ``ingress.py`` only. This module used to keep byte-identical private
+# copies as a fallback after ``_classify_ingress``; they were unreachable while
+# the vocabularies matched and would have become live the moment ingress
+# tightened its rules (routing "取消订单" to foreground_control anyway).
 
 _DIAGNOSTIC_PATTERNS = (
     re.compile(r"(当前|现在|目前|当前的).{0,12}记忆.{0,8}(架构|系统|后端|provider|提供商|状态)"),
@@ -251,17 +221,6 @@ def plan_context_route(query: str, *, current_task_anchor: str | None = None) ->
         if ingress.open_issue:
             result["open_issue"] = ingress.open_issue
         return result
-
-    if text and _has_cancellation(text):
-        return _route("foreground_control", hard_route=True, reason_codes=["cancellation"])
-
-    if current_task_anchor and _matches_any(text, _DEFERRED_CANCELLATION_PATTERNS):
-        result = _route("foreground_control", hard_route=True, reason_codes=["deferred_cancellation_open"])
-        result["open_issue"] = "deferred_cancellation_requires_anchor_lifecycle"
-        return result
-
-    if current_task_anchor and lower in _VAGUE_CONTINUE_MARKERS:
-        return _route("foreground_control", hard_route=True, reason_codes=["vague_continue_with_anchor"])
 
     if _matches_any(text, _DIAGNOSTIC_PATTERNS):
         return _route("diagnostic_current_status", hard_route=True, reason_codes=["explicit_diagnostic"])
@@ -532,11 +491,6 @@ def _risk_flags(entries: list[dict[str, Any]]) -> list[str]:
             }:
                 flags.append(reason)
     return _dedupe(flags)
-
-
-def _has_cancellation(text: str) -> bool:
-    normalized = _normalize(text).lower()
-    return any(marker in normalized for marker in _CANCELLATION_MARKERS)
 
 
 def is_low_clue_recall_query(text: str) -> bool:
