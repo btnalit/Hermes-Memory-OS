@@ -4698,6 +4698,33 @@ public_checkout_probe --strict）+ `git diff --check` 全绿。
 
 ## 待办
 
+**主机级模型面空回复：`judge_empty_response` / `llm_empty_content`（DG 部署时定死，2026-09-10）。**
+Hermes 运行时模型（provider `hermes_default` → `openai-codex`，model `gpt-5.6-luna-900k`，
+api_mode `codex_responses`）对 Memory-OS 的治理 lane **恒返回空内容**。两条独立证据同指一处：
+① 部署探针 `low-clue-recall dry-run --llm-judge` 在**两个 profile** 都 warn，reason
+`judge_empty_response`；② sannai `session_fact_extraction` 最近 30 次运行
+`llm_calls=600 / fallback_used_count=600 / llm_failures_by_reason={"llm_empty_content":600}`，
+`facts_extracted=0`，最后一次真正产出是 **2026-08-26T02:17**，同时 `sessions_eligible=252`
+积压且已开始 `sessions_abandoned_after_max_attempts`。**因此原先"主机级 vs 单 lane 入参"
+的分叉已判定为主机级**，Memory-OS 侧无代码要改。影响面：待办 8（关键事实漏失）的 A 分支
+——近半个月主人与 sannai 的对话零事实入库。时间点与 DE/DF（08-26/08-27 RAGFlow v0.27、
+两 profile 启用远程 embedding）重合，但 `_call_hermes_runtime_model` 与 embedder 不同源，
+**相关不等于因果，不得据此归因**。另立项：先定位模型面（配额／凭证／api_mode 兼容），
+再回头看 lane 侧是否需要把"连续 N 次全空"升级成 monitor 分级——目前该 lane 计数器齐全
+却**无人分级**，又是一例"指标算了没有读者"。
+
+**`session_mirror_auto_apply_permit_integrity_invalid`：permit scope 恒不匹配（DG 部署时归因，2026-09-10）。**
+monitor FAIL，reason 恒为 `execution_gate_scope_mismatch`：`permit_count=1`、
+`completion_count=1`、`expires_at_status=valid_at_completion`、`unused_before_apply=True`、
+`consumed_after_apply=True` **全部正常**，唯独 `permit_scope_hash != expected_scope_hash`。
+即"权限用得对，但 scope 指纹算得不一样"。**至少自 2026-09-07 起每份快照都在**（09-07/08/09
+三份逐份核过，hash 每天不同但恒不等），**先于 DG 部署，不是本次引入**。方向：
+`session_mirror_auto_apply_permit_integrity` 用 `latest_apply` 的
+`max_sessions / platform_allowlist / selected_session_fingerprints` 重算期望 hash，
+而生产者写 permit 时的 scope 字段集合可能已经漂移——**典型的"校验方与生产者词表分叉"**
+（CLAUDE.md 同名小节）。修法第一步是把两侧字段集合各自枚举出来比对，
+**不要直接把校验放宽到相等**，那是买绿色。
+
 **`vector_edge_proposer` 无 `outcome`、无写失败计数（CW 登记，2026-08-15）。**
 兄弟五个 edge 步骤都产出封闭 `outcome`，只有它没有；写失败也无计数（是生产者缺口，
 不是白名单丢弃，故 CW.4 的接线修不到它）。后果：该 lane 写失败与"没边可提"在任何
@@ -4974,7 +5001,10 @@ sannai-community 仓库 README。）
   `context_router.py` 三份逐字词表副本与兜底分支；生产实测 sannai 113/121、main 586/731
   条 cancelled 锚点由 cron 提示词写入；判定器用 153 条生产语料复验（拒 98、自然取消 32/32），
   白名单宾语初版漏判 8 条已改为子句有界规则。+55 测试，全量 3701 passed / 13 skipped / 0 failed，
-  五门全绿；仅 `local_pass`，待两 profile 部署 + 网关重启。
+  五门全绿。**已合并为 `8389e59` 并部署两 profile + 双网关重启**：主机侧实测 13/13、
+  main monitor 98/5/1（基线 97/6/2，净改善）、sannai 89/12/2（两 FAIL 自 08-12 即存在）；
+  三个 FAIL 逐条按部署前快照归因，唯一新码 `index_not_healthy_in_production` 证实为
+  安装重建索引窗口的采样抖动、重跑即消。顺带把 `judge_empty_response` 判定为主机级模型面故障。
 
 - `3f447dc..HEAD`：#74/#75 评审修复（DF）——embedder 失败类型化 + `memory_embedder_fallback_fts` error_record、RAGFlow 空结果权威化 + 畸形 chunk 免连坐、import-state finally 化、INV-5 豁免记录、rerank 截断文档如实化；+11 测试，全量 3646 passed / 13 skipped / 0 failed。
 
@@ -7462,10 +7492,54 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
   sabotage `initialize` 守卫 → 继承/墓碑测试挂。全部 cp 备份还原，未用 `git checkout --`。
 - **测试**：+55（ingress 46、anchor 6、router 3）；全量 **3701 passed / 13 skipped / 0 failed**；
   五门（import-cycle、write-surface `unclassified_count=0`、static-hygiene、public-checkout
-  `--strict` PASS、`git diff --check`）全绿。仅 `local_pass`，未部署。
+  `--strict` PASS、`git diff --check`）全绿。**已合并并部署**，见下节。
 - **部署要求**：provider 侧改动，**两 profile 网关都要重启**（main 也有 586 条）；部署后按
   md5 核对三个文件，再看 24h 内 cancelled 新增行是否归零
   （`grep -c '"status": "cancelled"' active_task_anchor.jsonl` 前后对比）。
+
+### DG 部署与生产验证（2026-09-10，main+sannai 双 profile，`8389e59`）
+
+- **合并与同步**：PR #77 合并为 `8389e59`；本地与 `/opt/Hermes-Memory-OS` 均 ff 到该提交，
+  三个源文件 md5 本地/远端逐字节一致（`9b8ba7b0` / `836af4b7` / `dbe7fdbd`）。
+  回滚点 `9136bf0f`，另在 `/root/_memoryos_predeploy_backup_20260910T0700Z/{main,sannai}/`
+  留了三文件的部署前副本（旧 md5 `e3ee4a1f` / `a773e392` / `5a564a65`，两 profile 相同）。
+- **部署**：`deploy_memory_os.py --mode production-safe --profile upgrade`，两 profile 各走
+  plan → preflight → dry-run → apply。全部 `preflight_pass` + `dry_run_pass` + `apply_applied`
+  + `postcheck_pass`，manifest `deployed_head=8389e595` 两 profile 均已盖章；
+  `MSYS_NO_PATHCONV=1` 生效，plan 阶段路径未被 Git Bash 改写。
+- **网关重启**：两个 user 单元 `hermes-gateway.service` / `hermes-gateway-sannai.service`
+  依次 restart，均回到 active、`NRestarts=0`、Telegram polling 已连上。日志里那两条
+  `Failed with result 'exit-code'` 出现在 restart 同一秒，是**旧进程收到 SIGTERM 的退出码**，
+  不是新进程故障（新进程启动日志完整、无 traceback、无 memory_os 报错）。
+- **主机侧行为验证（不是只看 md5）**：用 `importlib` 直接加载**两个 profile 上实际部署的**
+  `ingress.py`，跑 13 条判据（cron 前导语 / cron 会话 id / 描述性提及 / 否定 / 机器框架文本
+  / 真实取消 × 5）——**main 13/13、sannai 13/13**，cron 提示词落 `machine_authored`、
+  `route=''`、`reason_codes=['machine_authored_query']`。
+- **Full Monitor（main）**：第一次跑出 3 FAIL，**逐条按部署前快照归因**，这是本节最该记住的方法：
+  - `session_mirror_auto_apply_permit_integrity_invalid` —— 09-07/08/09 **三份快照里都在**，
+    reason 恒为 `execution_gate_scope_mismatch`（permit 1、completion 1、hash 不符）。
+    **先于本次部署的存量缺陷，未修，登记待办。**
+  - `doctor_probe_timeout` —— 09-08 两份快照里也有，`command_timeout_seconds=20` 抖动，
+    与 DC 节记录的"探针超时被误报成 doctor 不健康"同源。
+  - `index_not_healthy_in_production` —— 部署前五份快照里**一份都没有**，唯一的新码。
+    直查 `index_health` 得 `state=healthy`、`prefetch_mode=indexed`，db 文件 mtime 15:20/15:21
+    正落在安装重建索引的窗口内 ⇒ **监控在重建期间采了样**。原样重跑：该码消失。
+  - 重跑结果 **98 PASS / 5 WARN / 1 FAIL**，对照部署前基线（09-09：97/6/2）**净改善**——
+    `shell_alias_no_env_failed` 与 `owner_review_surface_not_ok` 一并消失。
+- **Full Monitor（sannai）**：**89 PASS / 12 WARN / 2 FAIL**。两个 FAIL
+  （`memory_projection_duplicate_records`、`memory_projection_retention_compaction_missing`）
+  **在 2026-08-12 的 sannai 快照里已经存在**，且 6 对重复行的 `created_at` 全是
+  **2026-07-28/29**，今天一行未加；sannai 至今没有 `memory_projection_compactions.jsonl`
+  （main 有一份 6 月 3 日的），这就是 compaction_missing 的直接原因。
+  对照 08-12 的 4 个 FAIL，今天降到 2 个。**方法记账**：我一度按"部署刷新写了 12 行、
+  正好 6 对重复"推断是本次引入，**数字吻合纯属巧合**——是翻出 08-12 快照和逐行时间戳
+  才纠正的。数量吻合不是因果证据。
+- **`llm_judge_probe_status=warn` 顺带定死了一个悬案**：两 profile 的部署探针都 warn，
+  实测 reason 是 `judge_empty_response`（provider `hermes_default` → `openai-codex`，
+  model `gpt-5.6-luna-900k`，api_mode `codex_responses`）。这与「DG 附带」①里 sannai
+  `session_fact_extraction` 的 600/600 `llm_empty_content` 是**同一个失败模式，且 main 同样中招**
+  ⇒ 原本列为"下一步需诊断"的分叉（主机级模型面 vs 单 lane 入参）**判定为主机级模型面**，
+  不是 lane 缺陷。Memory-OS 侧无需改代码；另立项处理。
 ### DG 附带：三个遗留项的生产实测状态（2026-09-10，非估算）
 
 本轮顺手把 owner 问的"哪些遗留项可以闭环"逐条拿账本核了。**三条里只有一条能关，
