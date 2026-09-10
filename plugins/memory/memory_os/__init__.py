@@ -910,8 +910,14 @@ class MemoryOSProvider(MemoryProvider):
         #    anchor was lost (e.g. _build_current_task_anchor returned ""
         #    and overwrote it), scan the disk directly and mark every
         #    active record as superseded.
+        # A scheduled session owns no anchor (initialize refuses to recover one
+        # into it), so layer 2 would find only *other* sessions' active records
+        # and tombstone them. Observed on production 2026-09-10: a sannai cron
+        # job finishing at 08:03:10Z superseded the owner's 05:17Z anchor. The
+        # safety net is for an owner session that lost its own anchor in
+        # memory — never for a machine session that never had one.
         self._clear_active_task_anchor()
-        if not self._current_task_anchor:
+        if not self._current_task_anchor and not is_scheduled_session_id(self.session_id):
             self._supersede_active_anchors()
         self._current_task_anchor = ""
         foreground_summary = _extract_foreground_session_summary(messages)
@@ -1021,6 +1027,14 @@ class MemoryOSProvider(MemoryProvider):
         return result
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
+        # A scheduled session's transcript is machine work, not the owner's
+        # foreground task. Building an anchor from it would persist an *active*
+        # record describing a cron job (and, via _write_active_task_anchor,
+        # supersede the owner's real anchor on the way). An agent cron job runs
+        # for minutes and can accumulate enough tool output to be compacted, so
+        # this hook is genuinely reachable for one.
+        if is_scheduled_session_id(self.session_id):
+            return self._current_task_anchor
         # Extract completed_operations from current anchor before rebuilding
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
         new_anchor = _build_current_task_anchor(

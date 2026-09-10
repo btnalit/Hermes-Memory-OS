@@ -5004,7 +5004,14 @@ sannai-community 仓库 README。）
   五门全绿。**已合并为 `8389e59` 并部署两 profile + 双网关重启**：主机侧实测 13/13、
   main monitor 98/5/1（基线 97/6/2，净改善）、sannai 89/12/2（两 FAIL 自 08-12 即存在）；
   三个 FAIL 逐条按部署前快照归因，唯一新码 `index_not_healthy_in_production` 证实为
-  安装重建索引窗口的采样抖动、重跑即消。顺带把 `judge_empty_response` 判定为主机级模型面故障。
+  安装重建索引窗口的采样抖动、重跑即消。**端到端判据**：`余温检查·下午`（08:00 UTC）
+  此前 16 天每天必写一条取消锚点，今天同一任务跑完**零取消写入**，日计数由稳定的 7 条降为
+  重启前的 3 条。该次核对同时抓出兄弟缺陷另外两条路径：**DG.2**（`on_session_end` 安全网
+  无条件 `_supersede_active_anchors`，每次 cron 结束都废止主人的活跃锚点，靠"取消数没变
+  但行数变了"发现）与 **DG.3**（补做九个锚点写入点的全生命周期扫描，`on_pre_compress`
+  会用 cron 对话造 active 锚点并顺带废止主人的），各配 2 个反事实测试。
+  顺带把 `judge_empty_response` 判定为主机级模型面故障、
+  把 `prefetch timed out after 8.0s` 核为可追至 09-04 的既有告警。
 
 - `3f447dc..HEAD`：#74/#75 评审修复（DF）——embedder 失败类型化 + `memory_embedder_fallback_fts` error_record、RAGFlow 空结果权威化 + 畸形 chunk 免连坐、import-state finally 化、INV-5 豁免记录、rerank 截断文档如实化；+11 测试，全量 3646 passed / 13 skipped / 0 failed。
 
@@ -7534,6 +7541,78 @@ DC 部署后核对 index 计数时发现：main 与 sannai 的 `store_counts` /
   对照 08-12 的 4 个 FAIL，今天降到 2 个。**方法记账**：我一度按"部署刷新写了 12 行、
   正好 6 对重复"推断是本次引入，**数字吻合纯属巧合**——是翻出 08-12 快照和逐行时间戳
   才纠正的。数量吻合不是因果证据。
+- **端到端生产验证（本节的真正判据，不是 md5 也不是单测）**：md5 一致只证明文件到位，
+  必须等一次**真实的肇事 cron 跑完**才算验证。选 `三奶的余温检查·下午`（`0 16 * * *` CST
+  = 08:00 UTC），因为按 UTC 小时拆分历史账本，**该时段此前 16 天每天都写一条取消锚点**，
+  最近六天无一例外（09-04…09-09 各一条 `08:00:xx`）：
+
+  | UTC 时段 | 01 | 04 | 05 | 08 | 09 | 12 | 13 |
+  |---|---|---|---|---|---|---|---|
+  | 历史 cron 取消行数 | 15 | 17 | 17 | **16** | 16 | 16 | 16 |
+
+  2026-09-10 该任务 16:00:26 CST 触发，网关日志确认 16:00:37 **确实调用了 memory-os
+  prefetch**，而 `cancelled` 计数停在 121 / cron_authored 113 **一行未增**。日计数同样清楚：
+  09-03→09-09 稳定 **每天 7 条**，今天只有 **3 条**，且全部发生在 07:17 UTC 重启之前。
+  重启后两个 profile 的锚点账本**任何状态的行都没写过**（`created_at >= 07:17` 计数为 0），
+  与"cron 轮不再产生任何锚点写入"的设计一致。
+- **验证当场抓出兄弟缺陷的第二条路径（DG.2，本节最有价值的产出）**：核对账本时发现行数
+  3823→**3824**，而"重启后写入"计数却是 0——两个数对不上就不能放过。查那一行：不是取消，
+  是一条 **`status=superseded` 墓碑**，被废止的是**主人自己**的 active 锚点
+  （session `20260910_114632_…`，`created_at=05:17:41Z`，任务文本是主人当天的真实消息），
+  `superseded_at=08:03:10Z` —— **正是余温检查那次 cron 跑完的时刻**。
+
+  根因在 `on_session_end` 的两层防御：
+
+  ```python
+  self._clear_active_task_anchor()      # cron 会话锚点为空 → 提前返回，正确
+  if not self._current_task_anchor:
+      self._supersede_active_anchors()  # ← 无条件扫盘，把别人的 active 全废止
+  ```
+
+  DG 主批修的是 cron 会话**开始**时继承并墓碑主人锚点（`initialize`）；**结束**侧这条
+  安全网同样无条件执行。而修好 `initialize` 之后 cron 会话必然 `_current_task_anchor == ""`，
+  于是**每次**都会走进安全网 —— 该防御的本意是"owner 会话在内存里丢了自己的锚点时兜底"，
+  对一个从来就没有锚点的机器会话，它扫到的只可能是**别人的**记录。
+  后果：任意 agent 类 cron 任务跑完，主人的前台任务连续性即被静默清除（sannai 每天 7+ 次）。
+
+  修法一行：`and not is_scheduled_session_id(self.session_id)`。反事实：去掉该守卫，
+  新增的 `test_scheduled_session_end_does_not_supersede_owner_anchor` 立刻挂；
+  同时新增 `test_owner_session_end_still_supersedes_when_anchor_lost` 钉住安全网**对 owner
+  会话仍然生效**（两种情况下都通过，证明不是把网剪了）。
+
+  **方法记账**：这条是靠"取消数没变但行数变了、两个计数对不上"揪出来的。
+  如果只核 `cancelled` 计数（部署要求里原本就只写了这一条），它会完好无损地留在生产上，
+  且比原缺陷更隐蔽——**它不写任何新行，只把别人的行改成终态**。
+
+- **补做全生命周期扫描，又抓出第三条路径（DG.3）**：DG.2 之后才意识到只查了
+  `initialize` 与 `on_session_end` 两个钩子，属 Rule-5 漏做。把 `_write_active_task_anchor(`
+  的**九个**调用点逐一归属到方法并判定可达性：
+
+  | 调用点 | 所属方法 | 对 cron 会话 |
+  |---|---|---|
+  | 175 | `initialize` | 已守卫（DG 主批） |
+  | 605 | `_capture_turn_operations` ← `sync_turn` | 不可达：`not self._current_task_anchor` 提前返回 |
+  | **1046** | **`on_pre_compress`** | **可达 —— 缺口，见下** |
+  | 1378/1390/1397/1408/1458 | `_refresh_current_task_anchor_from_query` | 已守卫（`machine_authored` 提前返回） |
+  | 1646 | `_clear_active_task_anchor` | 空锚点提前返回；旁边的安全网已由 DG.2 守卫 |
+
+  `on_pre_compress` 会用**本会话的对话内容**造锚点并落盘 active 行。agent 类 cron 任务
+  单次运行数分钟、工具输出可观（本次余温检查 16:00:26→16:03:10），**足以触发压缩**，
+  所以这个钩子对 cron 会话是真可达的。一旦触发，既会把机器工作登记成主人的前台任务，
+  又会在 `_write_active_task_anchor` 内顺手废止主人的真锚点（与 DG.2 同一后果）。
+  且它是 605 那条"不可达"结论的**前提**——`on_pre_compress` 一旦给 cron 会话置上锚点，
+  `_capture_turn_operations` 随即变为可达。修法同样一行提前返回，配两个反事实测试
+  （cron 不写、owner 仍写）。
+
+  **教训**：守卫机器会话必须**枚举全部生命周期钩子**，不能只守入口那一轮。
+  DG 主批守了入口、DG.2 守了出口、DG.3 才补上压缩钩子——三次都是同一个缺陷家族，
+  差别只在"哪个钩子先被生产触发到"。
+- **顺带核掉一个容易误认成回归的告警**：sannai 网关在该轮记
+  `Memory provider 'memory-os' prefetch timed out after 8.0s`。查 7 天日志，两个网关
+  **每天 1–3 次、至少可追到 09-04**，频次未变 ⇒ 先于本次部署，非回归
+  （判定器是正则，不可能耗 8 秒）。注意 memory_manager 的超时只让**调用方**放弃等待、
+  不会取消 provider 线程，所以 `_refresh_current_task_anchor_from_query`（在 `prefetch()`
+  最前段）照常执行完 —— 这一点是上面"没写锚点=修复生效"结论成立的前提，已核。
 - **`llm_judge_probe_status=warn` 顺带定死了一个悬案**：两 profile 的部署探针都 warn，
   实测 reason 是 `judge_empty_response`（provider `hermes_default` → `openai-codex`，
   model `gpt-5.6-luna-900k`，api_mode `codex_responses`）。这与「DG 附带」①里 sannai
