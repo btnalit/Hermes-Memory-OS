@@ -4698,7 +4698,42 @@ public_checkout_probe --strict）+ `git diff --check` 全绿。
 
 ## 待办
 
-**主机级模型面空回复：`judge_empty_response` / `llm_empty_content`（DG 部署时定死，2026-09-10）。**
+**空回复根因：`-900k` 是 Hermes 私有别名，Memory-OS 把它原样发上了线（2026-09-10 实测定案）。**
+
+**先纠正本节的前一版结论**：曾写成"主机级模型面故障"。owner 反问"我的 Hermes agent 用
+`gpt-5.6-luna-900k` 明明可以"，逼出了真正的根因——**不是限额，也不是主机故障，是 Memory-OS
+绕过了 Hermes 的模型名归一化**。
+
+实测链条（每一步都有报错原文，不是推断）：
+1. 照搬部署版 `_call_openai_responses` 直接发一次调用，把被吞的异常打出来：
+   `openai.BadRequestError: 400 - {'detail': "The 'gpt-5.6-luna-900k' model is not supported
+   when using Codex with a ChatGPT account."}`，两 profile 一致。
+2. 怀疑是缺 Codex 身份头（`agent/codex_headers.py` 的 `originator`/`ChatGPT-Account-ID`）。
+   带上、不带、两者合并各试一次——**三种都是同一个 400**，排除 SDK 适配问题。
+3. 拉账号模型目录 `GET /backend-api/codex/models`：
+   `gpt-6-astra / gpt-reserve / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna / gpt-5.5 /
+   codex-auto-review` —— **`gpt-5.6-luna-900k` 不在其中**。
+4. 那 Hermes 自己为何能用？`agent/model_metadata.py` 给出答案：
+   `CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"`，注释写明 *"Never sent on the wire"*；
+   `strip_codex_context_variant_suffix()` 在发请求前剥掉后缀，
+   `agent/transports/codex.py:730` 同样注明「`-900k` 是 Hermes 侧别名，后端只认基础 slug」。
+   **`-900k` 是大上下文选择器别名，不是模型 ID。** Hermes 自己的传输层剥；
+   Memory-OS 的 `_call_hermes_runtime_model` 取 `runtime["model"]` **原样上线**，于是 400。
+5. 对照实验：同一凭证发 `gpt-5.6-luna` 立即返回 `{"ok":true}`。
+
+**owner 裁定（2026-09-10）：不在 Memory-OS 里做这个适配。** 剥 `-900k` 是 Hermes 的私有约定，
+写进来就等于把记忆层绑死在单一 provider 上，而我们要的是不同 LLM 都能复用的调用面。
+因此**不新增 provider 特例代码**。方向留给另立项：Memory-OS 不该自己手写三套 wire 调用
+（`chat_completions` / `codex_responses` / `anthropic_messages`），应当走 Hermes 已归一化的
+调用面；在那之前这条对任何"模型名 ≠ wire 名"的 provider 都会复发。
+
+**与本批直接相关、且已被本次实测坐实的那半个缺陷**：`_call_hermes_runtime_model` 的
+`except Exception: return ""` 把一个**明确的 400**吞成"模型没话说"。真实报错在 15 天里
+从未出现在任何账本、日志或监控里——只有把异常打出来才看见。这正是 CLAUDE.md
+「Completion Is Not Output」点名的形状，`fact_judge` 早有正确写法（typed failure reason）。
+**这条是 provider 无关的，应当修**，与上面的"不做定制"不冲突。
+
+（原记录，保留备查：）**主机级模型面空回复：`judge_empty_response` / `llm_empty_content`（DG 部署时定死，2026-09-10）。**
 Hermes 运行时模型（provider `hermes_default` → `openai-codex`，model `gpt-5.6-luna-900k`，
 api_mode `codex_responses`）对 Memory-OS 的治理 lane **恒返回空内容**。两条独立证据同指一处：
 ① 部署探针 `low-clue-recall dry-run --llm-judge` 在**两个 profile** 都 warn，reason
@@ -4713,7 +4748,8 @@ api_mode `codex_responses`）对 Memory-OS 的治理 lane **恒返回空内容**
 再回头看 lane 侧是否需要把"连续 N 次全空"升级成 monitor 分级——目前该 lane 计数器齐全
 却**无人分级**，又是一例"指标算了没有读者"。
 
-**`session_mirror_auto_apply_permit_integrity_invalid`：permit scope 恒不匹配（DG 部署时归因，2026-09-10）。**
+**~~`session_mirror_auto_apply_permit_integrity_invalid`：permit scope 恒不匹配~~ —— DH 已修（2026-09-10）。**
+原始诊断保留备查：
 monitor FAIL，reason 恒为 `execution_gate_scope_mismatch`：`permit_count=1`、
 `completion_count=1`、`expires_at_status=valid_at_completion`、`unused_before_apply=True`、
 `consumed_after_apply=True` **全部正常**，唯独 `permit_scope_hash != expected_scope_hash`。
@@ -7672,3 +7708,47 @@ sannai 单次运行 `sessions_scanned=405 / sessions_eligible=252 / sessions_pro
 按 envelope 探它会得到 main/sannai 各 0，**这不是证据**——它是 cognitive loop 的步骤，
 不开自己的 permit（loop 只有四个显式 envelope），0 是设计如此。下次核它要读
 边账本产出，别读 envelope。
+
+## DH — permit scope 校验方与生产者字段集分叉：一个从未真正校验过的门（2026-09-10）
+
+- **触发**：DG 部署验证时把 `session_mirror_auto_apply_permit_integrity_invalid` 归因为
+  "先于部署的存量缺陷"并登记待办；owner 指示"代码缺陷可以直接修复"。
+- **根因（可复算，不是推断）**：permit 的 `scope_hash` 取自
+  `session_mirror._session_mirror_auto_apply_scope` —— 该函数是这个 scope 形状的**单一真源**，
+  发证侧（`session_mirror.py:312`）与仓库内 verifier（`:1234`）都调它，共 **6 个字段**。
+  而 `memory_os_3_200_monitor.py` 的 `expected_scope` 是**手工重建**的 **5 个字段**，
+  少了 `platform_denylist`。用监控自己的哈希函数复算：
+
+  | | 值 |
+  |---|---|
+  | 生产库 permit `scope_hash` | `83eec368e082d1bb…` |
+  | hash(生产者 6 字段) | `83eec368e082d1bb…` ← 逐字节复现 |
+  | hash(校验方 5 字段) | `05ed324af6dbf9bc…` ← 永不相等 |
+  | 补上 `platform_denylist` 后 | 相等 |
+
+  **决定性对照**：同一个 envelope `xgate_20260910T060944377594Z_b44b83fe8e`，
+  仓库内 resolver 记录的是 `scope_match: true / status: valid`（它用的是共享构造器），
+  监控却报 `execution_gate_scope_mismatch`。错的只有监控这一侧。
+  后果不是"报错"而是**这个门从来没有校验过任何东西**：它恒 FAIL，与是否真有 scope 漂移无关，
+  于是真漂移与假警报完全同貌。
+- **为什么测试没抓到**：两处既有 permit 测试的 scope 夹具是**手写的 5 字段字典**——
+  夹具与缺陷保持一致，所以永远不会失败。这正是
+  [[counterfactual-tests-must-use-real-producer]] 记的那条：**夹具必须由真生产者构造**。
+- **修复**：
+  - `session_mirror.py`：`_append_apply_record` 增 `platform_denylist` 入参并写进 apply 记录
+    （此前该字段只存在于 policy 与 permit，外部校验方无从取值）；
+    `_bounded_apply_record` 对缺字段的历史行投影为 `None` 而非 `[]`——**让"没有 denylist"
+    与"这条记录早于该字段"可区分**，后者不可校验，不能报成失配。
+  - `memory_os_3_200_monitor.py`：`expected_scope` 补第 6 个字段，取自 `latest_apply`；
+    字段缺失时返回新状态 `unverifiable` + 原因码
+    `legacy_apply_record_without_platform_denylist`，classify 侧走 **INFO 而非 FAIL**
+    （INFO 无需 `CLEAN_HOST_WARN_CLASSIFICATIONS` 登记，与 `continuity_freshness_findings`
+    同例）。**断言一个算不出来的失配，正是这个门空转数周的原因。**
+- **反事实**：抽掉监控里补的那一行 → 平价测试与既有的
+  `accepts_completed_permit_after_ttl` 双双失败（`assert 'invalid' == 'ok'`）；恢复即通过。
+- **防再犯**：新增 `test_session_mirror_permit_scope_key_parity`，夹具**由真构造器生成**。
+  将来给构造器加第 7 个字段而不同步监控，这条测试会直接挂——而不是像这次一样，
+  让门悄悄变成永假。
+- **一句话教训**：**一个恒 FAIL 的门和一个恒 PASS 的门一样没用**，
+  两者都不再携带信息。CLAUDE.md 已有「A gate whose vocabulary drifts from its producer's
+  checks nothing, silently」——这次是它的镜像：不是漏检，是永远误检。

@@ -2664,6 +2664,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                             "execution_gate_envelope_id": permit_integrity.get("execution_gate_envelope_id") or "",
                         }
                     )
+                elif permit_integrity.get("status") == "unverifiable":
+                    # The apply record predates `platform_denylist`, so the
+                    # permit's scope hash cannot be rebuilt. Report the gap as
+                    # INFO — asserting a mismatch we cannot compute is how this
+                    # gate spent weeks FAILing on nothing.
+                    info.append(
+                        {
+                            "code": "session_mirror_auto_apply_permit_integrity_unverifiable",
+                            "value": permit_integrity,
+                        }
+                    )
                 else:
                     fail.append(
                         {
@@ -7882,6 +7893,29 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
         for item in (latest_apply.get("selected_session_fingerprints") if isinstance(latest_apply.get("selected_session_fingerprints"), list) else [])
       ],
     }
+    # The permit's scope is minted by `session_mirror._session_mirror_auto_apply_scope`,
+    # the single source of truth for this shape. This rebuild MUST carry the
+    # same key set: a hash over five of its six fields can never match, so the
+    # gate reports `execution_gate_scope_mismatch` on every run whether or not
+    # any real drift exists — which is how it FAILed continuously from at least
+    # 2026-09-07 while the in-repo resolver reported `scope_match: true` for the
+    # very same envelope. `test_session_mirror_permit_scope_key_parity` pins the
+    # two key sets together so a newly added scope field fails loudly instead of
+    # silently making this gate vacuous.
+    _denylist = latest_apply.get("platform_denylist")
+    if _denylist is None:
+        # Written before the producer recorded the field: the expected hash
+        # cannot be reconstructed. Say so rather than assert a mismatch.
+        return {
+          "status": "unverifiable",
+          "reason": "legacy_apply_record_without_platform_denylist",
+          "execution_gate_envelope_id": envelope_id,
+        }
+    expected_scope["platform_denylist"] = sorted(
+      [str(item).lower() for item in _denylist if str(item or "").strip()]
+      if isinstance(_denylist, list)
+      else []
+    )
     expected_scope_hash = _execution_gate_scope_hash(expected_scope)
     if len(permits) != 1:
         return {

@@ -4153,6 +4153,7 @@ def test_session_mirror_permit_integrity_accepts_completed_permit_after_ttl(monk
     latest_apply = {
         "max_sessions": 1,
         "platform_allowlist": ["telegram"],
+        "platform_denylist": [],
         "selected_session_fingerprints": ["smfp_done"],
     }
     latest_governance = {
@@ -4161,13 +4162,18 @@ def test_session_mirror_permit_integrity_accepts_completed_permit_after_ttl(monk
         "execution_gate_envelope_id": "xgate_completed",
         "execution_gate_permit_resolution": {"unused_before_apply": True},
     }
-    scope = {
-        "approval_ref": "oa_graduated",
-        "stable_scope_id": "lane:telegram",
-        "max_sessions_per_run": 1,
-        "platform_allowlist": ["telegram"],
-        "selected_session_fingerprints": ["smfp_done"],
-    }
+    # Built by the REAL producer, not hand-written: a hand-made dict is how the
+    # five-vs-six field drift stayed invisible to this suite for weeks.
+    from plugins.memory.memory_os.session_mirror import _session_mirror_auto_apply_scope
+
+    scope = _session_mirror_auto_apply_scope(
+        approval_ref="oa_graduated",
+        stable_scope_id="lane:telegram",
+        max_sessions_per_run=1,
+        platform_allowlist=["telegram"],
+        platform_denylist=[],
+        selected_session_fingerprints=["smfp_done"],
+    )
     records = [
         {
             "stage": "permit",
@@ -4209,6 +4215,7 @@ def test_session_mirror_permit_integrity_rejects_multiple_completions(monkeypatc
     latest_apply = {
         "max_sessions": 1,
         "platform_allowlist": ["telegram"],
+        "platform_denylist": [],
         "selected_session_fingerprints": ["smfp_done"],
     }
     latest_governance = {
@@ -4217,13 +4224,18 @@ def test_session_mirror_permit_integrity_rejects_multiple_completions(monkeypatc
         "execution_gate_envelope_id": "xgate_completed_twice",
         "execution_gate_permit_resolution": {"unused_before_apply": True},
     }
-    scope = {
-        "approval_ref": "oa_graduated",
-        "stable_scope_id": "lane:telegram",
-        "max_sessions_per_run": 1,
-        "platform_allowlist": ["telegram"],
-        "selected_session_fingerprints": ["smfp_done"],
-    }
+    # Built by the REAL producer, not hand-written: a hand-made dict is how the
+    # five-vs-six field drift stayed invisible to this suite for weeks.
+    from plugins.memory.memory_os.session_mirror import _session_mirror_auto_apply_scope
+
+    scope = _session_mirror_auto_apply_scope(
+        approval_ref="oa_graduated",
+        stable_scope_id="lane:telegram",
+        max_sessions_per_run=1,
+        platform_allowlist=["telegram"],
+        platform_denylist=[],
+        selected_session_fingerprints=["smfp_done"],
+    )
     records = [
         {
             "stage": "permit",
@@ -9140,3 +9152,165 @@ def test_shell_alias_no_env_section_strips_hermes_home_explicitly():
 
     assert '_no_env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}' in script
     assert "executor.submit(load_json_cmd, command, _no_env)" in script
+
+
+def _session_mirror_permit_snapshot(permit_integrity):
+    """A healthy snapshot whose only variable is the permit-integrity verdict."""
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 30,
+        "pending_session_count": 24,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 24,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_approval_resolved": True,
+        "latest_apply_owner_channel_bound": True,
+        "latest_apply_owner_approved": True,
+        "latest_apply_approval_source": "owner_action_lane_graduation",
+        "latest_apply_auto_apply": True,
+        "latest_apply_lane_graduated": True,
+        "latest_apply_execution_gate_envelope_id": "xgate_legacy",
+        "session_mirror_auto_apply_execution_gate_bound": True,
+        "session_mirror_auto_apply_permit_integrity": permit_integrity,
+        "latest_apply_boundary_true_count": 0,
+    }
+    return snapshot
+
+
+def _permit_records(envelope_id, scope, scope_hash):
+    return [
+        {
+            "stage": "permit",
+            "execution_gate_envelope_id": envelope_id,
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "boundary_true": False,
+            "boundary": {
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_unapproved_crystallized_approval": False,
+            },
+            "scope": scope,
+            "scope_hash": scope_hash,
+            "created_at": "2000-01-01T00:00:00Z",
+            "expires_at": "2000-01-01T00:15:00Z",
+        },
+        {
+            "stage": "completion",
+            "execution_gate_envelope_id": envelope_id,
+            "lane_id": "session_mirror_auto_apply",
+            "created_at": "2000-01-01T00:00:05Z",
+            "execution_status": "ok",
+        },
+    ]
+
+
+def test_session_mirror_permit_scope_key_parity(monkeypatch):
+    """The monitor must rebuild the permit scope with the producer's field set.
+
+    ``session_mirror._session_mirror_auto_apply_scope`` is the single source of
+    truth for that shape and the permit's ``scope_hash`` is taken over it. When
+    the monitor rebuilt five of its six fields the hash could never match, so
+    the gate reported ``execution_gate_scope_mismatch`` on every run whether or
+    not any real drift existed -- measured on production from at least
+    2026-09-07, while the in-repo resolver reported ``scope_match: true`` for
+    the very same envelope.
+
+    The fixture is built through the real producer, so adding a field to the
+    builder without teaching the monitor fails here instead of silently making
+    the gate vacuous again.
+    """
+    from plugins.memory.memory_os.session_mirror import _session_mirror_auto_apply_scope
+
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    scope = _session_mirror_auto_apply_scope(
+        approval_ref="oa_parity",
+        stable_scope_id="lane:parity",
+        max_sessions_per_run=2,
+        platform_allowlist=["telegram", "cli"],
+        platform_denylist=["discord"],
+        selected_session_fingerprints=["smfp_parity"],
+    )
+    latest_apply = {
+        "max_sessions": 2,
+        "platform_allowlist": ["telegram", "cli"],
+        "platform_denylist": ["discord"],
+        "selected_session_fingerprints": ["smfp_parity"],
+    }
+    latest_governance = {
+        "approval_ref": "oa_parity",
+        "stable_scope_id": "lane:parity",
+        "execution_gate_envelope_id": "xgate_parity",
+        "execution_gate_permit_resolution": {"unused_before_apply": True},
+    }
+    records = _permit_records("xgate_parity", scope, namespace["_execution_gate_scope_hash"](scope))
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: records)
+
+    integrity = namespace["session_mirror_auto_apply_permit_integrity"](latest_apply, latest_governance)
+
+    assert integrity["status"] == "ok", integrity
+    assert integrity["scope_match"] is True
+
+
+def test_session_mirror_permit_integrity_legacy_record_is_unverifiable(monkeypatch):
+    """An apply record predating ``platform_denylist`` cannot be scope-checked.
+
+    Asserting a mismatch that cannot be computed is what made this gate FAIL
+    for weeks on nothing, so the absence gets its own status.
+    """
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    latest_apply = {
+        "max_sessions": 1,
+        "platform_allowlist": ["telegram"],
+        # no platform_denylist key at all -- a pre-fix record
+        "selected_session_fingerprints": ["smfp_legacy"],
+    }
+    latest_governance = {
+        "approval_ref": "oa_legacy",
+        "stable_scope_id": "lane:legacy",
+        "execution_gate_envelope_id": "xgate_legacy",
+        "execution_gate_permit_resolution": {"unused_before_apply": True},
+    }
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: [])
+
+    integrity = namespace["session_mirror_auto_apply_permit_integrity"](latest_apply, latest_governance)
+
+    assert integrity["status"] == "unverifiable"
+    assert integrity["reason"] == "legacy_apply_record_without_platform_denylist"
+
+
+def test_classify_snapshot_grades_unverifiable_permit_integrity_as_info():
+    snapshot = _session_mirror_permit_snapshot(
+        {
+            "status": "unverifiable",
+            "reason": "legacy_apply_record_without_platform_denylist",
+            "execution_gate_envelope_id": "xgate_legacy",
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(
+        item["code"] == "session_mirror_auto_apply_permit_integrity_invalid"
+        for item in classification["fail"]
+    )
+    assert any(
+        item["code"] == "session_mirror_auto_apply_permit_integrity_unverifiable"
+        for item in classification.get("info", [])
+    )
