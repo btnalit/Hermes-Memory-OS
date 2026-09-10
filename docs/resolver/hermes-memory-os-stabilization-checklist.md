@@ -5031,6 +5031,15 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `842b9a2..HEAD`：permit scope 门修复（DH）——监控手工重建 scope 少算 `platform_denylist`，
+  6 字段只哈希 5 个，该门恒 FAIL、**从未真正校验过任何东西**（同 envelope 仓库内 resolver 判
+  `scope_match: true`）。apply 记录补该字段、监控用同字段集重算、历史行返回 `unverifiable`
+  走 INFO；夹具改由真构造器生成 + 新增字段集平价守卫。顺带更正空回复根因：
+  `-900k` 是 Hermes 私有别名（`Never sent on the wire`），Memory-OS 原样上线被 400，
+  非限额非主机故障；按 owner 裁定不做 provider 特例。+3 测试，全量 3708 passed / 13 skipped /
+  0 failed，五门全绿。已部署双 profile（`d7ce41d5`，无需重启网关）：
+  **main 98/5/0（首次 0 FAIL）**、sannai 88/13/2（两 FAIL 自 08-12 存量）。
+
 - `9136bf0..HEAD`：取消意图误判族（DG）——`has_cancellation` 由裸子串改为封闭规则集
   （整词 ASCII + CJK 否定/报告/疑问/宾语守卫，返回规则 id 落 audit）、新增 cron 会话与
   Hermes 机器提示词双守卫（`initialize` 不再让 cron 会话继承并墓碑主人锚点）、删除
@@ -7752,3 +7761,37 @@ sannai 单次运行 `sessions_scanned=405 / sessions_eligible=252 / sessions_pro
 - **一句话教训**：**一个恒 FAIL 的门和一个恒 PASS 的门一样没用**，
   两者都不再携带信息。CLAUDE.md 已有「A gate whose vocabulary drifts from its producer's
   checks nothing, silently」——这次是它的镜像：不是漏检，是永远误检。
+
+### DH 部署与生产验证（2026-09-10，main+sannai 双 profile，`d7ce41d5`）
+
+- **无需重启网关**（与 DG 两批不同，这点先核过再决定）：本批只改 `session_mirror.py` 与
+  监控脚本。心跳是 5 分钟一次的独立 systemd timer（`hermes-memory-os-heartbeat.timer`，
+  两次运行之间服务为 `inactive dead`），每次都是新进程，自动加载新代码；监控脚本同理。
+  故不打断在线 agent。**部署前先确认改动落在哪个进程边界，不要习惯性重启。**
+- 两 profile `apply_applied` + `postcheck_pass`，`session_mirror.py` md5 双端一致
+  （`c95f7fca`），manifest `deployed_head=d7ce41d5`。
+- **验证必须证明"门还在跑"，而不是只看 FAIL 消失**——后者正是缩小度量买绿色的形状。
+  用 `--output json` 取判定值，得到
+
+  ```json
+  {"execution_gate_envelope_id": "xgate_20260910T060944377594Z_b44b83fe8e",
+   "reason": "legacy_apply_record_without_platform_denylist",
+   "status": "unverifiable"}
+  ```
+
+  且 `session_mirror_auto_apply_permit_integrity_unverifiable` 出现在 INFO 列表里。
+  **FAIL 消失是因为门不再断言它算不出来的东西，不是因为门停了。** 下一次真实 auto-apply
+  写出带 `platform_denylist` 的记录后，它会转为真正的比对（预期 `ok`）。
+- **结果**：main **98 PASS / 5 WARN / 0 FAIL**（本轮首次 0 FAIL）；
+  sannai **88 PASS / 13 WARN / 2 FAIL**，两个 FAIL 均为 08-12 即存在的 projection 存量债。
+- **踩到一个部署工具陷阱，记下来免得再犯**：`deploy_memory_os.py` 的 manifest 盖章取
+  **本地 repo HEAD**，在 worktree 里跑就会盖成分支尖端而非合并提交，所以要补 stamp。
+  但**补 stamp 必须在 projection refresh 之前**——我在部署之后才重盖，把 `deployed_at`
+  推到了投影时间之后，`_memory_projection_stale_after_deploy` 判 `latest_at < deployed_at`
+  当场 FAIL。这不是代码缺陷，是操作顺序错误；补跑一次
+  `projection collect --manual-run-ref deployment_refresh` 即清。
+  正确顺序：**合并 → 远端 ff → 部署 → 重盖 manifest → 再跑一次 projection collect**。
+- **另一个方法记账**：sannai 首跑多出 `shell_alias_no_env_failed`（待办 3 登记的观察点）。
+  按登记判据"原样重跑不复现"复跑一次即消失（87/14/3 → 88/13/2）。本轮连跑四次重型监控
+  加两次部署，正是该项记录的主机负载条件，判为瞬时争用而非回归——但**这条观察点因此
+  再次兑现，下次若在低负载下复现应当升级**。
