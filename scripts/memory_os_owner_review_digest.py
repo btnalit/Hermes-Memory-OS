@@ -113,9 +113,10 @@ def _has_meaningful_content(preview: dict[str, object], *, digest_mode: str = "r
     if not isinstance(counts, dict):
         return False
     if str(digest_mode).strip().lower().replace("-", "_") == "agenda":
-        # The recurring owner agenda should push only explicit decisions or
-        # real alerts. Review-suggested and FYI items remain available through
-        # the pull-based review surface, not daily Telegram noise.
+        # The recurring owner agenda should push explicit decisions, real
+        # alerts, or a safe metadata-only warning that a non-deliverable
+        # provisional record is about to expire. The warning contains no body
+        # or action token, so it does not weaken the privacy boundary.
         return (
             int(counts.get("action_required_shown") or 0) > 0
             or int(counts.get("imminent_nondeliverable_living_memory_total") or 0) > 0

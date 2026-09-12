@@ -50,6 +50,9 @@ def test_digest_helper_agenda_mode_only_treats_decisions_as_meaningful():
         )
         is True
     )
+    # A safe metadata-only expiry warning is meaningful even when its body is
+    # intentionally excluded from delivery; this prevents the main digest from
+    # becoming silent again when provisional content is the only pending item.
     assert (
         module._has_meaningful_content(
             {
@@ -121,6 +124,26 @@ def test_digest_helper_uses_single_delivery_render_command(tmp_path, monkeypatch
     record = read_lane_last_run(tmp_path, "owner_review_digest_render")
     assert record["status"] == "ok"
     assert record["reason"] == "digest_rendered"
+
+
+def test_digest_helper_prints_imminent_metadata_only_alert(tmp_path, monkeypatch, capsys):
+    module = _load_helper_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MEMORY_OS_OWNER_REVIEW_CHANNEL", "telegram")
+    monkeypatch.setattr(
+        module,
+        "_run_json",
+        lambda _command: {
+            "counts": {
+                "action_required_shown": 0,
+                "imminent_nondeliverable_living_memory_total": 1,
+            },
+            "text": "Memory-OS 审批摘要\\n临期提醒：1 条临时记忆将在 48 小时内失效；正文不在此推送。",
+        },
+    )
+
+    assert module.main() == 0
+    assert "临期提醒" in capsys.readouterr().out
 
 
 def test_digest_helper_persists_no_meaningful_content_reason(tmp_path, monkeypatch):

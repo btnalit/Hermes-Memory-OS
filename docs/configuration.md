@@ -97,6 +97,39 @@ Keep service addresses, model paths, credentials, and profile-specific values
 outside the public repository. The production overlay should be applied by the
 operator after installing or upgrading the open-source core.
 
+## SessionMirror Admission Floor
+
+`session_mirror` in `config.json` carries the floor that decides which pending
+sessions the import lane will consider. It is a floor the owner sets once — not
+a gate re-approved per digest — and the **same** floor is applied by every scan:
+the owner-review digest, the manual `session-mirror scan --apply` revalidation,
+and the graduated auto-apply lane. That is deliberate. When the review surface
+and the apply surfaces filter differently, the digest describes one session and
+the lane imports another.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `source_denylist` | `["cron"]` | Platforms/sources never offered or imported. Matched case-insensitively with `-` normalised to `_`. |
+| `require_completed` | `true` | Skip sessions still in progress (no `ended_at`). |
+| `min_message_count` | `1` | Skip sessions with fewer messages than this. `0` disables. |
+| `max_age_days` | `14` | Skip sessions older than this. `0` disables the age floor entirely. |
+| `recent_first` | `false` | Opt-in newest-first ordering *within* the never-imported class. Off by default: with sessions arriving continuously it lets the oldest never-imported session sort last on every run until it ages out unimported. |
+| `platform_denylist` | `[]` | Owner floor under admit-all platform mode (ruling 2026-08-14). |
+
+Re-running the installer **merges** this section: it seeds the floor defaults
+only on first install and never overwrites a value already present, so owner
+tuning and `platform_denylist` survive an upgrade. Keys written before the floor
+was lane-wide (`owner_review_source_denylist` and friends) are migrated to the
+current spelling automatically.
+
+Every scan reports why each candidate was excluded — `skipped_by_source_count`,
+`skipped_by_completion_count`, `skipped_by_message_count`, `skipped_by_age_count`,
+`skipped_by_unknown_timestamp_count`, plus `eligible_session_count` and the
+`scan_floor` that was applied. Check these first when the lane goes quiet: they
+distinguish "nothing was pending" from "the floor excluded everything", and
+`skipped_by_unknown_timestamp_count` specifically flags sessions whose timestamp
+could not be read rather than sessions that are genuinely stale.
+
 ## Installer Presets
 
 | Preset | Use when | Effect |

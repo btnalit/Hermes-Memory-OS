@@ -175,14 +175,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "production_apply_owner_ref_required": True,
         "auto_apply_after_owner_home_graduation": True,
         "auto_apply_max_sessions_per_run": 1,
-        # Recurring owner digests must not be occupied by the historical cron
-        # backlog or an in-progress session. Manual/auto-apply scans retain
-        # their broader admission semantics; these are digest-only filters.
-        "owner_review_source_denylist": ["cron"],
-        "owner_review_require_completed": True,
-        "owner_review_min_message_count": 1,
-        "owner_review_max_age_days": 14,
-        "owner_review_recent_first": True,
+        # Admission floor for the whole import lane -- the same shape as
+        # `platform_denylist` below: something the owner sets once, not a gate
+        # they re-approve (owner ruling 2026-08-14). These were introduced as
+        # digest-only filters, which split selection between the review surface
+        # and the apply surfaces: the digest offered a recent human session
+        # while the graduated lane still imported the head of the unfiltered
+        # backlog. One floor, read by every scan, is what keeps "what the owner
+        # was shown" and "what the lane imports" the same session.
+        "source_denylist": ["cron"],
+        "require_completed": True,
+        "min_message_count": 1,
+        "max_age_days": 14,
+        # Ordering is part of the floor -- identical admission with different
+        # ordering still yields a different head, and the head is what gets
+        # imported -- so it is resolved here, once, for every scan.
+        #
+        # Default OFF. Recency was introduced to keep the cron/active/stale
+        # backlog off the digest head, but the admission floor above already
+        # does that, and recency costs something the floor does not: with new
+        # sessions arriving continuously, the oldest never-imported session
+        # sorts last on every run and then ages out at `max_age_days` without
+        # ever being imported -- Backlog 13's starvation, rebuilt inside the
+        # never-imported class. Queue order drains that tail FIFO. Left as an
+        # owner knob, not as normal operation.
+        "recent_first": False,
         # Owner-writable floor for the admit-all platform mode (owner ruling
         # 2026-08-14). A denylist is the inverse of the retired per-approval
         # allowlist: the owner sets it once to exclude a platform forever,
@@ -633,6 +650,36 @@ def _merge_right_brain_expression_config(value: Any) -> dict[str, Any]:
     return merged
 
 
+# Spellings used while these floors were digest-only (2a7f806). Kept so an
+# already-deployed config.json keeps the owner's tuning across the rename.
+SESSION_MIRROR_LEGACY_FLOOR_KEYS: dict[str, str] = {
+    "source_denylist": "owner_review_source_denylist",
+    "require_completed": "owner_review_require_completed",
+    "min_message_count": "owner_review_min_message_count",
+    "max_age_days": "owner_review_max_age_days",
+    "recent_first": "owner_review_recent_first",
+}
+
+
+def _floor_bool(value: Any, default: bool) -> bool:
+    return bool(default) if value is None else bool(value)
+
+
+def _floor_int(value: Any, default: int) -> int:
+    """Clamp an admission-floor integer, falling back to the declared default.
+
+    ``None`` means "not configured", never "disabled" -- a floor that switches
+    itself off when a key is missing is exactly the landmine Section W rule 4
+    forbids. An explicit ``0`` is the documented opt-out.
+    """
+    if value is None:
+        return max(int(default), 0)
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(default), 0)
+
+
 def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
     default = dict(DEFAULT_CONFIG["session_mirror"])
     if not isinstance(value, dict):
@@ -644,53 +691,54 @@ def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
     merged["test_host_apply_allowed"] = bool(merged.get("test_host_apply_allowed"))
     merged["test_host_marker"] = str(merged.get("test_host_marker") or "")
     merged["production_apply_owner_ref_required"] = bool(merged.get("production_apply_owner_ref_required"))
-    raw_review_source_denylist = merged.get("owner_review_source_denylist")
-    merged["owner_review_source_denylist"] = [
-        str(item).strip().lower() for item in raw_review_source_denylist if str(item or "").strip()
-    ] if isinstance(raw_review_source_denylist, list) else ["cron"]
-    merged["owner_review_require_completed"] = bool(merged.get("owner_review_require_completed", True))
-    try:
-        merged["owner_review_min_message_count"] = max(int(merged.get("owner_review_min_message_count") or 1), 0)
-    except (TypeError, ValueError):
-        merged["owner_review_min_message_count"] = 1
-    try:
-        raw_max_age_days = merged.get("owner_review_max_age_days", 30)
-        if raw_max_age_days is None:
-            raw_max_age_days = 30
-        merged["owner_review_max_age_days"] = max(int(raw_max_age_days), 0)
-    except (TypeError, ValueError):
-        merged["owner_review_max_age_days"] = 30
-    merged["owner_review_recent_first"] = bool(merged.get("owner_review_recent_first", True))
+    # Legacy spellings from the digest-only era (config.json written by an
+    # installer between 2a7f806 and this change). `for key in default` above
+    # only copies keys the default declares, so without this an already
+    # deployed host would silently fall back to the defaults and lose whatever
+    # the owner had tuned.
+    for key, legacy_key in SESSION_MIRROR_LEGACY_FLOOR_KEYS.items():
+        if key not in value and legacy_key in value:
+            merged[key] = value[legacy_key]
+    raw_source_denylist = merged.get("source_denylist")
+    merged["source_denylist"] = [
+        str(item).strip().lower().replace("-", "_")
+        for item in raw_source_denylist
+        if str(item or "").strip()
+    ] if isinstance(raw_source_denylist, list) else list(default["source_denylist"])
+    merged["require_completed"] = _floor_bool(merged.get("require_completed"), default["require_completed"])
+    merged["min_message_count"] = _floor_int(merged.get("min_message_count"), default["min_message_count"])
+    merged["max_age_days"] = _floor_int(merged.get("max_age_days"), default["max_age_days"])
+    merged["recent_first"] = _floor_bool(merged.get("recent_first"), default["recent_first"])
     raw_denylist = merged.get("platform_denylist")
     merged["platform_denylist"] = [
-        str(item) for item in raw_denylist if str(item or "").strip()
+        str(item).strip().lower().replace("-", "_")
+        for item in raw_denylist
+        if str(item or "").strip()
     ] if isinstance(raw_denylist, list) else []
     return merged
 
 
-def owner_review_session_mirror_scan_options(value: Any) -> dict[str, Any]:
-    """Return one normalized filter set for digest and approval revalidation."""
-    config = value if isinstance(value, dict) else {}
-    raw_denylist = config.get("owner_review_source_denylist", ["cron"])
-    source_denylist = (
-        [str(item).strip().lower() for item in raw_denylist if str(item or "").strip()]
-        if isinstance(raw_denylist, list)
-        else ["cron"]
-    )
-    try:
-        min_message_count = max(int(config.get("owner_review_min_message_count", 1) or 0), 0)
-    except (TypeError, ValueError):
-        min_message_count = 1
-    try:
-        max_age_days = max(int(config.get("owner_review_max_age_days", 30) or 0), 0)
-    except (TypeError, ValueError):
-        max_age_days = 30
+def session_mirror_scan_options(value: Any) -> dict[str, Any]:
+    """Return the admission floor every SessionMirror scan must apply.
+
+    One floor for the review surface and the apply surfaces alike. Splitting it
+    -- filters on the digest, none on the apply path -- is what let the digest
+    offer a recent human session while the graduated lane imported the head of
+    the unfiltered backlog. Callers pass the ``session_mirror`` config section;
+    it is re-normalized here through the same merge used by ``load_config`` so
+    a caller that skipped ``load_config`` cannot quietly run a weaker floor
+    than the owner configured.
+    """
+    config = _merge_session_mirror_config(value if isinstance(value, dict) else {})
+    max_age_days = int(config["max_age_days"])
     return {
-        "source_denylist": source_denylist,
-        "completed_only": bool(config.get("owner_review_require_completed", True)),
-        "min_message_count": min_message_count,
-        "max_age_days": max_age_days or None,
-        "recent_first": bool(config.get("owner_review_recent_first", True)),
+        "source_denylist": list(config["source_denylist"]),
+        "completed_only": bool(config["require_completed"]),
+        "min_message_count": int(config["min_message_count"]),
+        # 0 is the documented opt-out: no age floor at all.
+        "max_age_days": max_age_days if max_age_days > 0 else None,
+        "recent_first": bool(config["recent_first"]),
+        "platform_denylist": list(config["platform_denylist"]),
     }
 
 

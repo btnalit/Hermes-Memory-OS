@@ -5,7 +5,11 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
-from plugins.memory.memory_os.config import save_config
+from plugins.memory.memory_os.config import (
+    DEFAULT_CONFIG,
+    save_config,
+    session_mirror_scan_options,
+)
 from plugins.memory.memory_os.execution_gate import execution_gate_records_path, execution_gate_scope_hash
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.read_model_paths import owner_actions_path
@@ -27,6 +31,11 @@ def _store(tmp_path):
     store = MemoryOSStore(roots)
     store.initialize()
     return store
+
+
+def _recent_iso(days: int = 1) -> str:
+    """A timestamp inside the default admission floor (max_age_days=14)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
 def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
@@ -52,9 +61,14 @@ def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
             )
             """
         )
+        # Recent + completed on purpose: `scan()` applies the owner's admission
+        # floor by default, so a fixture frozen at a fixed past date would be
+        # testing an inadmissible session rather than a normal one.
+        _started = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        _ended = (datetime.now(timezone.utc) - timedelta(days=1, seconds=-60)).isoformat()
         conn.execute(
             "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
-            (session_id, platform, "2026-05-21T08:00:00+00:00", "2026-05-21T08:01:00+00:00"),
+            (session_id, platform, _started, _ended),
         )
         conn.executemany(
             "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
@@ -464,7 +478,7 @@ def test_session_mirror_uses_session_json_fallback_when_state_db_missing(tmp_pat
             {
                 "id": "session-json-1",
                 "platform": "cli",
-                "created_at": "2026-05-21T09:00:00+00:00",
+                "updated_at": _recent_iso(),
                 "messages": [
                     {"role": "user", "content": "记一下 CLI 入口测试"},
                     {"role": "assistant", "content": "已经记录 CLI 入口测试"},
@@ -497,6 +511,7 @@ def test_session_mirror_uses_session_json_fallback_when_state_db_has_no_sessions
             {
                 "id": "session-json-2",
                 "platform": "telegram",
+                "updated_at": _recent_iso(),
                 "messages": [
                     {"role": "user", "content": "JSON fallback should survive empty db"},
                     {"role": "assistant", "content": "JSON fallback survived"},
@@ -982,11 +997,11 @@ def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_gr
     with sqlite3.connect(tmp_path / "state.db") as conn:
         conn.execute(
             "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
-            ("auto-session-2", "telegram", "2026-05-21T09:00:00+00:00", "2026-05-21T09:01:00+00:00"),
+            ("auto-session-2", "telegram", _recent_iso(), _recent_iso()),
         )
         conn.execute(
             "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
-            ("auto-session-2", "user", "第二条 SessionMirror 自动导入测试", "2026-05-21T09:00:01+00:00"),
+            ("auto-session-2", "user", "第二条 SessionMirror 自动导入测试", _recent_iso()),
         )
     dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
     owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
@@ -1074,7 +1089,7 @@ def _add_session(path, *, session_id, platform="telegram", marker="B"):
     with sqlite3.connect(path) as conn:
         conn.execute(
             "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
-            (session_id, platform, "2026-05-21T09:00:00+00:00", "2026-05-21T09:01:00+00:00"),
+            (session_id, platform, _recent_iso(), _recent_iso()),
         )
         conn.executemany(
             "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
@@ -1188,7 +1203,7 @@ def _write_session_json(sessions_root, name, session_id, content):
         json.dumps({
             "id": session_id,
             "platform": "telegram",
-            "updated_at": "2026-08-01T00:00:00+00:00",
+            "updated_at": _recent_iso(),
             "messages": [
                 {"role": "user", "content": content},
                 {"role": "assistant", "content": "回答：" + content},
@@ -1306,8 +1321,8 @@ def test_owner_review_scan_uses_recent_completed_human_session(tmp_path):
     assert report["selected_sessions"][0]["source_group_id"] == "20260910_recent"
 
 
-def test_owner_review_item_uses_filtered_session_selection(tmp_path):
-    """The owner-review caller must pass the digest-only selection policy."""
+def test_owner_review_item_uses_the_configured_admission_floor(tmp_path):
+    """The owner-review surface selects under the lane-wide floor, not its own."""
     store = _store(tmp_path)
     _create_timestamped_state_db(tmp_path / "state.db")
 
@@ -1317,3 +1332,229 @@ def test_owner_review_item_uses_filtered_session_selection(tmp_path):
     selected = items[0]["selected_sessions"][0]
     assert selected["source_group_id"] == "20260910_recent"
     assert selected["source_kind"] == "state_db"
+
+
+def test_every_surface_selects_the_same_session_as_the_digest_offered(tmp_path):
+    """Counterfactual: the floor was digest-only, so the apply paths scanned
+    without it and resolved a different head.
+
+    Measured before this fix, against this exact fixture: the digest offered
+    `20260910_recent` while both apply paths took `20260504_old`. Manual apply
+    then died on `session_mirror_apply_scope_mismatch` (the approved fingerprint
+    never matched), and the graduated lane -- which does NOT pin the approved
+    fingerprint at all -- silently imported the wrong session.
+    """
+    store = _store(tmp_path)
+    _create_timestamped_state_db(tmp_path / "state.db")
+    mirror = SessionMirror(store)
+
+    digest = mirror.scan(dry_run=True, max_sessions=1)
+    # cli.py `session-mirror scan --apply`, re-resolved under the approval scope.
+    manual_apply = mirror.scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    # The graduated lane under `admit_all` (owner ruling 2026-08-14): the
+    # approval carries no platform scope, so it scans wide open.
+    graduated_lane = mirror.scan(
+        dry_run=True, max_sessions=1, platform_allowlist=[], platform_denylist=[]
+    )
+
+    offered = digest["selected_session_fingerprints"]
+    assert offered, "the digest must offer a session for this test to mean anything"
+    assert manual_apply["selected_session_fingerprints"] == offered
+    assert graduated_lane["selected_session_fingerprints"] == offered
+    assert digest["selected_sessions"][0]["source_group_id"] == "20260910_recent"
+
+
+def test_scan_accounts_for_every_candidate_it_filtered(tmp_path):
+    """Counterfactual: the four floor counters were computed and then dropped.
+
+    A digest that filtered its whole backlog away reported
+    `candidate_session_count: N, selected_session_count: 0` with both published
+    skip counters at 0 -- nothing said whether there was no eligible input or
+    the floor ate everything, which is what CLAUDE.md's "Completion Is Not
+    Output" forbids.
+    """
+    store = _store(tmp_path)
+    _create_timestamped_state_db(tmp_path / "state.db")
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["skipped_by_source_count"] == 1        # the cron session
+    assert report["skipped_by_completion_count"] == 1    # the in-progress one
+    assert report["skipped_by_age_count"] == 1           # the 200-day-old one
+    assert report["eligible_session_count"] == 1
+    # Every candidate lands in exactly one published outcome bucket.
+    accounted = (
+        report["selected_session_count"]
+        + report["skipped_by_platform_count"]
+        + report["skipped_by_source_count"]
+        + report["skipped_by_completion_count"]
+        + report["skipped_by_message_count"]
+        + report["skipped_by_age_count"]
+        + report["skipped_by_unknown_timestamp_count"]
+        + report["skipped_by_limit_count"]
+    )
+    assert accounted == report["candidate_session_count"]
+    # The floor itself is echoed, so a reader can tell which rule applied.
+    assert report["scan_floor"]["source_denylist"] == ["cron"]
+    assert report["scan_floor"]["max_age_days"] == 14
+
+
+def test_millisecond_epoch_timestamp_does_not_abort_the_whole_scan(tmp_path):
+    """Counterfactual: `datetime.fromtimestamp` was called unguarded on the
+    int/float branch, so one millisecond-precision row raised
+    `ValueError: year must be in 1..9999` out of `_discover_sessions()` and took
+    down the scan for every session in the profile.
+    """
+    store = _store(tmp_path)
+    path = tmp_path / "state.db"
+    _create_timestamped_state_db(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into sessions(id, source, started_at, ended_at, last_activity_at,"
+            " message_count, tool_call_count) values (?, ?, ?, ?, ?, ?, ?)",
+            ("20260913_ms", "telegram", 1757600000000, 1757600000000, 1757600000000, 2, 0),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, timestamp) values (?, ?, ?, ?)",
+            [
+                ("20260913_ms", "user", "epoch milliseconds row", 1757600000000),
+                ("20260913_ms", "assistant", "bounded answer", 1757600000000),
+            ],
+        )
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    # The good session is still selected; the unreadable one is counted, not fatal.
+    assert report["selected_sessions"][0]["source_group_id"] == "20260910_recent"
+    assert report["skipped_by_unknown_timestamp_count"] == 1
+
+
+def test_session_with_no_usable_timestamp_is_counted_not_silently_dropped(tmp_path):
+    """Counterfactual: `_session_is_within_age` returned False for an empty
+    timestamp, so a whole schema shape vanished from the digest with no counter
+    -- indistinguishable from "nothing was pending"."""
+    store = _store(tmp_path)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("create table sessions (id text primary key, source text)")
+        conn.execute(
+            "create table messages (id integer primary key autoincrement,"
+            " session_id text, role text, content text)"
+        )
+        conn.execute("insert into sessions values ('s-no-time','telegram')")
+        conn.executemany(
+            "insert into messages(session_id, role, content) values (?, ?, ?)",
+            [("s-no-time", "user", "hello"), ("s-no-time", "assistant", "hi")],
+        )
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_unknown_timestamp_count"] == 1
+    assert report["skipped_by_age_count"] == 0  # unknown is NOT folded into stale
+
+
+def test_future_timestamped_session_is_admitted_not_treated_as_stale(tmp_path):
+    """A clock-skewed future timestamp is not staleness, so it stays admitted.
+
+    The previous predicate was `age >= 0 and age <= limit`, so a session whose
+    timestamp sits even slightly in the future failed the age floor and was
+    excluded -- and, once the floor became lane-wide, would have been excluded
+    from import permanently, with nothing naming skew as the reason. This is a
+    deliberate behavior change; pinning it so it cannot be silently reverted.
+    """
+    store = _store(tmp_path)
+    path = tmp_path / "state.db"
+    _create_timestamped_state_db(path)
+    ahead = (datetime.now(timezone.utc) + timedelta(hours=6)).timestamp()
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into sessions(id, source, started_at, ended_at, last_activity_at,"
+            " message_count, tool_call_count) values (?, ?, ?, ?, ?, ?, ?)",
+            ("00000000_skewed", "telegram", ahead, ahead, ahead, 2, 0),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, timestamp) values (?, ?, ?, ?)",
+            [
+                ("00000000_skewed", "user", "clock is ahead of ours", ahead),
+                ("00000000_skewed", "assistant", "bounded answer", ahead),
+            ],
+        )
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=0)
+
+    selected = {item["source_group_id"] for item in report["selected_sessions"]}
+    assert "00000000_skewed" in selected
+    assert report["skipped_by_age_count"] == 1  # only the genuinely 200-day-old one
+    assert report["skipped_by_unknown_timestamp_count"] == 0
+
+
+def test_scan_options_never_silently_disable_the_floor():
+    """Counterfactual: two separate normalizers each hardcoded a 30-day
+    fallback while DEFAULT_CONFIG and the installer said 14, and an explicit
+    `None` resolved to "no age floor at all" rather than to the default --
+    Section W rule 4's landmine, in a value that decides what gets imported.
+    """
+    declared = DEFAULT_CONFIG["session_mirror"]["max_age_days"]
+    assert declared == 14
+
+    # Missing key -> the DECLARED default, not a second hardcoded number.
+    assert session_mirror_scan_options({})["max_age_days"] == declared
+    # `None` means "not configured", never "off".
+    assert session_mirror_scan_options({"max_age_days": None})["max_age_days"] == declared
+    # Garbage falls back too, rather than crashing or widening admission.
+    assert session_mirror_scan_options({"min_message_count": "x"})["min_message_count"] == 1
+    # Explicit 0 is the documented opt-out, and the ONLY way to get one.
+    assert session_mirror_scan_options({"max_age_days": 0})["max_age_days"] is None
+    # Legacy spelling from the digest-only era is still honoured.
+    assert session_mirror_scan_options({"owner_review_max_age_days": 90})["max_age_days"] == 90
+    assert session_mirror_scan_options({"platform_denylist": ["Telegram"]})["platform_denylist"] == ["telegram"]
+
+
+def test_scan_applies_configured_platform_denylist_by_default(tmp_path):
+    """The owner denylist is a lane floor, not an auto-apply-only option."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", platform="telegram")
+    save_config({"session_mirror": {"platform_denylist": ["Telegram"]}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_platform_count"] == 1
+    assert report["scan_floor"]["platform_denylist"] == ["telegram"]
+
+
+def test_scan_explicit_denylist_cannot_weaken_configured_floor(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", platform="telegram")
+    save_config({"session_mirror": {"platform_denylist": ["telegram"]}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_denylist=[])
+
+    assert report["selected_session_count"] == 0
+    assert report["scan_floor"]["platform_denylist"] == ["telegram"]
+
+
+def test_scan_direct_zero_max_age_disables_age_floor(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="old-session", platform="telegram")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "update sessions set created_at=?, updated_at=? where id=?",
+            ("2020-01-01T00:00:00+00:00", "2020-01-01T00:01:00+00:00", "old-session"),
+        )
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1, max_age_days=0)
+
+    assert report["selected_session_count"] == 1
+    assert report["scan_floor"]["max_age_days"] is None
+
+
+def test_recent_first_is_off_so_the_never_imported_tail_still_drains():
+    """Recency inside the never-imported class rebuilds Backlog 13: with new
+    sessions arriving continuously the oldest never-imported session sorts last
+    on every run and then ages out at `max_age_days` without ever being
+    imported. The admission floor -- not the ordering -- is what keeps the
+    digest head clean, so recency is an owner knob, not the default.
+    """
+    assert DEFAULT_CONFIG["session_mirror"]["recent_first"] is False
+    assert session_mirror_scan_options({})["recent_first"] is False
