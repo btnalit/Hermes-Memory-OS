@@ -794,6 +794,9 @@ def test_installer_memory_sources_production_safe_preset_enables_metadata_only(t
     assert config["session_mirror"]["test_host_apply_allowed"] is False
     assert config["session_mirror"]["test_host_marker"] == ""
     assert config["session_mirror"]["production_apply_owner_ref_required"] is True
+    assert config["session_mirror"]["owner_review_source_denylist"] == ["cron"]
+    assert config["session_mirror"]["owner_review_require_completed"] is True
+    assert config["session_mirror"]["owner_review_max_age_days"] == 14
 
 
 def test_installer_can_enable_shell_without_enabling_memory_os_as_general_plugin(tmp_path):

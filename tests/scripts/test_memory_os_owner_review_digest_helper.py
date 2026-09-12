@@ -50,6 +50,33 @@ def test_digest_helper_agenda_mode_only_treats_decisions_as_meaningful():
         )
         is True
     )
+    assert (
+        module._has_meaningful_content(
+            {
+                "counts": {
+                    "action_required_shown": 0,
+                    "imminent_nondeliverable_living_memory_total": 1,
+                }
+            },
+            digest_mode="agenda",
+        )
+        is True
+    )
+
+
+def test_digest_helper_ignores_non_imminent_filtered_memory():
+    module = _load_helper_module()
+
+    assert module._has_meaningful_content(
+        {
+            "counts": {
+                "action_required_shown": 0,
+                "nondeliverable_living_memory_total": 24,
+                "imminent_nondeliverable_living_memory_total": 0,
+            }
+        },
+        digest_mode="agenda",
+    ) is False
 
 
 def test_digest_helper_review_mode_can_render_pull_review_content():

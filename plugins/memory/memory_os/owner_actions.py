@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit, read_audit_records
-from .config import load_config
+from .config import load_config, owner_review_session_mirror_scan_options
 from .crystallized import (
     CrystallizedCandidate,
     CrystallizedMemoryService,
@@ -1896,6 +1896,9 @@ def owner_review_digest_preview(
             "nondeliverable_living_memory_total": int(
                 delivery_diagnostics.get("living_memory_nonpromotion_filtered_count") or 0
             ),
+            "imminent_nondeliverable_living_memory_total": int(
+                delivery_diagnostics.get("imminent_living_memory_nonpromotion_filtered_count") or 0
+            ),
         },
         "review_aging": review_aging,
         "delivery_diagnostics": delivery_diagnostics,
@@ -2969,7 +2972,9 @@ def _assemble_living_memory_delivery_items(
     """Filter only the delivery view; leave shared query/aging reports intact."""
     delivery_items: list[dict[str, Any]] = []
     nonpromotion_count = 0
+    imminent_nonpromotion_count = 0
     promotion_count = 0
+    now = datetime.now(timezone.utc)
     for item in items:
         target_type = str(item.get("target_type") or "")
         if target_type not in LIVING_MEMORY_TARGET_TYPES:
@@ -2979,10 +2984,29 @@ def _assemble_living_memory_delivery_items(
             delivery_items.append(item)
         else:
             nonpromotion_count += 1
+            if _is_imminent_provisional(item, now=now):
+                imminent_nonpromotion_count += 1
     return delivery_items, {
         "living_memory_nonpromotion_filtered_count": nonpromotion_count,
+        "imminent_living_memory_nonpromotion_filtered_count": imminent_nonpromotion_count,
         "permanent_promotion_review_item_count": promotion_count,
     }
+
+
+def _is_imminent_provisional(item: dict[str, Any], *, now: datetime) -> bool:
+    if str(item.get("target_type") or "") != "provisional_crystallized_record":
+        return False
+    expires_at = str(item.get("expires_at") or "").strip().replace("Z", "+00:00")
+    if not expires_at:
+        return False
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return False
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    remaining = expiry - now
+    return timedelta(0) <= remaining <= timedelta(hours=24)
 
 
 def _consume_owner_write_context(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
@@ -5082,8 +5106,13 @@ def _session_mirror_apply_review_items(
         session_mirror_stable_scope_id,
     )
 
+    session_mirror_config = load_config(store.roots.hermes_home).get("session_mirror", {})
     try:
-        report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+        report = SessionMirror(store).scan(
+            dry_run=True,
+            max_sessions=1,
+            **owner_review_session_mirror_scan_options(session_mirror_config),
+        )
     except Exception:
         return []
     selected = report.get("selected_sessions") if isinstance(report.get("selected_sessions"), list) else []
@@ -6487,6 +6516,9 @@ def _rendered_overview_lines(
         max(fyi_total - fyi_shown, 0),
     )
     nondeliverable_living_memory = int(counts.get("nondeliverable_living_memory_total") or 0)
+    imminent_nondeliverable_living_memory = int(
+        counts.get("imminent_nondeliverable_living_memory_total") or 0
+    )
     if _digest_mode(digest_mode) == "agenda":
         lines = [
             "今日议程：",
@@ -6498,10 +6530,16 @@ def _rendered_overview_lines(
             # No owner_review_surface_report operation returns just the filtered
             # provisional records, so naming one would repeat the exact defect
             # this section fixes: advertising a path that does not reach.
-            lines.append(
-                f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不需要你在这里决定："
-                "它们到期会自动失效，成熟的会另走永久记忆提案来问你。"
-            )
+            if imminent_nondeliverable_living_memory:
+                lines.append(
+                    f"- 临期提醒：有 {imminent_nondeliverable_living_memory} 条临时记忆将在 24 小时内自动失效；"
+                    "正文不在此推送，不需要在这里回复。"
+                )
+            else:
+                lines.append(
+                    f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不需要你在这里决定："
+                    "它们到期会自动失效，成熟的会另走永久记忆提案来问你。"
+                )
         if action_omitted:
             lines.append("- 想继续处理可回复：下一页 / 还有哪些 / 展开 A4。")
         else:

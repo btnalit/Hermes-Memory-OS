@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.config import save_config
@@ -17,6 +18,7 @@ from plugins.memory.memory_os.session_mirror import (
     read_session_mirror_apply_records,
     session_mirror_graduation_policy,
 )
+from plugins.memory.memory_os.owner_actions import _session_mirror_apply_review_items
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -62,6 +64,56 @@ def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
                 (session_id, "tool", "PRIVATE_TOOL_TRACE_SHOULD_NOT_APPEAR", "2026-05-21T08:00:03+00:00"),
             ],
         )
+
+
+def _create_timestamped_state_db(path):
+    """Build the deployed Hermes state.db shape used by owner-review scans."""
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=200)
+    recent = now - timedelta(days=2)
+    active = now - timedelta(hours=1)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            create table sessions (
+                id text primary key,
+                source text,
+                started_at real,
+                ended_at real,
+                last_activity_at real,
+                message_count integer,
+                tool_call_count integer
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table messages (
+                id integer primary key autoincrement,
+                session_id text,
+                role text,
+                content text,
+                timestamp real
+            )
+            """
+        )
+        conn.executemany(
+            "insert into sessions(id, source, started_at, ended_at, last_activity_at, message_count, tool_call_count) values (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("20260504_old", "telegram", old.timestamp(), old.timestamp() + 60, None, 2, 0),
+                ("20260911_cron", "cron", recent.timestamp(), recent.timestamp() + 60, recent.timestamp() + 60, 2, 0),
+                ("20260912_active", "telegram", active.timestamp(), None, active.timestamp(), 2, 0),
+                ("20260910_recent", "telegram", recent.timestamp(), recent.timestamp() + 60, recent.timestamp() + 60, 2, 0),
+            ],
+        )
+        for session_id in ("20260504_old", "20260911_cron", "20260912_active", "20260910_recent"):
+            conn.executemany(
+                "insert into messages(session_id, role, content, timestamp) values (?, ?, ?, ?)",
+                [
+                    (session_id, "user", f"useful user request for {session_id}", recent.timestamp()),
+                    (session_id, "assistant", f"bounded answer for {session_id}", recent.timestamp() + 1),
+                ],
+            )
 
 
 def _append_owner_action(path, record):
@@ -1233,3 +1285,35 @@ def test_auto_apply_records_durable_last_run_reason(tmp_path, monkeypatch):
     assert record["reason"] == "no_matching_pending_session"
     assert record["counters"]["candidate_session_count"] == 0
     assert record["counters"]["selected_session_count"] == 0
+
+
+def test_owner_review_scan_uses_recent_completed_human_session(tmp_path):
+    """Owner digest selection must not be held by cron or active backlog rows."""
+    store = _store(tmp_path)
+    _create_timestamped_state_db(tmp_path / "state.db")
+
+    report = SessionMirror(store).scan(
+        dry_run=True,
+        max_sessions=1,
+        source_denylist=["cron"],
+        completed_only=True,
+        min_message_count=1,
+        max_age_days=30,
+        recent_first=True,
+    )
+
+    assert report["selected_session_count"] == 1
+    assert report["selected_sessions"][0]["source_group_id"] == "20260910_recent"
+
+
+def test_owner_review_item_uses_filtered_session_selection(tmp_path):
+    """The owner-review caller must pass the digest-only selection policy."""
+    store = _store(tmp_path)
+    _create_timestamped_state_db(tmp_path / "state.db")
+
+    items = _session_mirror_apply_review_items(store, set(), lane_deferred=False)
+
+    assert len(items) == 1
+    selected = items[0]["selected_sessions"][0]
+    assert selected["source_group_id"] == "20260910_recent"
+    assert selected["source_kind"] == "state_db"

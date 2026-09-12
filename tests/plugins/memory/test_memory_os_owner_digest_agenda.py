@@ -9,6 +9,8 @@ design, so they could never appear in that channel — and "下一页" resumed b
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from plugins.memory.memory_os import owner_actions as owner_actions_module
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -114,6 +116,20 @@ def test_agenda_discloses_the_nondeliverable_provisional_backlog(tmp_path, monke
 
     assert rendered["counts"]["nondeliverable_living_memory_total"] == 24
     assert "另有 24 条临时记忆(provisional)不需要你在这里决定" in rendered["text"]
+
+
+def test_agenda_discloses_imminent_filtered_provisional_as_safe_alert(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    items = _production_shaped_items()
+    items[0]["expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    _patch_queue(monkeypatch, items)
+
+    rendered = owner_actions_module.render_owner_review_digest(
+        store, channel=CHANNEL, max_action_required=1, digest_mode="agenda"
+    )
+
+    assert rendered["counts"]["imminent_nondeliverable_living_memory_total"] == 1
+    assert "临期提醒：有 1 条临时记忆将在 24 小时内自动失效" in rendered["text"]
 
 
 def test_backlog_disclosure_invites_no_reply_it_cannot_route(tmp_path, monkeypatch):
@@ -237,7 +253,7 @@ class _FakeSessionMirror:
     def __init__(self, store: object) -> None:
         self._store = store
 
-    def scan(self, *, dry_run: bool = True, max_sessions: int = 1) -> dict[str, object]:
+    def scan(self, *, dry_run: bool = True, max_sessions: int = 1, **_selection_filters: object) -> dict[str, object]:
         return {
             "selected_sessions": [
                 {

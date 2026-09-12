@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -532,6 +532,11 @@ class SessionMirror:
         max_sessions: int = 0,
         platform_allowlist: list[str] | tuple[str, ...] | None = None,
         platform_denylist: list[str] | tuple[str, ...] | None = None,
+        source_denylist: list[str] | tuple[str, ...] | None = None,
+        completed_only: bool = False,
+        min_message_count: int = 0,
+        max_age_days: int | None = None,
+        recent_first: bool = False,
         apply_governance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not dry_run:
@@ -571,26 +576,56 @@ class SessionMirror:
             # back open by an approval.
             and str(session.get("platform") or "").lower().replace("-", "_") not in denied
         ]
-        # Backlog 13: never-imported-first ordering. dedup_key embeds the
-        # content hash, so an active session re-enters the pending queue on
-        # every content change -- and discovery order is stable (session id /
-        # file path), so with pure head-of-queue selection and a per-run cap
-        # the same low-id active sessions re-occupy the head on every run and
-        # the tail never surfaces (measured: 637 runs, backlog 1574 -> 1575).
-        # Sessions this lane has never imported come first; within each class
-        # the original queue order is kept (stable sort). Re-imports of
-        # already-mirrored sessions still happen, after the backlog drains.
-        platform_filtered.sort(
-            key=lambda session: str(session.get("session_id") or "") in previously_imported
-        )
+        sources = _normalize_source_denylist(source_denylist)
+        source_filtered = [
+            session for session in platform_filtered
+            if str(session.get("platform") or "").lower().replace("-", "_") not in sources
+        ]
+        completed_filtered = [
+            session for session in source_filtered
+            if not completed_only or bool(session.get("completed", True))
+        ]
+        min_messages = max(int(min_message_count or 0), 0)
+        message_filtered = [
+            session for session in completed_filtered
+            if int(session.get("message_count") or 0) >= min_messages
+        ]
+        age_filtered = [
+            session for session in message_filtered
+            if max_age_days is None or _session_is_within_age(session, max_age_days)
+        ]
+        eligible_sessions = age_filtered
+        # The normal scanner retains its historical queue ordering. Owner
+        # review opts into recent-first only after the explicit digest filters
+        # above, so a cron/active/empty backlog cannot occupy its head.
+        if recent_first:
+            eligible_sessions.sort(
+                key=lambda session: (
+                    str(session.get("session_id") or "") in previously_imported,
+                    -_session_timestamp_rank(session),
+                    str(session.get("session_id") or ""),
+                )
+            )
+        else:
+            # Backlog 13: never-imported-first ordering. dedup_key embeds the
+            # content hash, so an active session re-enters the pending queue on
+            # every content change. Sessions never imported by this lane come
+            # first; within each class the original queue order is kept.
+            eligible_sessions.sort(
+                key=lambda session: str(session.get("session_id") or "") in previously_imported
+            )
         limit = max(int(max_sessions or 0), 0)
         if not dry_run and limit == 0:
             limit = 1
-        selected_sessions = platform_filtered[:limit] if limit else platform_filtered
+        selected_sessions = eligible_sessions[:limit] if limit else eligible_sessions
         selected_safe_sessions = [_safe_pending_session(session) for session in selected_sessions]
         selected_fingerprints = [str(item["fingerprint"]) for item in selected_safe_sessions]
         skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
-        skipped_by_limit_count = max(len(platform_filtered) - len(selected_sessions), 0)
+        skipped_by_source_count = len(platform_filtered) - len(source_filtered)
+        skipped_by_completion_count = len(source_filtered) - len(completed_filtered)
+        skipped_by_message_count = len(completed_filtered) - len(message_filtered)
+        skipped_by_age_count = len(message_filtered) - len(age_filtered)
+        skipped_by_limit_count = max(len(eligible_sessions) - len(selected_sessions), 0)
         written_events: list[str] = []
         resolved_apply_governance = dict(apply_governance or {})
         if not dry_run and selected_sessions:
@@ -745,7 +780,17 @@ class SessionMirror:
             message_columns = _table_columns(conn, "messages") if _table_exists(conn, "messages") else set()
             id_col = _first_existing(session_columns, ("id", "session_id", "uuid"))
             source_col = _first_existing(session_columns, ("source", "platform", "channel", "kind"))
-            updated_col = _first_existing(session_columns, ("updated_at", "last_updated", "created_at"))
+            updated_cols = tuple(
+                column for column in (
+                    "last_activity_at",
+                    "updated_at",
+                    "last_updated",
+                    "ended_at",
+                    "started_at",
+                    "created_at",
+                ) if column in session_columns
+            )
+            ended_col = _first_existing(session_columns, ("ended_at", "finished_at", "closed_at"))
             if not id_col:
                 return []
             rows = conn.execute(f"select * from sessions order by {id_col}").fetchall()
@@ -753,7 +798,8 @@ class SessionMirror:
             for row in rows:
                 session_id = str(row[id_col])
                 platform = str(row[source_col]) if source_col else "unknown"
-                updated_at = str(row[updated_col]) if updated_col else datetime.now(timezone.utc).isoformat()
+                updated_at = _row_timestamp(row, updated_cols)
+                completed = not ended_col or _has_value(row[ended_col])
                 messages = _read_messages_for_session(conn, message_columns, session_id)
                 sessions.append(_session_record(
                     source_kind="state_db",
@@ -761,6 +807,7 @@ class SessionMirror:
                     session_id=session_id,
                     platform=platform,
                     updated_at=updated_at,
+                    completed=completed,
                     messages=messages,
                 ))
             return sessions
@@ -804,7 +851,7 @@ class SessionMirror:
                 continue
             session_id = str(data.get("id") or data.get("session_id") or path.stem)
             platform = str(data.get("platform") or data.get("source") or data.get("channel") or "unknown")
-            updated_at = str(data.get("updated_at") or data.get("created_at") or datetime.now(timezone.utc).isoformat())
+            updated_at = _normalize_timestamp(data.get("updated_at") or data.get("last_activity_at") or data.get("created_at"))
             raw_messages = data.get("messages", [])
             messages = [dict(item) for item in raw_messages if isinstance(item, dict)]
             sessions.append(_session_record(
@@ -813,6 +860,7 @@ class SessionMirror:
                 session_id=session_id,
                 platform=platform,
                 updated_at=updated_at,
+                completed=_has_value(data.get("ended_at")) or "ended_at" not in data,
                 messages=messages,
             ))
         return sessions
@@ -1031,6 +1079,7 @@ def _session_record(
     platform: str,
     updated_at: str,
     messages: list[dict[str, Any]],
+    completed: bool = True,
 ) -> dict[str, Any]:
     user_messages = [str(item.get("content", "")) for item in messages if str(item.get("role", "")).lower() == "user"]
     assistant_messages = [str(item.get("content", "")) for item in messages if str(item.get("role", "")).lower() == "assistant"]
@@ -1056,6 +1105,7 @@ def _session_record(
         "session_id": session_id,
         "platform": platform,
         "updated_at": updated_at,
+        "completed": bool(completed),
         "message_count": len(messages),
         "tool_count": tool_count,
         "content_sha256": content_sha256,
@@ -1085,6 +1135,55 @@ def _redact_secrets(value: str) -> str:
     for pattern in SESSION_SECRET_PATTERNS:
         text = pattern.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
     return text
+
+
+def _normalize_source_denylist(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    return _normalize_platform_allowlist(values)
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and str(value).strip().lower() not in {"", "none", "null"}
+
+
+def _normalize_timestamp(value: Any) -> str:
+    if not _has_value(value):
+        return ""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+    text = str(value).strip()
+    try:
+        return datetime.fromtimestamp(float(text), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return text.replace("Z", "+00:00") if text.endswith("Z") else text
+
+
+def _row_timestamp(row: sqlite3.Row, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = row[column]
+        if _has_value(value):
+            return _normalize_timestamp(value)
+    return ""
+
+
+def _session_timestamp_rank(session: dict[str, Any]) -> float:
+    value = str(session.get("updated_at") or "").strip()
+    if not value:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _session_is_within_age(session: dict[str, Any], max_age_days: int) -> bool:
+    timestamp = _session_timestamp_rank(session)
+    if timestamp <= 0:
+        return False
+    age = datetime.now(timezone.utc).timestamp() - timestamp
+    return age >= 0 and age <= timedelta(days=max(int(max_age_days), 0)).total_seconds()
 
 
 def _normalize_platform_allowlist(values: list[str] | tuple[str, ...] | None) -> list[str]:

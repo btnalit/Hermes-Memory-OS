@@ -175,6 +175,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "production_apply_owner_ref_required": True,
         "auto_apply_after_owner_home_graduation": True,
         "auto_apply_max_sessions_per_run": 1,
+        # Recurring owner digests must not be occupied by the historical cron
+        # backlog or an in-progress session. Manual/auto-apply scans retain
+        # their broader admission semantics; these are digest-only filters.
+        "owner_review_source_denylist": ["cron"],
+        "owner_review_require_completed": True,
+        "owner_review_min_message_count": 1,
+        "owner_review_max_age_days": 14,
+        "owner_review_recent_first": True,
         # Owner-writable floor for the admit-all platform mode (owner ruling
         # 2026-08-14). A denylist is the inverse of the retired per-approval
         # allowlist: the owner sets it once to exclude a platform forever,
@@ -636,11 +644,54 @@ def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
     merged["test_host_apply_allowed"] = bool(merged.get("test_host_apply_allowed"))
     merged["test_host_marker"] = str(merged.get("test_host_marker") or "")
     merged["production_apply_owner_ref_required"] = bool(merged.get("production_apply_owner_ref_required"))
+    raw_review_source_denylist = merged.get("owner_review_source_denylist")
+    merged["owner_review_source_denylist"] = [
+        str(item).strip().lower() for item in raw_review_source_denylist if str(item or "").strip()
+    ] if isinstance(raw_review_source_denylist, list) else ["cron"]
+    merged["owner_review_require_completed"] = bool(merged.get("owner_review_require_completed", True))
+    try:
+        merged["owner_review_min_message_count"] = max(int(merged.get("owner_review_min_message_count") or 1), 0)
+    except (TypeError, ValueError):
+        merged["owner_review_min_message_count"] = 1
+    try:
+        raw_max_age_days = merged.get("owner_review_max_age_days", 30)
+        if raw_max_age_days is None:
+            raw_max_age_days = 30
+        merged["owner_review_max_age_days"] = max(int(raw_max_age_days), 0)
+    except (TypeError, ValueError):
+        merged["owner_review_max_age_days"] = 30
+    merged["owner_review_recent_first"] = bool(merged.get("owner_review_recent_first", True))
     raw_denylist = merged.get("platform_denylist")
     merged["platform_denylist"] = [
         str(item) for item in raw_denylist if str(item or "").strip()
     ] if isinstance(raw_denylist, list) else []
     return merged
+
+
+def owner_review_session_mirror_scan_options(value: Any) -> dict[str, Any]:
+    """Return one normalized filter set for digest and approval revalidation."""
+    config = value if isinstance(value, dict) else {}
+    raw_denylist = config.get("owner_review_source_denylist", ["cron"])
+    source_denylist = (
+        [str(item).strip().lower() for item in raw_denylist if str(item or "").strip()]
+        if isinstance(raw_denylist, list)
+        else ["cron"]
+    )
+    try:
+        min_message_count = max(int(config.get("owner_review_min_message_count", 1) or 0), 0)
+    except (TypeError, ValueError):
+        min_message_count = 1
+    try:
+        max_age_days = max(int(config.get("owner_review_max_age_days", 30) or 0), 0)
+    except (TypeError, ValueError):
+        max_age_days = 30
+    return {
+        "source_denylist": source_denylist,
+        "completed_only": bool(config.get("owner_review_require_completed", True)),
+        "min_message_count": min_message_count,
+        "max_age_days": max_age_days or None,
+        "recent_first": bool(config.get("owner_review_recent_first", True)),
+    }
 
 
 def _merge_l4_config(value: Any) -> dict[str, Any]:

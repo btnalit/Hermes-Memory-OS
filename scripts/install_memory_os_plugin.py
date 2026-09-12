@@ -1693,6 +1693,11 @@ def _write_session_mirror_config(
     config = _read_json_config(config_path)
     session_mirror_config = {
         "preset": preset,
+        "owner_review_max_age_days": 14,
+        "owner_review_min_message_count": 1,
+        "owner_review_recent_first": True,
+        "owner_review_require_completed": True,
+        "owner_review_source_denylist": ["cron"],
         "test_host_apply_allowed": preset == "test-host",
         "test_host_marker": "install_preset:test-host" if preset == "test-host" else "",
         "production_apply_owner_ref_required": True,

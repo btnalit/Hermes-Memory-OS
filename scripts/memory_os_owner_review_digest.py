@@ -116,7 +116,10 @@ def _has_meaningful_content(preview: dict[str, object], *, digest_mode: str = "r
         # The recurring owner agenda should push only explicit decisions or
         # real alerts. Review-suggested and FYI items remain available through
         # the pull-based review surface, not daily Telegram noise.
-        return int(counts.get("action_required_shown") or 0) > 0
+        return (
+            int(counts.get("action_required_shown") or 0) > 0
+            or int(counts.get("imminent_nondeliverable_living_memory_total") or 0) > 0
+        )
     shown = (
         int(counts.get("action_required_shown") or 0)
         + int(counts.get("review_suggested_shown") or 0)

@@ -15,6 +15,7 @@ from plugins.memory.memory_os.crystallized import (
     read_candidate_queue,
 )
 from plugins.memory.memory_os import MemoryOSProvider
+from plugins.memory.memory_os import cli as cli_module
 from plugins.memory.memory_os import owner_actions as owner_actions_module
 from plugins.memory.memory_os.context_router import ContextSection
 from plugins.memory.memory_os.memory_sources import (
@@ -3342,9 +3343,18 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
     assert result["parsed"]["target_id"] == "cand_owner_001"
 
 
-def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(tmp_path):
+def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(tmp_path, monkeypatch):
     store = _store(tmp_path)
     _create_session_state_db(tmp_path / "state.db")
+    scan_calls = []
+    original_scan = cli_module.SessionMirror.scan
+
+    def capture_scan(self, **kwargs):
+        if kwargs.get("dry_run") is True:
+            scan_calls.append(dict(kwargs))
+        return original_scan(self, **kwargs)
+
+    monkeypatch.setattr(cli_module.SessionMirror, "scan", capture_scan)
     save_config(
         {
             "owner_review": {
@@ -3352,7 +3362,8 @@ def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(t
                 "recurring_delivery_mode": "hermes_cron_agent",
                 "recurring_delivery_channel": "telegram",
                 "recurring_delivery_target_class": "explicit_target",
-            }
+            },
+            "session_mirror": {"owner_review_max_age_days": 0},
         },
         tmp_path,
     )
@@ -3375,6 +3386,16 @@ def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(t
     )
 
     assert result["status"] == "ok"
+    assert len(scan_calls) >= 2
+    filter_keys = (
+        "platform_allowlist",
+        "source_denylist",
+        "completed_only",
+        "min_message_count",
+        "max_age_days",
+        "recent_first",
+    )
+    assert all(scan_calls[0].get(key) == scan_calls[-1].get(key) for key in filter_keys)
     assert result["active_digest"]["delivery_scope"] == "owner_home"
     assert result["parsed"]["action_type"] == "approve_session_mirror_apply"
     record = result["owner_action_result"]["record"]
