@@ -711,7 +711,9 @@ def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
     merged["recent_first"] = _floor_bool(merged.get("recent_first"), default["recent_first"])
     raw_denylist = merged.get("platform_denylist")
     merged["platform_denylist"] = [
-        str(item) for item in raw_denylist if str(item or "").strip()
+        str(item).strip().lower().replace("-", "_")
+        for item in raw_denylist
+        if str(item or "").strip()
     ] if isinstance(raw_denylist, list) else []
     return merged
 
@@ -736,6 +738,7 @@ def session_mirror_scan_options(value: Any) -> dict[str, Any]:
         # 0 is the documented opt-out: no age floor at all.
         "max_age_days": max_age_days if max_age_days > 0 else None,
         "recent_first": bool(config["recent_first"]),
+        "platform_denylist": list(config["platform_denylist"]),
     }
 
 

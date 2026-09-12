@@ -1507,6 +1507,46 @@ def test_scan_options_never_silently_disable_the_floor():
     assert session_mirror_scan_options({"max_age_days": 0})["max_age_days"] is None
     # Legacy spelling from the digest-only era is still honoured.
     assert session_mirror_scan_options({"owner_review_max_age_days": 90})["max_age_days"] == 90
+    assert session_mirror_scan_options({"platform_denylist": ["Telegram"]})["platform_denylist"] == ["telegram"]
+
+
+def test_scan_applies_configured_platform_denylist_by_default(tmp_path):
+    """The owner denylist is a lane floor, not an auto-apply-only option."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", platform="telegram")
+    save_config({"session_mirror": {"platform_denylist": ["Telegram"]}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_platform_count"] == 1
+    assert report["scan_floor"]["platform_denylist"] == ["telegram"]
+
+
+def test_scan_explicit_denylist_cannot_weaken_configured_floor(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", platform="telegram")
+    save_config({"session_mirror": {"platform_denylist": ["telegram"]}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_denylist=[])
+
+    assert report["selected_session_count"] == 0
+    assert report["scan_floor"]["platform_denylist"] == ["telegram"]
+
+
+def test_scan_direct_zero_max_age_disables_age_floor(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="old-session", platform="telegram")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "update sessions set created_at=?, updated_at=? where id=?",
+            ("2020-01-01T00:00:00+00:00", "2020-01-01T00:01:00+00:00", "old-session"),
+        )
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1, max_age_days=0)
+
+    assert report["selected_session_count"] == 1
+    assert report["scan_floor"]["max_age_days"] is None
 
 
 def test_recent_first_is_off_so_the_never_imported_tail_still_drains():

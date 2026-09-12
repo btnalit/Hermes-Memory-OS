@@ -554,7 +554,7 @@ class SessionMirror:
         dry_run: bool = True,
         max_sessions: int = 0,
         platform_allowlist: list[str] | tuple[str, ...] | None = None,
-        platform_denylist: list[str] | tuple[str, ...] | None = None,
+        platform_denylist: list[str] | tuple[str, ...] | None | _FloorDefault = _FLOOR,
         # The admission floor is NOT a per-call-site option. It defaults to the
         # owner's configured floor, because the defect this replaces was a
         # call site that simply did not pass it: the digest scanned with
@@ -583,6 +583,18 @@ class SessionMirror:
             max_age_days = floor["max_age_days"]
         if isinstance(recent_first, _FloorDefault):
             recent_first = floor["recent_first"]
+        configured_platform_denylist = list(floor.get("platform_denylist") or [])
+        if isinstance(platform_denylist, _FloorDefault):
+            platform_denylist = configured_platform_denylist
+        else:
+            # A per-call list can narrow the floor, never widen it. This keeps
+            # owner-denied platforms excluded even when an apply caller passes
+            # an empty or narrower list.
+            platform_denylist = list(platform_denylist or []) + configured_platform_denylist
+        if max_age_days == 0:
+            # `0` is the documented direct-call opt-out, equivalent to the
+            # config normalizer's `0 -> None` conversion.
+            max_age_days = None
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
@@ -698,6 +710,7 @@ class SessionMirror:
                 "min_message_count": min_messages,
                 "max_age_days": max_age_days,
                 "recent_first": bool(recent_first),
+                "platform_denylist": sorted(denied),
             },
         }
         written_events: list[str] = []

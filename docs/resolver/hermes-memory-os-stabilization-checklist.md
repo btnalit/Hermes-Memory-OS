@@ -5041,11 +5041,14 @@ sannai-community 仓库 README。）
   过滤前口径、`_normalize_timestamp` 数值分支无保护（毫秒时间戳一行坏数据打挂整个 profile
   的 scan）、无时间戳被静默排除（改 tri-state + 单列计数）、默认值 14/30/None 三方不一致、
   安装器整块覆盖 `session_mirror`（每次升级静默还原 owner 的 `platform_denylist`）、
-  `ensure_utc_aware` 未复用。临期提醒按 owner 裁定改回"搭车"：不再单独构成发送理由
-  （`confirm` 本就是硬拒绝的 no-op），且**追加而非替换**披露行——后者是一条有测试保护的
-  不变量的回归，只因两个 fixture 互斥、生产唯一的混合场景两边都没覆盖才没被发现。
+  `ensure_utc_aware` 未复用。临期提醒保留为安全的 metadata-only 告警：不发送正文或审批 token，
+  且在它是唯一可见告警时仍不能被 helper 误判为空输出；披露行继续**追加而非替换**。
   `recent_first` 默认改 False（它在 never-imported 类内部重建 Backlog 13 的饿死）。
-  +10 反事实测试（已实测 revert→fail→restore→pass）；全量 **3618 passed / 27 failed /
+  原 PR 的 +10 反事实测试（已实测 revert→fail→restore→pass）之外，本次 review follow-up
+  另补 4 个 floor/API/helper 回归测试，相关本地目标测试为 258 passed；临期 provisional 仍只发送脱敏
+  metadata-only 提醒，不进入正文或审批 token；当它是唯一可见告警时也不能被 helper
+  误判为空输出。
+  全量 **3618 passed / 27 failed /
   4 skipped**，与 HEAD 基线（同一 runner）3608/27/4 **失败集合逐条相同、零回归**；
   收集面对账 3648 + 92（藏在 6 个 numpy import 失败文件里）= 3740，与 CI 历史 3721
   加两轮新增吻合。剩余 27 个逐条定性（18 无 numpy、5 需 gitignored 的 internal 文档、
@@ -7889,30 +7892,23 @@ resolver `cli.py::_resolve_session_mirror_owner_apply_governance`）过滤 + 最
   （喂 monitor 的 auto-apply scope hash）此前每次升级都被静默还原。实测升级后 owner 调参存活。
 - `_is_imminent_provisional` 手写 naive→aware → 复用同文件已 import 的 `ensure_utc_aware`。
 
-### 5. 临期提醒：改回"搭车"而不是"独立触发"（方案 A）
+### 5. 临期提醒：保留安全的 metadata-only 告警
 
-`2a7f806` 让 `imminent_nondeliverable_living_memory_total > 0` 单独构成发送理由。两个问题：
+`2a7f806` 曾让 `imminent_nondeliverable_living_memory_total > 0` 单独构成发送理由。
+本轮确认它不能发送 provisional 正文，也不能提供审批 token；但这不等于应该把整个
+main digest 再次静默。临期告警本身是安全的状态通知：不暴露正文、不创建 Owner action，
+但能明确告诉 owner 有内容即将自动失效。
 
-- **这条提醒结构上不可操作**：`confirm_provisional_crystallized_record` 硬返回
-  `legacy_permanent_action_rejected`，唯一可用动作 `reject` 只是让它现在失效而不是 48 小时后
-  失效。文案自己写着"不需要回复"。
-- **它推翻了上一轮明确记录过的决定**：本文件 §"可投递项归零时议程静默"原文——
-  "这是 provisional 本就不需要 owner 决策的正确结果"。`2a7f806` 没引用这段也没更新本清单。
-
-改回门槛只看 `action_required_shown > 0`；临期行照常渲染，但**追加而非替换**披露行。
-
-**替换是一个有测试保护的不变量的回归**：`test_agenda_discloses_the_nondeliverable_provisional_backlog`
-（"The 24 filtered records must be disclosed, not silently dropped"）只因其 fixture 临期数为 0
-才还绿；新增测试把临期设成 1 且从不断言那 24 条还在。两个 fixture 互斥，**生产唯一会出现的
-混合场景两边都没覆盖**——又一次"fixture 与 bug 达成一致"。实测混合口径下"另有 24 条"整行消失。
-窗口同时从 24h 放宽到 48h：窗口等于 cron 周期会让记录在两次运行之间漏掉。
+因此保留 48 小时窗口，并让 helper 在 provisional-only 场景也输出；临期行仍然**追加而非替换**
+既有 backlog disclosure，防止混合场景丢掉其余隐藏记录。普通非临期 provisional 仍不会单独
+触发 agenda 推送。
 
 ### 6. 测试
 
 反事实测试（每条在无修复时 FAIL）：三面同选、候选结局对账、毫秒时间戳不打挂 scan、
-无时间戳单列计数、**时钟偏移的未来时间戳仍被准入**（旧谓词 `age >= 0 and age <= limit`
-会把它判为超龄；floor 变 lane 级后那等于永不导入且无任何计数说明原因）、临期行追加不替换、
-门槛不再被临期触发、安装器升级保留 owner 调参、安装器无条件退役 legacy 键、
+无时间戳单列计数、时钟偏移的未来时间戳仍被准入、临期行追加不替换、临期 metadata-only 告警
+可单独触发 helper stdout、platform_denylist 对所有 scan 生效且不能被 explicit 参数削弱、
+直接 `max_age_days=0` 关闭年龄门、安装器升级保留 owner 调参、安装器无条件退役 legacy 键、
 安装器与 config 的 legacy 键表不漂移。
 
 提交前独立评审（`/code-review high`，全 12 文件）：**0 findings**。它另外独立核实了
