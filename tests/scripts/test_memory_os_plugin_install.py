@@ -11,11 +11,88 @@ import pytest
 import yaml
 
 from scripts.install_memory_os_plugin import (
+    SESSION_MIRROR_LEGACY_FLOOR_KEYS,
     SOURCE_AGENT_OS_SHELL_DIR,
     SOURCE_PLUGIN_DIR,
     _write_operational_helper_scripts,
+    _write_session_mirror_config,
     install_plugin,
 )
+
+
+def test_installer_legacy_floor_keys_match_config():
+    """The installer is stdlib-only, so it duplicates the migration table.
+
+    Counterfactual: without this guard the two copies drift, and a config.json
+    written before the floor was lane-wide silently loses the owner's tuning on
+    the next upgrade -- the migration reads a key the installer no longer knows.
+    """
+    from plugins.memory.memory_os.config import SESSION_MIRROR_LEGACY_FLOOR_KEYS as canonical
+
+    assert SESSION_MIRROR_LEGACY_FLOOR_KEYS == canonical
+
+
+def test_installer_upgrade_preserves_owner_session_mirror_tuning(tmp_path):
+    """Counterfactual: `config["session_mirror"] = {...}` replaced the whole
+    section, so every re-install silently reverted `platform_denylist` -- an
+    owner floor (ruling 2026-08-14) that also feeds the monitor's auto-apply
+    scope hash -- along with any admission floor the owner had tuned.
+    """
+    home = tmp_path / "home"
+    config_path = home / "memory-os" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "session_mirror": {
+                    "platform_denylist": ["acp"],
+                    "auto_apply_max_sessions_per_run": 3,
+                    # written by an installer from the digest-only era
+                    "owner_review_max_age_days": 90,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, written = _write_session_mirror_config(home, preset="production-safe", dry_run=False)
+
+    assert written["platform_denylist"] == ["acp"]
+    assert written["auto_apply_max_sessions_per_run"] == 3
+    # legacy spelling migrated, owner's value kept, old key removed
+    assert written["max_age_days"] == 90
+    assert "owner_review_max_age_days" not in written
+    # installer-owned keys are still (re)asserted
+    assert written["production_apply_owner_ref_required"] is True
+    assert written["test_host_apply_allowed"] is False
+
+
+def test_installer_retires_legacy_key_even_when_both_spellings_present(tmp_path):
+    """Counterfactual: retiring the legacy alias only on the migrating branch
+    left a hand-edited or partially-migrated config carrying both spellings
+    forever. Functionally harmless -- `_merge_session_mirror_config` prefers the
+    new key -- but it contradicts the "migrated once" the loop advertises, and a
+    stale alias is exactly what a later reader mistakes for the live value.
+    """
+    home = tmp_path / "home"
+    config_path = home / "memory-os" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "session_mirror": {
+                    "max_age_days": 7,
+                    "owner_review_max_age_days": 90,  # stale alias alongside it
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, written = _write_session_mirror_config(home, preset="production-safe", dry_run=False)
+
+    assert written["max_age_days"] == 7          # the new key stays authoritative
+    assert "owner_review_max_age_days" not in written
 
 
 def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
@@ -794,9 +871,9 @@ def test_installer_memory_sources_production_safe_preset_enables_metadata_only(t
     assert config["session_mirror"]["test_host_apply_allowed"] is False
     assert config["session_mirror"]["test_host_marker"] == ""
     assert config["session_mirror"]["production_apply_owner_ref_required"] is True
-    assert config["session_mirror"]["owner_review_source_denylist"] == ["cron"]
-    assert config["session_mirror"]["owner_review_require_completed"] is True
-    assert config["session_mirror"]["owner_review_max_age_days"] == 14
+    assert config["session_mirror"]["source_denylist"] == ["cron"]
+    assert config["session_mirror"]["require_completed"] is True
+    assert config["session_mirror"]["max_age_days"] == 14
 
 
 def test_installer_can_enable_shell_without_enabling_memory_os_as_general_plugin(tmp_path):

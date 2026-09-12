@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import append_audit
-from .config import load_config
+from .config import load_config, session_mirror_scan_options
 from .knob_overrides import resolve_knob
 from .execution_gate import (
     complete_execution_gate_envelope,
@@ -28,6 +28,20 @@ from .read_model_paths import (
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
+from .timeutil import parse_utc
+
+
+class _FloorDefault:
+    """Marker for "use the owner's configured admission floor".
+
+    A plain ``None`` cannot carry this meaning: ``max_age_days=None`` is a real,
+    documented value (no age floor), so the two must stay distinguishable.
+    """
+
+    __slots__ = ()
+
+
+_FLOOR = _FloorDefault()
 
 
 SESSION_MIRROR_APPLY_SCHEMA_VERSION = "memory-os.session_mirror_apply.v0"
@@ -255,6 +269,15 @@ def _auto_apply_scan_counters(report: dict[str, Any]) -> dict[str, int]:
         "skipped_by_platform_count": int(report.get("skipped_by_platform_count") or 0),
         "skipped_by_limit_count": int(report.get("skipped_by_limit_count") or 0),
         "skipped_by_owner_rejection_count": int(report.get("skipped_by_owner_rejection_count") or 0),
+        # The floor is shared with the digest, so when the lane goes quiet these
+        # are what say whether the owner's floor ate the backlog or the backlog
+        # was simply empty.
+        "eligible_session_count": int(report.get("eligible_session_count") or 0),
+        "skipped_by_source_count": int(report.get("skipped_by_source_count") or 0),
+        "skipped_by_completion_count": int(report.get("skipped_by_completion_count") or 0),
+        "skipped_by_message_count": int(report.get("skipped_by_message_count") or 0),
+        "skipped_by_age_count": int(report.get("skipped_by_age_count") or 0),
+        "skipped_by_unknown_timestamp_count": int(report.get("skipped_by_unknown_timestamp_count") or 0),
     }
 
 
@@ -532,15 +555,34 @@ class SessionMirror:
         max_sessions: int = 0,
         platform_allowlist: list[str] | tuple[str, ...] | None = None,
         platform_denylist: list[str] | tuple[str, ...] | None = None,
-        source_denylist: list[str] | tuple[str, ...] | None = None,
-        completed_only: bool = False,
-        min_message_count: int = 0,
-        max_age_days: int | None = None,
-        recent_first: bool = False,
+        # The admission floor is NOT a per-call-site option. It defaults to the
+        # owner's configured floor, because the defect this replaces was a
+        # call site that simply did not pass it: the digest scanned with
+        # filters, the apply path scanned without, and the lane imported a
+        # different session than the owner was shown. `_FLOOR` means "use the
+        # configured floor"; pass a value only to deliberately override it.
+        source_denylist: list[str] | tuple[str, ...] | None | _FloorDefault = _FLOOR,
+        completed_only: bool | _FloorDefault = _FLOOR,
+        min_message_count: int | _FloorDefault = _FLOOR,
+        max_age_days: int | None | _FloorDefault = _FLOOR,
+        recent_first: bool | _FloorDefault = _FLOOR,
         apply_governance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not dry_run:
             self.store.initialize()
+        floor = session_mirror_scan_options(
+            load_config(self.store.roots.hermes_home).get("session_mirror", {})
+        )
+        if isinstance(source_denylist, _FloorDefault):
+            source_denylist = floor["source_denylist"]
+        if isinstance(completed_only, _FloorDefault):
+            completed_only = floor["completed_only"]
+        if isinstance(min_message_count, _FloorDefault):
+            min_message_count = floor["min_message_count"]
+        if isinstance(max_age_days, _FloorDefault):
+            max_age_days = floor["max_age_days"]
+        if isinstance(recent_first, _FloorDefault):
+            recent_first = floor["recent_first"]
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
@@ -590,14 +632,28 @@ class SessionMirror:
             session for session in completed_filtered
             if int(session.get("message_count") or 0) >= min_messages
         ]
-        age_filtered = [
-            session for session in message_filtered
-            if max_age_days is None or _session_is_within_age(session, max_age_days)
-        ]
+        age_filtered: list[dict[str, Any]] = []
+        skipped_by_age_count = 0
+        skipped_by_unknown_timestamp_count = 0
+        for session in message_filtered:
+            age_class = _session_age_class(session, max_age_days)
+            if age_class == "ok":
+                age_filtered.append(session)
+            elif age_class == "unknown":
+                # Not provably stale -- but also not admitted, because an
+                # unreadable timestamp is exactly how the historical backlog
+                # would leak back in. Counted separately so the exclusion can
+                # never be silent (the defect this replaces returned False here
+                # and reported nothing).
+                skipped_by_unknown_timestamp_count += 1
+            else:
+                skipped_by_age_count += 1
         eligible_sessions = age_filtered
-        # The normal scanner retains its historical queue ordering. Owner
-        # review opts into recent-first only after the explicit digest filters
-        # above, so a cron/active/empty backlog cannot occupy its head.
+        # Ordering comes from the same configured floor as admission above --
+        # every surface sorts identically, because an identical candidate set
+        # with a different sort still yields a different head, and the head is
+        # what gets imported. `recent_first` is off by default; the floor, not
+        # the ordering, is what keeps cron/active/stale sessions off the head.
         if recent_first:
             eligible_sessions.sort(
                 key=lambda session: (
@@ -624,8 +680,26 @@ class SessionMirror:
         skipped_by_source_count = len(platform_filtered) - len(source_filtered)
         skipped_by_completion_count = len(source_filtered) - len(completed_filtered)
         skipped_by_message_count = len(completed_filtered) - len(message_filtered)
-        skipped_by_age_count = len(message_filtered) - len(age_filtered)
         skipped_by_limit_count = max(len(eligible_sessions) - len(selected_sessions), 0)
+        # Every lane that produces nothing must say why in its own artifact
+        # (CLAUDE.md "Completion Is Not Output"). These four plus
+        # `eligible_session_count` are what separate "no eligible input" from
+        # "the floor ate everything" without re-running or reading the source.
+        floor_counters = {
+            "eligible_session_count": len(eligible_sessions),
+            "skipped_by_source_count": skipped_by_source_count,
+            "skipped_by_completion_count": skipped_by_completion_count,
+            "skipped_by_message_count": skipped_by_message_count,
+            "skipped_by_age_count": skipped_by_age_count,
+            "skipped_by_unknown_timestamp_count": skipped_by_unknown_timestamp_count,
+            "scan_floor": {
+                "source_denylist": sorted(sources),
+                "completed_only": bool(completed_only),
+                "min_message_count": min_messages,
+                "max_age_days": max_age_days,
+                "recent_first": bool(recent_first),
+            },
+        }
         written_events: list[str] = []
         resolved_apply_governance = dict(apply_governance or {})
         if not dry_run and selected_sessions:
@@ -660,6 +734,7 @@ class SessionMirror:
                     "skipped_by_platform_count": skipped_by_platform_count,
                     "skipped_by_limit_count": skipped_by_limit_count,
                     "skipped_by_owner_rejection_count": skipped_by_owner_rejection_count,
+                    **floor_counters,
                     "new_event_count": 0,
                     "dry_run": False,
                     "apply_bounded": True,
@@ -706,6 +781,7 @@ class SessionMirror:
                     "selected_session_count": len(selected_sessions),
                     "covered_session_count": len(covered),
                     "state_rebuilt": state_rebuilt,
+                    **floor_counters,
                 },
             )
             self._append_apply_record(
@@ -714,6 +790,7 @@ class SessionMirror:
                 skipped_by_platform_count=skipped_by_platform_count,
                 skipped_by_limit_count=skipped_by_limit_count,
                 skipped_by_owner_rejection_count=skipped_by_owner_rejection_count,
+                floor_counters=floor_counters,
                 platform_allowlist=platforms,
                 platform_denylist=sorted(denied),
                 max_sessions=limit,
@@ -736,6 +813,7 @@ class SessionMirror:
             "skipped_by_platform_count": skipped_by_platform_count,
             "skipped_by_limit_count": skipped_by_limit_count,
             "skipped_by_owner_rejection_count": skipped_by_owner_rejection_count,
+            **floor_counters,
             "new_event_count": len(selected_sessions),
             "dry_run": dry_run,
             "apply_bounded": not dry_run or bool(limit or platforms),
@@ -964,6 +1042,7 @@ class SessionMirror:
         skipped_by_platform_count: int,
         skipped_by_limit_count: int,
         skipped_by_owner_rejection_count: int,
+        floor_counters: dict[str, Any],
         platform_allowlist: list[str],
         platform_denylist: list[str],
         max_sessions: int,
@@ -983,6 +1062,7 @@ class SessionMirror:
             "profile": self.store.roots.profile or "default",
             "status": status,
             "apply_bounded": bool(max_sessions or platform_allowlist),
+            **dict(floor_counters),
             "max_sessions": max_sessions,
             "platform_allowlist": platform_allowlist,
             # Recorded so an external verifier can rebuild the SAME scope the
@@ -1145,16 +1225,38 @@ def _has_value(value: Any) -> bool:
     return value is not None and str(value).strip().lower() not in {"", "none", "null"}
 
 
+_DATE_ONLY_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _epoch_to_iso(value: float) -> str:
+    """Return the ISO form of an epoch-SECONDS value, or "" when out of range.
+
+    Out of range is not an exception to let escape: a millisecond-precision
+    timestamp (a very common convention) raises ``ValueError: year must be in
+    1..9999`` here, and ``_discover_sessions`` has no per-row recovery -- one
+    bad row would abort the scan for the whole profile. Returning "" routes it
+    to the unknown-timestamp counter instead: visible rather than fatal.
+    """
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
 def _normalize_timestamp(value: Any) -> str:
-    if not _has_value(value):
+    if not _has_value(value) or isinstance(value, bool):
         return ""
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+        return _epoch_to_iso(value)
     text = str(value).strip()
     try:
-        return datetime.fromtimestamp(float(text), tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OverflowError):
+        numeric = float(text)
+    except (TypeError, ValueError):
         return text.replace("Z", "+00:00") if text.endswith("Z") else text
+    # A numeric STRING is still an epoch. The previous code fell through to
+    # returning the digits verbatim, which parses as no date at all and was
+    # then silently dropped downstream.
+    return _epoch_to_iso(numeric)
 
 
 def _row_timestamp(row: sqlite3.Row, columns: tuple[str, ...]) -> str:
@@ -1166,24 +1268,36 @@ def _row_timestamp(row: sqlite3.Row, columns: tuple[str, ...]) -> str:
 
 
 def _session_timestamp_rank(session: dict[str, Any]) -> float:
+    """Sortable epoch seconds for a session, or 0.0 when it has no usable time."""
     value = str(session.get("updated_at") or "").strip()
     if not value:
         return 0.0
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
+    parsed = parse_utc(value, allow_naive=True)
+    if parsed is None and _DATE_ONLY_RE.match(value):
+        # parse_utc deliberately rejects date-only input; a session file that
+        # carries only a date is still orderable, at midnight UTC.
+        parsed = parse_utc(value + "T00:00:00+00:00")
+    return parsed.timestamp() if parsed is not None else 0.0
 
 
-def _session_is_within_age(session: dict[str, Any], max_age_days: int) -> bool:
+def _session_age_class(session: dict[str, Any], max_age_days: int | None) -> str:
+    """Return "ok" | "too_old" | "unknown".
+
+    "unknown" stays distinct on purpose. Folding an unreadable timestamp into
+    "too old" makes it indistinguishable from a genuinely stale session in the
+    counters, and that is how an entire schema shape can drop out of the digest
+    with nothing to show for it.
+    """
+    if max_age_days is None:
+        return "ok"
     timestamp = _session_timestamp_rank(session)
     if timestamp <= 0:
-        return False
+        return "unknown"
     age = datetime.now(timezone.utc).timestamp() - timestamp
-    return age >= 0 and age <= timedelta(days=max(int(max_age_days), 0)).total_seconds()
+    if age < 0:
+        # Clock skew / a future timestamp: not stale, so it stays admitted.
+        return "ok"
+    return "ok" if age <= timedelta(days=max(int(max_age_days), 0)).total_seconds() else "too_old"
 
 
 def _normalize_platform_allowlist(values: list[str] | tuple[str, ...] | None) -> list[str]:

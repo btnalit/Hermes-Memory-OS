@@ -129,7 +129,14 @@ def test_agenda_discloses_imminent_filtered_provisional_as_safe_alert(tmp_path, 
     )
 
     assert rendered["counts"]["imminent_nondeliverable_living_memory_total"] == 1
-    assert "临期提醒：有 1 条临时记忆将在 24 小时内自动失效" in rendered["text"]
+    assert "其中 1 条将在 48 小时内失效" in rendered["text"]
+    # Counterfactual for the substitution regression: the imminent line is
+    # APPENDED. Rendering it through the `else` of the disclosure dropped the
+    # other 23 records from the message, silently reverting the invariant
+    # `test_agenda_discloses_the_nondeliverable_provisional_backlog` pins --
+    # and no fixture covered the mixed case, which is the only shape production
+    # actually has.
+    assert "另有 24 条临时记忆(provisional)不需要你在这里决定" in rendered["text"]
 
 
 def test_backlog_disclosure_invites_no_reply_it_cannot_route(tmp_path, monkeypatch):

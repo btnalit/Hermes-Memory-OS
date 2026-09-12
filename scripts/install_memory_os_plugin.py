@@ -1668,6 +1668,19 @@ def _write_memory_sources_config(
     return config_path, memory_sources_config
 
 
+# Mirrors plugins/memory/memory_os/config.py::SESSION_MIRROR_LEGACY_FLOOR_KEYS.
+# This installer is deliberately stdlib-only, so the table is duplicated rather
+# than imported; `test_installer_legacy_floor_keys_match_config` fails if the
+# two ever drift.
+SESSION_MIRROR_LEGACY_FLOOR_KEYS = {
+    "source_denylist": "owner_review_source_denylist",
+    "require_completed": "owner_review_require_completed",
+    "min_message_count": "owner_review_min_message_count",
+    "max_age_days": "owner_review_max_age_days",
+    "recent_first": "owner_review_recent_first",
+}
+
+
 def _session_mirror_preset_for_install(
     *,
     deep_reflection_preset: str | None,
@@ -1691,17 +1704,38 @@ def _write_session_mirror_config(
         raise SystemExit(f"Unsupported SessionMirror preset: {preset}. Choices: production-safe, test-host")
     config_path = hermes_home / "memory-os" / "config.json"
     config = _read_json_config(config_path)
-    session_mirror_config = {
+    existing = config.get("session_mirror")
+    existing = dict(existing) if isinstance(existing, dict) else {}
+    # Keys the installer owns. Everything else already in the section is the
+    # owner's and survives: `platform_denylist` is an owner-writable floor
+    # (ruling 2026-08-14) that also feeds the monitor's auto-apply scope hash,
+    # so replacing the whole section wholesale silently reverted it on every
+    # upgrade -- and any admission floor the owner had tuned with it.
+    installer_owned = {
         "preset": preset,
-        "owner_review_max_age_days": 14,
-        "owner_review_min_message_count": 1,
-        "owner_review_recent_first": True,
-        "owner_review_require_completed": True,
-        "owner_review_source_denylist": ["cron"],
         "test_host_apply_allowed": preset == "test-host",
         "test_host_marker": "install_preset:test-host" if preset == "test-host" else "",
         "production_apply_owner_ref_required": True,
     }
+    # Admission-floor defaults are seeded on FIRST install only; on an upgrade
+    # the owner's configured value wins.
+    floor_defaults = {
+        "source_denylist": ["cron"],
+        "require_completed": True,
+        "min_message_count": 1,
+        "max_age_days": 14,
+        "recent_first": False,
+    }
+    session_mirror_config = {**existing, **installer_owned}
+    for key, value in floor_defaults.items():
+        legacy_key = SESSION_MIRROR_LEGACY_FLOOR_KEYS[key]
+        if key not in existing:
+            session_mirror_config[key] = existing.get(legacy_key, value)
+        # Retire the legacy spelling unconditionally. Popping it only on the
+        # migrating branch left a hand-edited or partially-migrated config
+        # carrying both spellings forever -- harmless (the merge prefers the new
+        # key) but the opposite of the "migrated once" this loop advertises.
+        session_mirror_config.pop(legacy_key, None)
     config["session_mirror"] = session_mirror_config
     if not dry_run:
         config_path.parent.mkdir(parents=True, exist_ok=True)

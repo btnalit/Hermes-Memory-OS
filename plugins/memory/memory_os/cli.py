@@ -49,7 +49,7 @@ _ensure_user_plugin_package()
 from .audit import last_audit_age_seconds, read_audit_entries
 from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
-from .config import load_config, owner_review_session_mirror_scan_options, save_config
+from .config import load_config, save_config
 from .conversation_regression import (
     evaluate_transcript_file,
     prompt_set_report,
@@ -2377,13 +2377,12 @@ def _resolve_session_mirror_owner_apply_governance(
         )
     ):
         return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_boundary_true")
+    # Revalidation must scan under exactly the floor the apply below will use,
+    # which is now `scan()`'s default -- so it passes no filter arguments either.
     dry_run = SessionMirror(store).scan(
         dry_run=True,
         max_sessions=requested_max,
         platform_allowlist=list(requested_platforms or approved_platforms) or None,
-        **owner_review_session_mirror_scan_options(
-            load_config(store.roots.hermes_home).get("session_mirror", {})
-        ),
     )
     fingerprints = dry_run.get("selected_session_fingerprints") if isinstance(dry_run.get("selected_session_fingerprints"), list) else []
     expected_fingerprint = str(result_ref.get("selected_pending_session_fingerprint") or "")

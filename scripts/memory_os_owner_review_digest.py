@@ -116,10 +116,14 @@ def _has_meaningful_content(preview: dict[str, object], *, digest_mode: str = "r
         # The recurring owner agenda should push only explicit decisions or
         # real alerts. Review-suggested and FYI items remain available through
         # the pull-based review surface, not daily Telegram noise.
-        return (
-            int(counts.get("action_required_shown") or 0) > 0
-            or int(counts.get("imminent_nondeliverable_living_memory_total") or 0) > 0
-        )
+        # Imminent provisional expiry is deliberately NOT a send reason. The
+        # only owner verb it offers is `reject`, which merely expires the record
+        # sooner than it is already about to expire -- `confirm` is a hard
+        # `legacy_permanent_action_rejected` no-op. A push nobody can act on is
+        # the noise this gate exists to suppress, and the prior repair cycle
+        # recorded that silence here is correct. The alert still rides along on
+        # any digest that has a real decision to deliver.
+        return int(counts.get("action_required_shown") or 0) > 0
     shown = (
         int(counts.get("action_required_shown") or 0)
         + int(counts.get("review_suggested_shown") or 0)

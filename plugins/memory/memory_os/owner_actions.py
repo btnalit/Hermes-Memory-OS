@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit, read_audit_records
-from .config import load_config, owner_review_session_mirror_scan_options
+from .config import load_config
 from .crystallized import (
     CrystallizedCandidate,
     CrystallizedMemoryService,
@@ -2993,6 +2993,11 @@ def _assemble_living_memory_delivery_items(
     }
 
 
+# Wider than the digest's own 24h cadence on purpose: a window exactly equal to
+# the cadence lets a record slip between two runs and never be mentioned at all.
+IMMINENT_PROVISIONAL_EXPIRY_HOURS = 48
+
+
 def _is_imminent_provisional(item: dict[str, Any], *, now: datetime) -> bool:
     if str(item.get("target_type") or "") != "provisional_crystallized_record":
         return False
@@ -3001,12 +3006,13 @@ def _is_imminent_provisional(item: dict[str, Any], *, now: datetime) -> bool:
         return False
     try:
         expiry = datetime.fromisoformat(expires_at)
-    except ValueError:
+    except (TypeError, ValueError):
         return False
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
+    # Same normalization every other expiry comparison in this file uses; a
+    # third hand-rolled copy would silently miss a future change to its rules.
+    expiry = ensure_utc_aware(expiry)
     remaining = expiry - now
-    return timedelta(0) <= remaining <= timedelta(hours=24)
+    return timedelta(0) <= remaining <= timedelta(hours=IMMINENT_PROVISIONAL_EXPIRY_HOURS)
 
 
 def _consume_owner_write_context(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
@@ -5106,13 +5112,12 @@ def _session_mirror_apply_review_items(
         session_mirror_stable_scope_id,
     )
 
-    session_mirror_config = load_config(store.roots.hermes_home).get("session_mirror", {})
     try:
-        report = SessionMirror(store).scan(
-            dry_run=True,
-            max_sessions=1,
-            **owner_review_session_mirror_scan_options(session_mirror_config),
-        )
+        # No filter arguments: `scan()` applies the owner's configured admission
+        # floor by default, and the SAME floor drives the apply paths. Passing a
+        # digest-only filter set here is what made this surface advertise one
+        # session while the lane imported another.
+        report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
     except Exception:
         return []
     selected = report.get("selected_sessions") if isinstance(report.get("selected_sessions"), list) else []
@@ -6530,15 +6535,19 @@ def _rendered_overview_lines(
             # No owner_review_surface_report operation returns just the filtered
             # provisional records, so naming one would repeat the exact defect
             # this section fixes: advertising a path that does not reach.
+            lines.append(
+                f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不需要你在这里决定："
+                "它们到期会自动失效，成熟的会另走永久记忆提案来问你。"
+            )
             if imminent_nondeliverable_living_memory:
+                # Appended, never substituted: the backlog disclosure is a
+                # standing invariant (a prior cycle added it precisely so the
+                # filtered records are "disclosed, not silently dropped"), and
+                # replacing it whenever one record happens to be imminent drops
+                # the other N from the message.
                 lines.append(
-                    f"- 临期提醒：有 {imminent_nondeliverable_living_memory} 条临时记忆将在 24 小时内自动失效；"
-                    "正文不在此推送，不需要在这里回复。"
-                )
-            else:
-                lines.append(
-                    f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不需要你在这里决定："
-                    "它们到期会自动失效，成熟的会另走永久记忆提案来问你。"
+                    f"  其中 {imminent_nondeliverable_living_memory} 条将在 "
+                    f"{IMMINENT_PROVISIONAL_EXPIRY_HOURS} 小时内失效；同样不需要回复。"
                 )
         if action_omitted:
             lines.append("- 想继续处理可回复：下一页 / 还有哪些 / 展开 A4。")

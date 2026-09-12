@@ -5031,6 +5031,35 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `2a7f806..HEAD`：选择策略分叉（DI）——`2a7f806` 把
+  SessionMirror 的选择策略劈成两半（审查面过滤 + 最近优先，执行面完全不过滤），于是
+  摘要offer一条、手动 apply 因指纹不符恒 `scope_mismatch` 死锁、毕业 lane **根本不比对
+  审批指纹**因而静默导入另一条；实测摘要 `20260910_recent` vs 两条 apply 路径
+  `20260504_old`。改法是把 floor **下沉进 `scan()` 自身**（`_FLOOR` 哨兵，`None` 不可用
+  因其是"不设年龄门"的真实语义），任何调用点无法再遗漏，三面指纹实测一致。顺带修掉
+  同族七项：四个 `skipped_by_*` 计数器算完即弃（候选现已逐条对账）、`candidate_session_count`
+  过滤前口径、`_normalize_timestamp` 数值分支无保护（毫秒时间戳一行坏数据打挂整个 profile
+  的 scan）、无时间戳被静默排除（改 tri-state + 单列计数）、默认值 14/30/None 三方不一致、
+  安装器整块覆盖 `session_mirror`（每次升级静默还原 owner 的 `platform_denylist`）、
+  `ensure_utc_aware` 未复用。临期提醒按 owner 裁定改回"搭车"：不再单独构成发送理由
+  （`confirm` 本就是硬拒绝的 no-op），且**追加而非替换**披露行——后者是一条有测试保护的
+  不变量的回归，只因两个 fixture 互斥、生产唯一的混合场景两边都没覆盖才没被发现。
+  `recent_first` 默认改 False（它在 never-imported 类内部重建 Backlog 13 的饿死）。
+  +10 反事实测试（已实测 revert→fail→restore→pass）；全量 **3618 passed / 27 failed /
+  4 skipped**，与 HEAD 基线（同一 runner）3608/27/4 **失败集合逐条相同、零回归**；
+  收集面对账 3648 + 92（藏在 6 个 numpy import 失败文件里）= 3740，与 CI 历史 3721
+  加两轮新增吻合。剩余 27 个逐条定性（18 无 numpy、5 需 gitignored 的 internal 文档、
+  3 需真 pytest、1 同族断言），无一与本节相关；四门静态检查全绿。
+  **方法教训（比本节代码更值得记）**：自建 runner 连错四次——没加载 `conftest.py`、
+  `monkeypatch` 字符串形式 bug、**不收集类内方法（少跑 977 个）**、不支持
+  `capsys`/`caplog`（静默跳过 87 个，其中 12 个就在本节改动的文件上）。
+  是 owner 追问四次才剥出来的。**报数字前先证明尺子是对的，并把收集总数与本文件里的
+  历史记录对上账。**
+  **注**：本机无 pytest 且无网络，上述数字来自自建最小 fixture runner，
+  **不等价于 `local_pass`，推送前须补跑 `python -m pytest -q` 全量**；
+  另有两个仅由 fixture 验证过的生产假设（`source` 是否真为 `cron`、`ended_at` 是否恒写）
+  待在 hermes-media 实测。
+
 - `842b9a2..HEAD`：permit scope 门修复（DH）——监控手工重建 scope 少算 `platform_denylist`，
   6 字段只哈希 5 个，该门恒 FAIL、**从未真正校验过任何东西**（同 envelope 仓库内 resolver 判
   `scope_match: true`）。apply 记录补该字段、监控用同字段集重算、历史行返回 `unverifiable`
@@ -7795,3 +7824,194 @@ sannai 单次运行 `sessions_scanned=405 / sessions_eligible=252 / sessions_pro
   按登记判据"原样重跑不复现"复跑一次即消失（87/14/3 → 88/13/2）。本轮连跑四次重型监控
   加两次部署，正是该项记录的主机负载条件，判为瞬时争用而非回归——但**这条观察点因此
   再次兑现，下次若在低负载下复现应当升级**。
+
+## DI — 选择策略被劈成两半：摘要看到的会话不是 lane 导入的会话（2026-09-12，评审 `2a7f806`）
+
+owner 报告：更新部署后 recurring owner-review 定时任务"不是空发送，就是发送的东西压根不是
+正确的"。`2a7f806` 为此引入四个过滤器 + 临期提醒。本节是对该提交的评审与修复。
+
+### 0. 根因一句话
+
+`2a7f806` 把**选择策略**劈成了两半：审查面（摘要 `_session_mirror_apply_review_items` +
+resolver `cli.py::_resolve_session_mirror_owner_apply_governance`）过滤 + 最近优先，
+执行面（`cli.py` 手动 apply、`session_mirror.py` auto-apply 两处）完全不过滤，中间没有
+任何东西把两者对齐。**改之前两边共用同一次 scan，队头天然一致——这个分叉是这次改出来的。**
+注释写着"digest-only filters"，那正是缺陷本身，不是设计。
+
+### 1. 两个后果，一个静默一个 fail-closed（用真实 schema 实测，非推断）
+
+固定 fixture（cron / 进行中 / 200 天前 / 2 天前各一条）：
+
+| 面 | 修复前选中 | 后果 |
+|---|---|---|
+| 摘要 | `20260910_recent` | 告诉 owner 要导入这条 |
+| 手动 apply | `20260504_old` | `_validate_owner_resolved_governance` 比对指纹失败 → `session_mirror_apply_scope_mismatch`，**通道死锁** |
+| 毕业 lane | `20260504_old` | `_validate_lane_graduated_governance` **根本不比对**审批指纹（只把它哈希进自己自洽的 permit scope），**静默导入错会话** |
+
+**lane 那条比手动那条严重**：按 CLAUDE.md，生产路径是"毕业 → 心跳 auto-apply"，手动 apply
+只是运维工具。且 2026-08-14 裁定下 lane 默认 `admit_all`，审批单的 `platform_allowlist`
+被忽略，所以连 cron 会话都能进。
+
+### 2. 修法：过滤器从"摘要专用"提升为"lane 级 floor"（owner 2026-09-12 裁定）
+
+与 `platform_denylist` 同形态——owner 设一次的底线，不是每次重批的门。关键是 floor
+**下沉进 `scan()` 自身**（`_FLOOR` 哨兵默认值），而不是要求每个调用点记得传：
+上一版的缺陷就是"某个调用点没传"。哨兵不能用 `None`，因为 `max_age_days=None` 是真实语义
+（不设年龄门）。改完三面实测指纹一致。
+
+键名去掉 `owner_review_` 前缀；`SESSION_MIRROR_LEGACY_FLOOR_KEYS` 负责迁移已部署的旧拼写。
+
+### 3. `recent_first` 默认改为 False——它会重建 Backlog 13 的饿死
+
+`2a7f806` 默认开启最近优先。但新会话持续到达时，最老的未导入会话每轮都排在新到达的后面，
+然后在 `max_age_days` 处直接过期，**永远不被导入**——正是 Backlog 13 在 never-imported
+类内部的重演。而让三面选同一条靠的是 floor 不是排序（关掉 recency 后实测依旧一致），
+所以这个语义变更纯是净损失。保留为 owner 可开的旋钮，不作为常态。
+
+### 4. 顺带修掉的同类缺陷（Section W 第 5 条：全项目扫同一模式）
+
+- **四个 `skipped_by_*` 计数器算完即弃**（全仓 grep 只有 4 行赋值）。摘要被过滤空时
+  `candidate=N selected=0` 而两个已发布的 skip 计数都是 0，无从区分"没有合格输入"与
+  "floor 吃光了"——正是"Completion Is Not Output"禁止的形状。现在进 report / audit /
+  apply record / auto-apply last-run，且**每条候选恰好落入一个已发布的结局桶**（测试对账）。
+  `ruff_required: false`，没有 lint 会拦住死变量，只能靠测试钉。
+- **`candidate_session_count` 仍是过滤前口径**：新增 `eligible_session_count`，不改旧键语义
+  （monitor 在读）。
+- **`_normalize_timestamp` 数值分支无保护**：部署 schema 是 `real` 列，毫秒级时间戳会抛
+  `ValueError: year must be in 1..9999` 穿出 `_discover_sessions()`，**一行坏数据打挂整个
+  profile 的 scan**。数字字符串分支则相反——原样返回digits，静默失活。两侧都修。
+- **无可用时间戳被静默排除**（`_session_is_within_age` 返回 False）：改为 tri-state
+  `_session_age_class`，`unknown` 单列计数，不折进 `too_old`。Section W 第 4 条。
+- **默认值三方不一致**：`DEFAULT_CONFIG`=14 / 两处 fallback=30 / 显式 `None` 直接关闭过滤器。
+  改为单一来源（复用 `_merge_session_mirror_config`），`None` 一律回落默认，`0` 才是
+  文档化的关闭方式。
+- **安装器整块覆盖 `config["session_mirror"]`**：改为合并。owner 设的 `platform_denylist`
+  （喂 monitor 的 auto-apply scope hash）此前每次升级都被静默还原。实测升级后 owner 调参存活。
+- `_is_imminent_provisional` 手写 naive→aware → 复用同文件已 import 的 `ensure_utc_aware`。
+
+### 5. 临期提醒：改回"搭车"而不是"独立触发"（方案 A）
+
+`2a7f806` 让 `imminent_nondeliverable_living_memory_total > 0` 单独构成发送理由。两个问题：
+
+- **这条提醒结构上不可操作**：`confirm_provisional_crystallized_record` 硬返回
+  `legacy_permanent_action_rejected`，唯一可用动作 `reject` 只是让它现在失效而不是 48 小时后
+  失效。文案自己写着"不需要回复"。
+- **它推翻了上一轮明确记录过的决定**：本文件 §"可投递项归零时议程静默"原文——
+  "这是 provisional 本就不需要 owner 决策的正确结果"。`2a7f806` 没引用这段也没更新本清单。
+
+改回门槛只看 `action_required_shown > 0`；临期行照常渲染，但**追加而非替换**披露行。
+
+**替换是一个有测试保护的不变量的回归**：`test_agenda_discloses_the_nondeliverable_provisional_backlog`
+（"The 24 filtered records must be disclosed, not silently dropped"）只因其 fixture 临期数为 0
+才还绿；新增测试把临期设成 1 且从不断言那 24 条还在。两个 fixture 互斥，**生产唯一会出现的
+混合场景两边都没覆盖**——又一次"fixture 与 bug 达成一致"。实测混合口径下"另有 24 条"整行消失。
+窗口同时从 24h 放宽到 48h：窗口等于 cron 周期会让记录在两次运行之间漏掉。
+
+### 6. 测试
+
+反事实测试（每条在无修复时 FAIL）：三面同选、候选结局对账、毫秒时间戳不打挂 scan、
+无时间戳单列计数、**时钟偏移的未来时间戳仍被准入**（旧谓词 `age >= 0 and age <= limit`
+会把它判为超龄；floor 变 lane 级后那等于永不导入且无任何计数说明原因）、临期行追加不替换、
+门槛不再被临期触发、安装器升级保留 owner 调参、安装器无条件退役 legacy 键、
+安装器与 config 的 legacy 键表不漂移。
+
+提交前独立评审（`/code-review high`，全 12 文件）：**0 findings**。它另外独立核实了
+`dedup_key` 是内容哈希不含时间戳——故时间戳归一化**不会动摇会话去重身份**（否则整个
+积压会被判为新会话重导一遍）；`imminent_nondeliverable_living_memory_total` 只有单一
+生产者，48h 常量与渲染计数不会漂移。上面那条"未来时间戳"测试正是该轮提出、本轮补上的。
+
+session_mirror 测试 fixture 集体刷新为"近期 + 已完成"：floor 现在对每次 scan 生效，
+冻结在固定过去日期的 fixture 测的是一条**不合格**会话，而不是一条正常会话。
+
+### 7. 验证状态
+
+- 静态检查（改动后复跑）：`import_cycle` pass / `write_surface` pass（167 面，
+  `unclassified_count=0`）/ `static_hygiene` pass / `public_checkout_probe` PASS /
+  `git diff --check` clean。
+- 全量：**3618 passed / 27 failed / 4 skipped**，与改动前基线（**同一 runner**）的
+  3608/27/4 **失败集合逐条相同、零回归**；+10 passed 恰为本节新增的十个反事实测试
+  （已逐个单独确认真的跑了并通过，不是被静默跳过）。
+- **收集面对账**（这一步本身是本轮补上的，见下）：实际收集运行 3648
+  （3618+27+4），另有 **92** 个测试藏在 6 个 `numpy` import 失败的文件里整文件未被收集，
+  合计 **3740**；对照 DH 轮 CI 的 3708 passed + 13 skipped = 3721，加 `2a7f806` 新增
+  与本节 +9，账吻合。
+- 剩余 27 个失败**逐条定性，无一与本节改动相关**：**18** 个 `ModuleNotFoundError: numpy`
+  （本机无且无网络；含 9 个此前因未收集类方法而根本没被发现的 `vector_decouple`）、
+  **5** 个 `closure_matrix_check` 需要
+  `docs/internal-memory-os/01-contracts/36-module-closure-matrix.md`——该目录按 CLAUDE.md
+  是 gitignored、不进 GitHub，**因此在任何干净克隆上都必然失败**、**3** 个
+  `pytest_policy` 必须真的跑一遍 pytest 才能生成 `policy.json`、**1** 个同属
+  closure_matrix 族的 AssertionError。剩余 4 个 skipped 均为测试自身调 `pytest.skip()`。
+- 反事实按 Section W 第 3 条**实测过 revert→fail→restore→pass**：把 `scan()` 的 floor
+  默认值还原成改前状态后，`test_every_surface_selects_the_same_session_as_the_digest_offered`
+  与 `test_scan_accounts_for_every_candidate_it_filtered` **双双 FAIL**，恢复后 PASS。
+- 全量首跑多出 `test_tiny_benchmark_uses_synthetic_corpus_and_reports_slo`
+  （`event_append_p95` 71.6ms/20ms、`sqlite_rebuild` 579ms/500ms）。**判为瞬时争用**：
+  本节改动不触及 event append / sqlite rebuild / prefetch / working decay 任何一条路径，
+  且低负载下原样复跑 **3/3 全过**——符合本文件既有登记判据。真因是本机 scratch 挂载点
+  配额耗尽导致 IO 抖动（见下）。
+- **`local_pass` 的口径必须写清楚：不是 pytest 跑出来的。** 本机无 pytest 且无网络
+  （`pip` SSL EOF），上述数字来自自建的最小 fixture runner。
+  **推送前仍须在有 pytest 的环境补跑 `python -m pytest -q` 全量**，本节数字只证明
+  "无回归"，不等价于 `local_pass`。
+
+- **本轮最值得记的一条教训，出在方法而不是代码上：我用一个从未验证过的测量工具下了
+  半天结论，而且它错了四次，是 owner 追问四次才一层层剥出来的。**
+  第一版 runner 报 "2342 passed / 134 failed，与基线 134 逐条相同"，据此宣称零回归。
+  owner 第一问"这么多错误你不查原因，你敢提交？"戳破第一层：**"与基线相同"只证明不是我
+  造成的，不证明它们无害——若尺子本身是坏的，基线与改动后会一起错，"零回归"什么都没证明。**
+  owner 第二问"这个项目的总测试不可能才 2500 多个，你看看之前的记录没？"戳破更大的一层：
+  清单自己记着 3708，我却只跑了 2629，**少了 27% 而我毫无察觉**。四个缺陷依次是：
+
+  | # | 缺陷 | 影响 |
+  |---|---|---|
+  | 1 | 没加载 `tests/conftest.py` | ~103 个假失败 |
+  | 2 | `monkeypatch.setattr("a.b.C", v)` 用 `sys.modules[mod]` 取模块，未导入即 KeyError（真 pytest 会 `import_module`） | 12 个假失败 |
+  | 3 | **只收集模块级函数，不收集 `Test*` 类的方法** | **少跑 977 个** |
+  | 4 | 不支持 `capsys`/`caplog` | 87 个被静默跳过 |
+
+  ①里 `isolate_candidate_aggregation_from_real_graph_gate` 是 `autouse=True`——**它不出现在
+  函数签名里，所以连"跳过"都没做，测试在缺失隔离的状态下裸跑**，这类最隐蔽。
+  ④最刺眼：修好后 `test_memory_os_session_mirror.py` + `test_memory_os_plugin_install.py`
+  由 97 passed/12 skipped 变成 **109 passed/0 skipped**——**就在本节改动的文件上，
+  此前有 12 个测试被静默跳过**，那句"零回归"在它们覆盖的范围里等于没说。
+
+  **规矩**（比上面任何一条都重要）：**报告测试数字之前，先证明测量工具本身是对的，
+  并且把收集数对上账。** 三个必查项：加载了 `conftest.py` 且应用了 autouse fixture；
+  收集了类内测试方法；收集总数与历史记录能对上（对不上就是还有没发现的漏收集）。
+  一个少收集 27% 的 runner 报出的"全绿"同样不可信，只是没人去数而已——而**本文件里就
+  躺着可对账的历史数字，我却没去查**。
+  （附带：该 runner 每个测试 `mkdtemp()` 却不回收，撑爆磁盘配额导致连 `true` 都返回非零——
+  见下一节。已加回收，且需先 `chmod` 才能删掉测试故意设为只读的归档树，否则静默删不掉。）
+- 生产假设待实测（仅由 fixture 验证过）：`select distinct source from sessions`（确认 "cron"
+  确为 source 值）；`select count(*) from sessions where ended_at is null` （确认
+  `require_completed` 不会误杀崩溃结束的会话）。
+
+### 8. 独立评审（`/code-review high`）+ 自评的三项，及一个明写的取舍
+
+独立评审只报出一项（与自评重合）：**安装器只在"新键缺失"分支里 pop 旧拼写**，导致同时带
+两种拼写的配置永远留着 stale alias。功能无害（merge 优先新键），但与循环自称的"迁移一次"
+相反，且 stale alias 正是后来的读者会误当成生效值的东西。已改为无条件 retire + 反事实测试。
+
+自评另外抓到独立评审没报的两项：
+
+- **注释漂移**：`scan()` 排序块仍写着"Owner review opts into recent-first only after the
+  explicit digest filters above"——描述的是被本节删掉的 digest-only 设计。注释与代码相反
+  比没有注释更糟，已重写。
+- **`recent_first` 的旧值会被迁移回来**：跑过 `2a7f806` 安装器的主机，config 里是
+  `owner_review_recent_first: true`，迁移会忠实地映射成 `recent_first: true`，把本节
+  默认关掉的排序又打开。**这里的取舍明写出来**：不迁移等于替 owner 丢弃一个他配置里
+  的值；迁移则可能带回饿死风险。选择**迁移**，理由是该风险在实际速率下有界（导入
+  288 次/天 远大于新会话到达率），且**每份 scan 报告都回显 `scan_floor.recent_first`**，
+  运维随时看得见它是开是关——满足"绝不静默"的要求。若日后观察到尾部确实饿死，改默认值
+  即可，不需要改迁移逻辑。
+
+### 9. 工具侧教训（与代码无关，但值得记一笔）
+
+排查中 Bash 工具整体失效：**每条命令（连 `true`）都返回非零且 stdout 完全为空**。
+真因是**我自己在会话 scratch 目录里建了个 venv**（pip 还装失败了），撑爆该挂载点配额；
+而 Bash 的输出捕获要写这个路径，于是所有命令的返回通道一起哑掉——**故障表现与命令内容
+完全无关，看 Bash 的空返回永远查不出来**。定位靠的是换一条代码路径（`Write` 工具）去写
+同一目录，拿到 `EDQUOT` 才实锤。删掉 venv 与已消费的后台 transcript 后恢复。
+教训：**排查"工具整体失效"时，先换一条不共用同一资源的代码路径取错误信息**；以及
+不要在会话 scratch 里建 venv。

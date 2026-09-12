@@ -50,6 +50,10 @@ def test_digest_helper_agenda_mode_only_treats_decisions_as_meaningful():
         )
         is True
     )
+    # Imminent provisional expiry must NOT by itself make a digest worth
+    # sending: `confirm_provisional_crystallized_record` is a hard
+    # `legacy_permanent_action_rejected` no-op and `reject` only expires the
+    # record sooner, so the push would carry nothing the owner can act on.
     assert (
         module._has_meaningful_content(
             {
@@ -60,7 +64,7 @@ def test_digest_helper_agenda_mode_only_treats_decisions_as_meaningful():
             },
             digest_mode="agenda",
         )
-        is True
+        is False
     )
 
 
