@@ -349,6 +349,23 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # J1: optional structured-judge backend for fact_judge (owner ruling
+    # 2026-09-23, next-phase plan row J1). Default "hermes_default" keeps
+    # fact_judge's existing free-text LLM judge path byte-identical; the
+    # "typesafe_jev" alternative routes the durable-fact question through
+    # jev_backend.py's native noul primitive instead. Same shape as
+    # llm_transport (string-enum lane_switch): the knob override is the
+    # rollback/rollout switch, always owner-gated (never auto-approvable --
+    # see knob_override_auto_approvable's kind=="lane_switch" exclusion).
+    "fact_judge_judge_backend": {
+        "module": "fact_judge",
+        "default": "hermes_default",
+        "kind": "lane_switch",
+        "allowed": ["hermes_default", "typesafe_jev"],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── session_fact_extraction lane knobs (offline, INV-5-safe) ─────────
     "session_fact_extraction_max_sessions_per_tick": {
         "module": "session_fact_extraction",
