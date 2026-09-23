@@ -8870,6 +8870,21 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   `_write_state` 之前写入，dry-run 保持只读；governance 判 blocked 的早退分支下一轮重试，不丢。未改动的一处命名：镜像准入沿用
   `FOREGROUND_CONTROL_PRINCIPALS`（与 `sync_turn` 的记忆驱动门同一集合），若将来要让"谁能进记忆"与"谁能控前台"分开，应像 P1 的
   `OWNER_ACTION_PRINCIPALS` 那样另起名字。本节字母由 DU 改为 DW，使链上节号单调（DU = monitor part 2，DV = P1）。
+- **独立审查（Sonnet）无阻塞**：生产者普查完整（`append_event` 只收 `EventEnvelope`，没有绕开的字典写入；全仓 9 处生产者都传闭集值）、
+  纪元边界诚实、P3 门在切片之前、会话级 `author_class=""` 是对的（传 `unknown` 会在读配置之前就短路成 unknown）。三条 SHOULD-FIX
+  全修，各有破坏即失败的反事实（cp 备份法 3/3）：
+  - **升级后的全量误报**：`to_dict()` 一律输出两个新键，而索引的 `record_hash` 是 `to_dict()` 的 sha256——部署后每条旧事件都会被
+    doctor / deploy postcheck 判 `index_content_mismatch`（FAIL），直到下一次 index_sync 重写哈希。改为两者皆空时不输出这两个键：
+    旧行逐字节原样往返、哈希不变；已打标记的行（哪怕主体为空）照常两键都写，monitor 仍能抓到生产者缺陷。从根上消除，不靠部署顺序。
+  - **`other_human` 永久排除**：`other_human` 的含义是"此平台配置了身份、而作者不是它"，是依赖绑定的判断；此前的持久跳过标记永不
+    失效，主人日后补上自己的第二个账号，那个账号此前的会话就永远不会被镜像——数据丢失。现在标记记下平台与
+    `principal.owner_binding_fingerprint`，每轮扫描先丢弃与当前绑定不符的 `other_human` 标记、当轮重新判定，`status()` 的待处理数用
+    同一判断；`peer_agent`（mailbox 结构性来源）不受影响。新计数 `principal_skip_marks_reevaluated_count`。已知限度：monitor 嵌入
+    采集器直接读状态文件，陈旧标记要等下一次 apply 写回后才从其积压数里消失（下一个心跳即可）。
+  - **覆盖窗口被机器事件占满**：最近 500 条可能全是 system 类事件，"没抽到主人轮"与"主人轮全都正确"无法区分。采集器与 INFO 加
+    `marked_by_principal` 分布。
+  - NIT 已处理：`on_memory_write` 注释原称与 `sync_turn` 的回退"相同"，实际它永远取缓存值且不记 `author_source`，注释改为如实说明
+    跨轮风险；镜像全量排除非主人会话、而 `sync_turn` 对同主体只做 index_only——前者是整段导入第三方会话，更强的隐私边界是有意的。
 - **部署**：随规划全部落地后统一部署；部署后验收：`event_principal_coverage` 在近窗口出现 `marked_event_count>0` 且
   `marked_without_principal_count=0`；两 profile 的 `session_mirror` 若曾经镜像过 mailbox/群内他人会话，新版本上线后不再新增（历史已
   写入的旧事件不回填，只影响新写入）。
