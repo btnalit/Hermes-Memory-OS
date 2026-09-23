@@ -1664,3 +1664,193 @@ def test_installer_main_still_exits_zero_when_everything_was_achieved(tmp_path, 
     )
 
     assert installer.main() == 0
+
+
+# ── P0-lite owner principal auto-binding (2026-09-23) ─────────────────────
+# discover_owner_identity_bindings' decision rules already have full unit
+# coverage in tests/plugins/memory/test_memory_os_principal.py; these tests
+# only pin the installer's plumbing: the config it writes, the report shape,
+# and that raw ids never reach a printed report.
+
+_OWNER_ID = "1000000001"
+_OTHER_ID = "2000000002"
+
+
+def test_install_plugin_writes_principal_config_section_by_default(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home")
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert report["principal_config_written"] is True
+    assert config["principal"] == {"owner_identities": {}, "binding_sources": {}}
+    assert report["principal_binding_report"] == []
+
+
+def test_install_plugin_owner_identity_flag_binds_and_is_masked_in_report(tmp_path):
+    """Counterfactual: without threading owner_identity through to
+    discover_owner_identity_bindings, --owner-identity would be a silently
+    ignored no-op flag."""
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        owner_identity=[f"telegram:{_OWNER_ID}"],
+    )
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert config["principal"]["owner_identities"] == {"telegram": [_OWNER_ID]}
+    assert config["principal"]["binding_sources"]["telegram"] == "explicit_owner_identity"
+
+    entries = report["principal_binding_report"]
+    assert entries == [
+        {
+            "platform": "telegram",
+            "status": "explicit",
+            "binding_source": "explicit_owner_identity",
+            "identity_count": 1,
+            "masked_identities": [entries[0]["masked_identities"][0]],
+            "signal_sources": ["explicit_owner_identity"],
+        }
+    ]
+    report_text = json.dumps(report)
+    assert _OWNER_ID not in report_text
+
+
+def test_explicit_owner_identity_survives_a_later_install_without_the_flag(tmp_path):
+    """Counterfactual: the installer rewrites the principal section on every
+    run and every deploy runs the installer, so an operator's one-time
+    --owner-identity (the documented fix for a platform with no host signal)
+    would silently drop back to compatibility mode on the next routine
+    deploy. Both installs go through the real installer."""
+    home = tmp_path / "home"
+    install_plugin(hermes_home=home, owner_identity=[f"wecom:{_OWNER_ID}"])
+    report = install_plugin(hermes_home=home)
+
+    config = json.loads((home / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert config["principal"]["owner_identities"] == {"wecom": [_OWNER_ID]}
+    assert config["principal"]["binding_sources"] == {"wecom": "explicit_owner_identity"}
+    entry = next(e for e in report["principal_binding_report"] if e["platform"] == "wecom")
+    assert entry["status"] == "explicit_retained"
+    assert _OWNER_ID not in json.dumps(report)
+
+    # A new explicit value still replaces the retained one.
+    install_plugin(hermes_home=home, owner_identity=[f"wecom:{_OTHER_ID}"])
+    config = json.loads((home / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert config["principal"]["owner_identities"] == {"wecom": [_OTHER_ID]}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_install_sh_echoed_command_line_masks_owner_identity():
+    """Counterfactual: install_memory_os.sh echoes the full installer command
+    line (printf '%q' of its argv) before running it, and that line lands in
+    deploy logs. The --owner-identity value must be masked there like every
+    other printed surface. Executes the script's own lines, not a grep."""
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "install_memory_os.sh").read_text(encoding="utf-8")
+    start = script.index("  # The echoed command line ends up in logs")
+    end = script.index("  local installer_rc=0")
+    program = (
+        "f() {\n"
+        f"  local -a args=(python3 installer.py --owner-identity 'telegram:{_OWNER_ID}' --hindsight off)\n"
+        + script[start:end]
+        + "}\nf\n"
+    )
+
+    out = subprocess.run(["bash", "-c", program], capture_output=True, text=True, check=True).stdout
+
+    assert _OWNER_ID not in out
+    assert "telegram:" in out and "masked" in out
+    assert "--hindsight" in out  # the rest of the command line is still shown
+
+
+def test_install_plugin_auto_discovers_from_real_env_file(tmp_path):
+    """Fixture built via the real .env parsing path (a real file on disk),
+    not a hand-shortcut dict -- exercises the same code the real installer
+    reads on a real host."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(
+        f"TELEGRAM_HOME_CHANNEL={_OWNER_ID}\nTELEGRAM_ALLOWED_USERS={_OWNER_ID}\n",
+        encoding="utf-8",
+    )
+    report = install_plugin(hermes_home=home)
+
+    config = json.loads((home / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert config["principal"]["owner_identities"] == {"telegram": [_OWNER_ID]}
+    telegram_entry = next(e for e in report["principal_binding_report"] if e["platform"] == "telegram")
+    assert telegram_entry["status"] == "bound"
+    assert _OWNER_ID not in json.dumps(report)
+
+
+def test_install_plugin_conflicting_env_signals_do_not_bind(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(
+        f"TELEGRAM_HOME_CHANNEL={_OWNER_ID}\nTELEGRAM_ALLOWED_USERS={_OTHER_ID}\n",
+        encoding="utf-8",
+    )
+    report = install_plugin(hermes_home=home)
+
+    config = json.loads((home / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert config["principal"]["owner_identities"] == {}
+    telegram_entry = next(e for e in report["principal_binding_report"] if e["platform"] == "telegram")
+    assert telegram_entry["status"] == "conflict"
+
+
+def test_install_plugin_dry_run_does_not_write_principal_config(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(f"TELEGRAM_HOME_CHANNEL={_OWNER_ID}\n", encoding="utf-8")
+    report = install_plugin(hermes_home=home, dry_run=True)
+
+    assert report["principal_config_written"] is False
+    assert not (home / "memory-os" / "config.json").exists()
+    # the report is still computed (visible), even though nothing was written
+    telegram_entry = next(e for e in report["principal_binding_report"] if e["platform"] == "telegram")
+    assert telegram_entry["status"] == "bound"
+
+
+def test_install_plugin_principal_config_runs_after_config_defaults_guard(tmp_path):
+    """Counterfactual: _write_principal_config always writes config.json,
+    even with no preset given. Running it BEFORE _ensure_config_defaults
+    makes that guard observe the file as already present (created_skeleton
+    = False) and skip writing memory_sources.mode -- a real regression this
+    pins against reintroducing."""
+    report = install_plugin(hermes_home=tmp_path / "home")
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert report["memory_sources_config_written"] is False
+    assert config["memory_sources"]["enabled"] is True
+    assert config["memory_sources"]["mode"] == "metadata_only"
+
+
+def test_installer_argparse_owner_identity_is_repeatable(tmp_path, monkeypatch):
+    import sys
+
+    import scripts.install_memory_os_plugin as installer
+
+    captured_kwargs = {}
+
+    def _fake_install_plugin(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "dry_run": True,
+            "runtime_timer_state": "not_requested",
+            "cognitive_loop_timer_state": "not_requested",
+            "smoke_test": {"requested": False, "passed": True, "status": "not_requested"},
+        }
+
+    monkeypatch.setattr(installer, "install_plugin", _fake_install_plugin)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "install_memory_os_plugin.py",
+            "--hermes-home",
+            str(tmp_path / "home"),
+            "--dry-run",
+            "--owner-identity",
+            f"telegram:{_OWNER_ID}",
+            "--owner-identity",
+            f"cli:root",
+        ],
+    )
+
+    assert installer.main() == 0
+    assert captured_kwargs["owner_identity"] == [f"telegram:{_OWNER_ID}", "cli:root"]

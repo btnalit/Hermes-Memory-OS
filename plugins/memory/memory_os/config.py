@@ -209,6 +209,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "l4": {
         "kill_switch_enabled": False,
     },
+    # P0-lite principal model (docs/plans/2026-09-23-memory-os-next-phase-plan.md
+    # S2/S3). ``owner_identities``: per-platform list of ids that resolve to
+    # ``principal.PRINCIPAL_OWNER`` (see ``principal.resolve_principal``).
+    # ``binding_sources``: per-platform provenance of a *bound* list
+    # (installer-written -- "explicit_owner_identity", also kept for an
+    # explicit binding retained from an earlier install; "home_channel_dm_shape";
+    # or the agreeing signal sources joined by "+", e.g.
+    # "allowed_users_single_entry+home_channel"), read by
+    # ``principal.principal_binding_status`` for a future monitor grading.
+    # Unbound discovery outcomes (conflict / unverifiable / allow_all_open /
+    # unconfigured) and the explicit_retained status exist only in the
+    # install report, never here.
+    # A platform absent from ``owner_identities`` is compatibility mode
+    # (``principal.PRINCIPAL_UNKNOWN``, today's pre-P0-lite behaviour).
+    "principal": {
+        "owner_identities": {},
+        "binding_sources": {},
+    },
 }
 
 
@@ -300,6 +318,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "description": "V7 L4 live-shadow and acting safety settings",
             "default": DEFAULT_CONFIG["l4"],
         },
+        {
+            "key": "principal",
+            "description": "P0-lite owner identity bindings per platform, and their provenance",
+            "default": DEFAULT_CONFIG["principal"],
+        },
     ]
 
 
@@ -348,6 +371,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["v3_inner_life"] = _merge_v3_inner_life_config(merged.get("v3_inner_life"))
     merged["session_mirror"] = _merge_session_mirror_config(merged.get("session_mirror"))
     merged["l4"] = _merge_l4_config(merged.get("l4"))
+    merged["principal"] = _merge_principal_config(merged.get("principal"))
     return merged
 
 
@@ -751,6 +775,40 @@ def _merge_l4_config(value: Any) -> dict[str, Any]:
         if key in value:
             merged[key] = value[key]
     merged["kill_switch_enabled"] = bool(merged.get("kill_switch_enabled"))
+    return merged
+
+
+def _merge_principal_config(value: Any) -> dict[str, Any]:
+    default = {"owner_identities": {}, "binding_sources": {}}
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    raw_identities = value.get("owner_identities")
+    identities: dict[str, list[str]] = {}
+    if isinstance(raw_identities, dict):
+        for platform, ids in raw_identities.items():
+            key = str(platform or "").strip().lower()
+            if not key or not isinstance(ids, list):
+                continue
+            seen: list[str] = []
+            for item in ids:
+                text = str(item or "").strip()
+                if text and text not in seen:
+                    seen.append(text)
+            if seen:
+                identities[key] = seen
+    merged["owner_identities"] = identities
+    raw_sources = value.get("binding_sources")
+    sources: dict[str, str] = {}
+    if isinstance(raw_sources, dict):
+        for platform, source in raw_sources.items():
+            key = str(platform or "").strip().lower()
+            if not key:
+                continue
+            source_text = str(source or "").strip()
+            if source_text:
+                sources[key] = source_text
+    merged["binding_sources"] = sources
     return merged
 
 

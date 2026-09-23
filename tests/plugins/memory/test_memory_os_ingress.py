@@ -346,3 +346,47 @@ def test_long_turn_mentioning_later_does_not_park_the_task():
     assert "defer_rejected_turn_too_long" not in classify_ingress(long_instruction).reason_codes
     # the short order still defers
     assert classify_ingress("先放一下，明天再说", current_task_anchor=anchor).intent == "defer_current_task"
+
+
+# ── principal (P0-lite, 2026-09-23): classify_ingress backward compatibility
+
+
+def test_classify_ingress_without_principal_keeps_author_class_behaviour():
+    """Backward compatibility: a caller that never learned a principal
+    (principal="", the default) must see the exact pre-P0-lite behaviour."""
+    anchor = "### Memory-OS Current Task Anchor\n- current task: x"
+    decision = classify_ingress("取消这个任务", current_task_anchor=anchor, author_class=AUTHOR_CLASS_BOT)
+    assert decision.intent == "non_owner_authored"
+    decision = classify_ingress("取消这个任务", current_task_anchor=anchor, author_class=AUTHOR_CLASS_HUMAN)
+    assert decision.intent == "cancellation"
+
+
+def test_classify_ingress_principal_owner_or_unknown_keeps_owner_rules():
+    for principal in ("owner", "unknown"):
+        decision = classify_ingress("取消这个任务", principal=principal)
+        assert decision.intent == "cancellation"
+
+
+@pytest.mark.parametrize("principal", ["peer_agent", "other_human", "system"])
+def test_classify_ingress_non_owner_principal_never_yields_a_foreground_decision(principal):
+    """Counterfactual: without gating on ``principal`` when given, a
+    configured non-owner human (``other_human``) or a mailbox/system turn
+    would still cancel the owner's foreground task merely by author_class
+    being "human" or "unknown"."""
+    anchor = "### Memory-OS Current Task Anchor\n- current task: 渲染教程视频"
+    decision = classify_ingress(
+        "取消这个任务", current_task_anchor=anchor, author_class=AUTHOR_CLASS_HUMAN, principal=principal
+    )
+    assert decision.intent == "non_owner_authored"
+    assert decision.reason_codes == ["non_owner_authored_turn"]
+
+
+def test_classify_ingress_principal_overrides_a_stale_author_class():
+    """``principal`` is authoritative when given, even if ``author_class``
+    (computed separately, e.g. by the pre-principal code path) disagrees --
+    this is what lets a configured non-owner human (author_class="human")
+    still be blocked."""
+    decision = classify_ingress(
+        "取消这个任务", author_class=AUTHOR_CLASS_HUMAN, principal="other_human"
+    )
+    assert decision.intent == "non_owner_authored"

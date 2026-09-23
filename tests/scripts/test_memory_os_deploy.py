@@ -7,10 +7,12 @@ import pytest
 
 from scripts.deploy_memory_os import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    _build_commands,
     _classification_failures,
     _classify_boundary_runtime_probe,
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
+    _masked_owner_identity_args,
     _run_command,
     _run_llm_judge_probe,
     _run_memory_projection_refresh,
@@ -1544,3 +1546,130 @@ def test_unrequested_llm_judge_probe_is_not_a_deploy_warning():
     classified = classify_deploy_report({"llm_judge_probe": probe})
     assert {"code": "llm_judge_probe_not_requested"} in classified["pass"]
     assert all("llm_judge" not in item["code"] for item in classified["warn"])
+
+
+# ── P0-lite owner principal --owner-identity pass-through (2026-09-23) ────
+
+
+_OWNER_ID = "1000000001"
+
+
+def test_masked_owner_identity_args_never_leaks_the_raw_id():
+    masked = _masked_owner_identity_args([f"telegram:{_OWNER_ID}"])
+    assert len(masked) == 1
+    assert _OWNER_ID not in masked[0]
+    assert masked[0].startswith("telegram:")
+    assert "*" in masked[0]
+
+
+def test_masked_owner_identity_args_passthrough_for_malformed_entry():
+    # No colon: nothing to mask, pass through unchanged rather than dropping
+    # (deploy_memory_os.py only masks for display; install's own
+    # parse_owner_identity_args is what validates/drops malformed entries).
+    assert _masked_owner_identity_args(["no-colon"]) == ["no-colon"]
+
+
+def test_build_commands_appends_owner_identity_to_install_dry_run_and_apply():
+    """Counterfactual: without appending to install_base, --owner-identity
+    would never reach the installer at all -- deploy_memory_os.py's own
+    flag would be a silent no-op."""
+    commands = _build_commands(
+        repo_root="/repo",
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        llm_judge_preset="none",
+        owner_identity=[f"telegram:{_OWNER_ID}"],
+        profile="upgrade",
+        source_repo_head="abc123",
+        host="",
+        python_bin="python3",
+        timeout=60,
+        allow_restart=False,
+        restart_command="",
+    )
+    assert "--owner-identity" in commands["install_dry_run"]
+    assert f"telegram:{_OWNER_ID}" in commands["install_dry_run"]
+    assert "--owner-identity" in commands["install_apply"]
+    assert f"telegram:{_OWNER_ID}" in commands["install_apply"]
+
+
+def test_deploy_plan_report_commands_mask_owner_identity_but_local_execution_keeps_real_id(tmp_path):
+    """The report's `commands` (what --output json prints) must never carry
+    the raw id, even though the same id must reach the real installer
+    invocation. Verified over SSH (the shape that actually joins the id into
+    a single shell string) so the masking survives _ssh_wrap's shlex.join."""
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        llm_judge_preset="none",
+        owner_identity=[f"telegram:{_OWNER_ID}"],
+        phase="plan",
+        profile="upgrade",
+        host="hermes-media",
+    )
+    report_text = json.dumps(report)
+    assert _OWNER_ID not in report_text
+    assert "telegram:" in report["commands"]["install_dry_run"][-1]
+    assert "owner_identity_args" in report
+    assert _OWNER_ID not in report["owner_identity_args"][0]
+
+
+def test_deploy_plan_without_owner_identity_leaves_commands_unmasked_and_identical():
+    """No --owner-identity: no behavior change from before this feature."""
+    report = deploy_memory_os(
+        repo_root=Path("/repo"),
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        llm_judge_preset="none",
+        phase="plan",
+        profile="upgrade",
+        host="",
+    )
+    assert report["owner_identity_args"] == []
+    assert "--owner-identity" not in report["commands"]["install_dry_run"]
+
+
+def test_render_deploy_plan_shows_principal_binding_summary():
+    report = {
+        "phase": "apply",
+        "profile": "upgrade",
+        "host": "hermes-media",
+        "restart_requested": False,
+        "owner_identity_args": _masked_owner_identity_args([f"telegram:{_OWNER_ID}"]),
+        "apply": {
+            "status": "applied",
+            "install": {
+                "principal_binding_report": [
+                    {"platform": "telegram", "status": "bound", "binding_source": "home_channel_dm_shape"},
+                    {"platform": "wecom", "status": "unverifiable", "binding_source": ""},
+                ]
+            },
+        },
+    }
+    rendered = render_deploy_plan(report)
+    assert "principal_binding=telegram=bound(home_channel_dm_shape),wecom=unverifiable" in rendered
+    assert _OWNER_ID not in rendered
+
+
+def test_deploy_cli_owner_identity_repeatable(tmp_path, capsys):
+    deploy_main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--hermes-home",
+            "/root/.hermes",
+            "--owner-identity",
+            f"telegram:{_OWNER_ID}",
+            "--owner-identity",
+            "cli:root",
+            "--output",
+            "json",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert len(report["owner_identity_args"]) == 2
+    assert _OWNER_ID not in json.dumps(report)

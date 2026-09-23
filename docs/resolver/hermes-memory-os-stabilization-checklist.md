@@ -5031,6 +5031,9 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
+  other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
+  身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
 - `d3adc7c..HEAD`：LLM 调用面迁移 L1（DN）——五条治理 LLM lane 与 low_clue 判官改走 Hermes 自己的 `call_llm`（显式 provider、
   `model=None`，`-900k` 等私有别名由 Hermes 自行归一，Memory-OS 不再做 provider 特例），失败闭集化、导入失败 fail-closed，旧 wire 只经
   `llm_transport` knob 回滚；主会话修掉"导入作用域先恢复再调用"（真 Hermes 惰性导入必然 ImportError）与"knob 登记却无人读"两处。全量 3966 passed。**未部署**。
@@ -8341,10 +8344,60 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   既有端到端测试）；7 个既有测试文件的 mock 目标改名；
   全量 3966 passed / 13 skipped / 1 failed——失败的是 Windows 上的并发 flake
   `test_completion_append_and_sidecar_are_idempotent_under_concurrency`（两线程并发完成同一信封，无 `fcntl` 进程锁时
-  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。单测对照采样：C0 末端 0/18、
-  L1 末端 2/18（Fisher p≈0.24，不显著），以 Linux CI 为准；若 CI 上也出现，再作为 L1 相关问题深挖。五门全绿。
+  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。与 L1 **相关但未证实因果**：
+  不含 L1 的四轮全量（G0 ×2、C0 ×2）0 失败，含 L1 的两轮全量（L1、P0 末端）共 3 次失败；单测对照 C0 末端 0/18、L1 末端 2/18。
+  可能的机制是 L1 的测试在磁盘上造假 Hermes 根、`_resolve_llm_transport` 每次调用读一次 knob 存储，加重了 Windows 上的 I/O 争用，
+  而竞争本身早已存在于 execution_gate。决定性证据：#86 / #87 的 Linux CI 各两轮全绿，生产也是 Linux。五门全绿。
 - **遗留**：每次调用都会重新导入 `agent.auxiliary_client`（作用域结束即清理，约 0.45s/次，cron lane 可接受）；`llm_route_unexpected`
   （实际 provider ≠ 请求 provider）的 monitor 分级与 `response.model` 展示待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署。部署后验收：fact_judge / SFE / llm_edge_proposer 的 `llm_transport=hermes_call_llm`、
   `llm_transport_model` 为 Hermes 归一后的模型名（不带 `-900k`）、`llm_empty_content` 连续失败停止；若出问题，登记
   `llm_transport=legacy_wire` 覆盖即可回滚，无需重新部署。
+
+---
+
+## DO — 权限主体 P0-lite：单一权威 `resolve_principal` + 主人身份自动绑定（2026-09-23）
+
+- **背景**：DJ 用 `author_class` 挡住了同行 bot 驱动主人前台任务，但 `author_class` 分不清群里的主人与其他人类。规划 §2 的主体模型：
+  判定只在 `principal.py` 一处（不变量 P4），只有 owner 可驱动前台控制 / owner action / 事实写入资格（P1，未配置时为兼容态并可见）。
+- **改动**（Sonnet 子代理实现，主会话审查）：
+  - `resolve_principal(source, author_id, author_class, config, session_id, non_primary_context)` 优先级：① `cron_` 会话或非主上下文 →
+    `system`；② cli / tui / acp → `owner`（owner 裁定）；③ `mailbox` → `peer_agent`（owner 裁定：agent 间直连通道，不做主人认证）；
+    ④ bot 作者 → `peer_agent`；⑤ api / api_server（自报作者）→ `other_human`，永不 owner（不变量 P3）；⑥ 宿主没发作者 → `unknown`；
+    ⑦ 该平台配置了 `principal.owner_identities` → 命中 `owner`、否则 `other_human`；⑧ 未配置 → `unknown`（兼容态）。只有 owner / unknown
+    可驱动前台控制、owner-review 回复、工作记忆与候选。
+  - 接入：`on_turn_start` 计算并缓存；`sync_turn` 有 `turn_author` 时按该轮真实作者重算；`_note_foreground_control_turn`、
+    `_refresh_current_task_anchor_from_query`、`_process_owner_review_reply_ingress`、router / prefetch 同一判定；`classify_ingress`
+    新增可选 `principal`，只传 `author_class` 的调用方逐字节兼容。
+  - 安装 / 部署：`--owner-identity <platform>:<id>`（可重复，永远优先）；否则只读发现宿主已有信号——`<PLATFORM>_HOME_CHANNEL`、单条目
+    `<PLATFORM>_ALLOWED_USERS`、`config.yaml` 的 `platforms.<p>.home_channel`、Memory-OS owner-review 投递目标。≥2 信号一致或 Telegram
+    私聊形态的 home channel 单信号 → 绑定；矛盾 → `conflict` 不绑；其余 → `unverifiable` / `unconfigured` / `allow_all_open`。无认领码
+    （owner 裁定）。报告与 deploy `commands` 只含打码 id。
+  - 生产只读核实（打码输出、临时目录已删）：main Telegram 两信号一致绑定；sannai Telegram home channel 私聊形态单信号绑定；WeCom
+    `unverifiable`。另查两 profile 会话来源：两边均无 api / api_server 会话，规则⑤目前不影响任何真实流量；main 近 30 天 364 个
+    `subagent` 会话走规则①。
+- **主会话整合审查修掉的两处**（均有在原交付稿上失败、修复后通过的反事实）：
+  - **cron 轮被降成 index_only**：`cron_` 会话判为 `system`，新的前台门把 `system` 当非主人作者，`_non_driving_turn_reason` 在检查
+    计划会话之前就返回 `non_owner_author`——每个 cron 轮都变 `index_only` 并跳过操作捕获（生产 main 每月约 770 个 cron 会话），这不是
+    P0 要做的变化。`_turn_may_drive_foreground` 对 `system` 走原有 `author_class` 门，机器会话保留既有处理；唯一有意的收紧是 owner-review
+    回复拒绝 `system`。ingress 侧核实无需改：机器会话规则排在 principal 门之前，provider 路径仍得 `machine_authored`。
+  - **一次性显式绑定在下次部署被丢弃**：安装器每次整段重写 `principal`，每次部署都跑安装器，于是为"无宿主信号的平台"设计的
+    `--owner-identity` 补法会在下一次常规部署后悄悄退回兼容态。`discover_owner_identity_bindings` 现在保留上次安装的显式绑定（报告状态
+    `explicit_retained`），新的显式值照常替换。
+- **独立审查（Sonnet）无阻塞**：安全面逐路径追踪，找不到让非主人得到 owner、或把主人锁在门外的路径（平台名 / id 格式不匹配只会
+  退回兼容态 `unknown`）。据其 SHOULD-FIX 修一处：`install_memory_os.sh` 在执行前用 `printf '%q'` 回显完整 argv，
+  `--owner-identity` 的明文 id 会进部署日志——回显改用打码副本（`<platform>:<masked>`），测试截取脚本自身的这段交给 bash 执行，
+  放回明文即失败。其余三条记为遗留（见下）。
+- **测试**：principal +45 个函数（参数化实跑 51）、ingress +4、turn_author +11（含 cron 与 subagent 两条反事实）、plugin_install +9（含保留与回显打码反事实）、
+  deploy +7；全量（整链末端）4048 passed / 13 skipped / 2 failed——两条失败是已知的 Windows 并发 flake
+  （`test_completion_append_and_sidecar_are_idempotent_under_concurrency`、`test_execution_gate_runner_serializes_parallel_sidecar_updates`，
+  `PermissionError` 于并发 sidecar 替换；整链未触及 execution_gate / runner / jsonl_io / store，G0 与 C0 两轮全量均通过，单独重跑
+  三次中两次全过），CI（Linux）为准；五门全绿。
+- **遗留**：显式绑定没有专门的撤销参数——换号用新的 `--owner-identity` 替换；要彻底移除，删 `config.json` 的
+  `principal.owner_identities.<platform>` 与 `principal.binding_sources.<platform>`（审查 SHOULD-FIX，待定是否加 `--forget-owner-identity`）；
+  发现结果的 `conflict` / `unverifiable` 只在一次性安装报告里，持久配置无法区分"信号冲突"与"没配置"（随 monitor 接线 PR 决定是否持久化）；
+  平台名无白名单，`telegram_group` / `gateway` 等复合前缀被扫成伪平台候选（只会落 `unconfigured` / `allow_all_open`，报告噪音）；`.env` /
+  `config.yaml` 读取失败在发现报告里与"无信号"同貌；规划 Phase 2 的 P1（owner_actions 核心层自检）/ P2（事件 schema 带 author / principal）/
+  P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
+- **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
+  `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。

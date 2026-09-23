@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.memory.memory_os.execution_gate import boundary_true_paths
+from plugins.memory.memory_os.principal import mask_identity
 from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
 
@@ -45,6 +46,7 @@ def deploy_memory_os(
     mode: str,
     hindsight_mode: str,
     llm_judge_preset: str = "none",
+    owner_identity: list[str] | None = None,
     phase: str,
     profile: str,
     host: str = "",
@@ -83,6 +85,7 @@ def deploy_memory_os(
         mode=mode,
         hindsight_mode=hindsight_mode,
         llm_judge_preset=llm_judge_preset,
+        owner_identity=owner_identity or [],
         profile=profile,
         source_repo_head=source_repo_head,
         host=host,
@@ -91,6 +94,28 @@ def deploy_memory_os(
         allow_restart=allow_restart,
         restart_command=restart_command,
     )
+    # ``commands`` (used for actual execution below) carries the real ids
+    # inline in the install_dry_run/install_apply argv. The report/plan must
+    # never print those, so it gets a separately-built, id-masked copy --
+    # rebuilding via the same pure function is simpler and less error-prone
+    # than parsing ids back out of an already-joined SSH command string.
+    commands_for_report = commands
+    if owner_identity:
+        commands_for_report = _build_commands(
+            repo_root=command_repo_root,
+            hermes_home=command_hermes_home,
+            mode=mode,
+            hindsight_mode=hindsight_mode,
+            llm_judge_preset=llm_judge_preset,
+            owner_identity=_masked_owner_identity_args(owner_identity),
+            profile=profile,
+            source_repo_head=source_repo_head,
+            host=host,
+            python_bin=effective_python_bin,
+            timeout=timeout,
+            allow_restart=allow_restart,
+            restart_command=restart_command,
+        )
     report: dict[str, Any] = {
         "schema_version": "memory-os.deploy.v0",
         "phase": phase,
@@ -101,8 +126,12 @@ def deploy_memory_os(
         "mode": mode,
         "hindsight_mode": hindsight_mode,
         "llm_judge_preset": llm_judge_preset,
+        # Ids masked -- see install's own principal_binding_report (surfaced
+        # via dry_run/apply -> install json) for the actual bound/unbound
+        # status per platform.
+        "owner_identity_args": _masked_owner_identity_args(owner_identity or []),
         "restart_requested": bool(allow_restart and restart_command),
-        "commands": commands,
+        "commands": commands_for_report,
         "preflight": {"status": "not_run"},
         "dry_run": {"status": "not_run"},
         "apply": {"status": "not_run"},
@@ -241,6 +270,19 @@ def deploy_memory_os(
     return report
 
 
+def _masked_owner_identity_args(values: list[str]) -> list[str]:
+    """Mask ids in ``--owner-identity`` args before they enter any printed report."""
+    masked: list[str] = []
+    for raw in values or []:
+        text = str(raw or "")
+        if ":" not in text:
+            masked.append(text)
+            continue
+        platform, _, identity = text.partition(":")
+        masked.append(f"{platform}:{mask_identity(identity)}")
+    return masked
+
+
 def _build_commands(
     *,
     repo_root: str,
@@ -248,6 +290,7 @@ def _build_commands(
     mode: str,
     hindsight_mode: str,
     llm_judge_preset: str,
+    owner_identity: list[str],
     profile: str,
     source_repo_head: str,
     host: str,
@@ -270,6 +313,8 @@ def _build_commands(
         llm_judge_preset,
         "--skip-verify",
     ]
+    for identity in owner_identity or []:
+        install_base += ["--owner-identity", identity]
     compat = [
         python_bin,
         f"{repo}/scripts/memory_os_upgrade_compat_check.py",
@@ -1000,11 +1045,34 @@ def _section_status(report: dict[str, Any], name: str) -> str:
     return str(section.get("status") or "not_run")
 
 
+def _principal_binding_summary(report: dict[str, Any]) -> str:
+    """One line per platform from install's principal_binding_report (ids already masked)."""
+    for name in ("apply", "dry_run"):
+        section = report.get(name) if isinstance(report.get(name), dict) else {}
+        install_data = section.get("install") if isinstance(section.get("install"), dict) else {}
+        entries = install_data.get("principal_binding_report")
+        if isinstance(entries, list) and entries:
+            parts = [
+                f"{entry.get('platform')}={entry.get('status')}"
+                + (f"({entry.get('binding_source')})" if entry.get("binding_source") else "")
+                for entry in entries
+                if isinstance(entry, dict)
+            ]
+            return ",".join(parts)
+    return ""
+
+
 def render_deploy_plan(report: dict[str, Any]) -> str:
     lines = [
         f"Memory-OS deploy plan: phase={report['phase']} profile={report['profile']} host={report['host']}",
         f"restart_requested={str(report['restart_requested']).lower()}",
     ]
+    owner_identity_args = report.get("owner_identity_args") or []
+    if owner_identity_args:
+        lines.append(f"owner_identity_args={','.join(owner_identity_args)}")
+    binding_summary = _principal_binding_summary(report)
+    if binding_summary:
+        lines.append(f"principal_binding={binding_summary}")
     classification = classify_deploy_report(report)
     if any(classification.values()):
         lines.append(
@@ -1074,6 +1142,18 @@ def main(argv: list[str] | None = None) -> int:
     # Off by default: the judge is an opt-in probe (prefetch never calls it),
     # and a judge that fails on every call only produces WARN noise.
     parser.add_argument("--llm-judge-preset", choices=["active", "none", "report-only", "bounded-vote"], default="none")
+    parser.add_argument(
+        "--owner-identity",
+        action="append",
+        default=[],
+        metavar="PLATFORM:ID",
+        help=(
+            "Explicit owner identity binding (repeatable), e.g. telegram:123456789. "
+            "Passed through to install_memory_os.sh --owner-identity; always wins over "
+            "the installer's own .env/config.yaml auto-discovery. See the plan/report's "
+            "principal_binding summary for what was bound (ids masked)."
+        ),
+    )
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")
     parser.add_argument("--timeout", type=int, default=DEFAULT_COMMAND_TIMEOUT_SECONDS)
@@ -1096,6 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             hindsight_mode=args.hindsight,
             llm_judge_preset=args.llm_judge_preset,
+            owner_identity=args.owner_identity,
             phase=args.phase,
             profile=args.profile,
             timeout=args.timeout,

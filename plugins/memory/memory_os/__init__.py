@@ -44,6 +44,12 @@ from .owner_actions import (
     owner_review_surface_report,
     parse_owner_review_reply,
 )
+from .principal import (
+    PRINCIPAL_OWNER,
+    PRINCIPAL_SYSTEM,
+    PRINCIPAL_UNKNOWN,
+    resolve_principal,
+)
 from .jsonl_io import compact_jsonl_tail
 from .prefetch import build_prefetch, set_fast_path_keywords
 from .recall_facade import RetrieverFacade
@@ -98,6 +104,12 @@ class MemoryOSProvider(MemoryProvider):
         # state (anchor recovery, writes, session-end tombstones) once it has
         # had a turn from a foreground-control author.
         self._turn_author_class = AUTHOR_CLASS_UNKNOWN
+        # Single-authority principal for the current turn (principal.py,
+        # P0-lite 2026-09-23), recomputed alongside ``_turn_author_class`` in
+        # on_turn_start. Defaults to PRINCIPAL_UNKNOWN -- the same
+        # compatibility state as AUTHOR_CLASS_UNKNOWN -- so a host that never
+        # calls on_turn_start behaves exactly as before this model existed.
+        self._turn_principal = PRINCIPAL_UNKNOWN
         self._owner_turn_seen = False
         self._anchor_recovery_pending = False
         self._non_primary_context = False
@@ -166,6 +178,7 @@ class MemoryOSProvider(MemoryProvider):
         # and discarded.
         self._current_task_anchor = ""
         self._turn_author_class = AUTHOR_CLASS_UNKNOWN
+        self._turn_principal = PRINCIPAL_UNKNOWN
         self._owner_turn_seen = False
         # Hermes marks non-primary agents (subagent / cron / flush) and asks
         # providers to skip writes for them.
@@ -189,7 +202,7 @@ class MemoryOSProvider(MemoryProvider):
 
     def _note_foreground_control_turn(self) -> None:
         """Latch the first foreground-control turn and run the deferred recovery once."""
-        if self._is_machine_session() or self._turn_author_class not in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+        if self._is_machine_session() or self._turn_principal not in (PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN):
             return
         self._owner_turn_seen = True
         if not self._anchor_recovery_pending:
@@ -535,6 +548,7 @@ class MemoryOSProvider(MemoryProvider):
             substrate_recall_report=substrate_recall_report,
             recall_facade=facade,
             author_class=self._turn_author_class,
+            principal=self._turn_principal,
         )
 
     def _substrate_recall_report(self, query: str) -> dict[str, Any] | None:
@@ -605,18 +619,31 @@ class MemoryOSProvider(MemoryProvider):
                 author_is_bot=turn_author.get("is_bot"),
             )
             author_source = "turn_author"
+            # Recomputed fresh from this exact turn's author, same reason the
+            # author_class above is: a cached self._turn_principal can belong
+            # to the next turn on this async path.
+            principal = resolve_principal(
+                source=self.platform,
+                author_id=turn_author.get("id"),
+                author_class=author_class,
+                config=self._config,
+                session_id=session_id or self.session_id,
+                non_primary_context=self._non_primary_context,
+            ).principal
         else:
             author_class = self._turn_author_class
             # Only this path can race the next turn's on_turn_start; recorded
             # so a host that stops sending turn_author is visible per event.
             author_source = "turn_start_fallback"
+            principal = self._turn_principal
         safe_ref: dict[str, Any] = {
             "session_id": session_id or self.session_id,
             "author_class": author_class,
             "author_source": author_source,
+            "principal": principal,
         }
         non_driving_reason = self._non_driving_turn_reason(
-            user_content, author_class=author_class, session_id=session_id or self.session_id
+            user_content, author_class=author_class, principal=principal, session_id=session_id or self.session_id
         )
         if non_driving_reason:
             # Indexed, but neither lingering working memory nor a candidate.
@@ -635,18 +662,26 @@ class MemoryOSProvider(MemoryProvider):
         )
         self._enqueue(event, drop_action="sync_turn_dropped")
         # ── C1: capture operations from this turn's messages ──────────────
-        if author_class in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+        if _turn_may_drive_foreground(author_class=author_class, principal=principal):
             self._capture_turn_operations(messages, session_id=session_id)
 
-    def _non_driving_turn_reason(self, user_content: str, *, author_class: str, session_id: str) -> str:
+    def _non_driving_turn_reason(
+        self, user_content: str, *, author_class: str, principal: str = "", session_id: str
+    ) -> str:
         """Why a turn must not drive working memory or candidates ("" = it may).
 
         Another agent's turn is not the owner's experience; a Hermes frame is
         not anyone's; and a cancellation/deferral exchange ("停下吧" /
         "收到，已停止") re-injected by term overlap tells the next turn to stop
         again. Scheduled sessions keep their existing cron-sourced handling.
+
+        ``principal`` (P0-lite) is the single authority when given: a
+        peer_agent / other_human / system principal is non-driving, exactly
+        as a bot author was before this model existed (``author_class``
+        alone remains the fallback for any caller that never resolved a
+        principal).
         """
-        if author_class == AUTHOR_CLASS_BOT:
+        if not _turn_may_drive_foreground(author_class=author_class, principal=principal):
             return "non_owner_author"
         if is_scheduled_session_id(session_id):
             return ""
@@ -657,6 +692,7 @@ class MemoryOSProvider(MemoryProvider):
             current_task_anchor=self._current_task_anchor,
             session_id=session_id,
             author_class=author_class,
+            principal=principal,
         ).intent
         if intent in {"cancellation", "defer_current_task"}:
             return "foreground_control_exchange"
@@ -1086,6 +1122,14 @@ class MemoryOSProvider(MemoryProvider):
             author_name=kwargs.get("author_name"),
             author_is_bot=kwargs.get("author_is_bot"),
         )
+        self._turn_principal = resolve_principal(
+            source=self.platform,
+            author_id=kwargs.get("author_id"),
+            author_class=self._turn_author_class,
+            config=self._config,
+            session_id=self.session_id,
+            non_primary_context=self._non_primary_context,
+        ).principal
         self._note_foreground_control_turn()
 
     def _process_owner_review_reply_ingress(
@@ -1103,14 +1147,23 @@ class MemoryOSProvider(MemoryProvider):
             owner_review = {}
         if owner_review.get("reply_ingress_enabled", True) is False:
             return _owner_review_reply_not_processed("reply_ingress_disabled")
-        if self._turn_author_class == AUTHOR_CLASS_BOT:
-            # Owner actions are an owner-trust boundary; another agent in a
-            # shared chat quoting a digest token is not the owner.
+        if self._turn_principal not in (PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN):
+            # Owner actions are an owner-trust boundary; another agent, a
+            # configured non-owner human, or a machine session is not the
+            # owner. ``PRINCIPAL_UNKNOWN`` keeps the pre-P0-lite
+            # compatibility state (platform not configured) reachable, same
+            # as everywhere else that gates on principal.
             result = _owner_review_reply_not_processed("non_owner_author")
             self._audit(
                 "owner_review_reply_ingress",
                 "warning",
-                {"turn_number": turn_number, "phase": phase, "status": result["status"], "reason": result["reason"]},
+                {
+                    "turn_number": turn_number,
+                    "phase": phase,
+                    "status": result["status"],
+                    "reason": result["reason"],
+                    "principal": self._turn_principal,
+                },
             )
             return result
         owner_id = str(owner_review.get("owner_id") or "owner")
@@ -1508,6 +1561,7 @@ class MemoryOSProvider(MemoryProvider):
             current_task_anchor=self._current_task_anchor,
             session_id=session_id or self.session_id,
             author_class=self._turn_author_class,
+            principal=self._turn_principal,
         )
         rejected_long = [code for code in decision.reason_codes if code.endswith("_rejected_turn_too_long")]
         if decision.intent == "non_owner_authored" or rejected_long:
@@ -1523,6 +1577,7 @@ class MemoryOSProvider(MemoryProvider):
                         else ",".join(rejected_long)
                     ),
                     "author_class": self._turn_author_class,
+                    "principal": self._turn_principal,
                     "session_id": session_id or self.session_id,
                 },
             )
@@ -1746,6 +1801,9 @@ class MemoryOSProvider(MemoryProvider):
             # Closed set (ingress.AUTHOR_CLASS_*). "unknown" is kept apart
             # from "human" so a host that stops sending the author is visible.
             "author_class": self._turn_author_class,
+            # Closed set (principal.PRINCIPAL_*), P0-lite 2026-09-23: the
+            # verified-owner-or-not decision author_class alone cannot make.
+            "principal": self._turn_principal,
         }
         if ingress_rule:
             # Which cancellation rule read the owner turn as a cancellation —
@@ -2119,6 +2177,26 @@ def _owner_review_reply_not_processed(reason: str, *, status: str = "ignored") -
             "actual_unapproved_crystallized_approval": False,
         },
     }
+
+
+def _turn_may_drive_foreground(*, author_class: str, principal: str = "") -> bool:
+    """True when this turn's author may drive foreground control / working memory / candidates.
+
+    ``principal`` (P0-lite) is authoritative when the caller resolved one:
+    only ``PRINCIPAL_OWNER``/``PRINCIPAL_UNKNOWN`` may drive. An empty
+    ``principal`` falls back to the pre-P0-lite ``author_class`` gate
+    (``FOREGROUND_CONTROL_AUTHOR_CLASSES``), which is what every caller in
+    this module resolves ``principal`` to be able to skip.
+
+    ``PRINCIPAL_SYSTEM`` also takes the ``author_class`` gate: a machine
+    session is identified by its session/context, and its turns already have
+    their own handling (``_non_driving_turn_reason``'s scheduled-session
+    branch, ``_is_machine_session``). Treating it as a non-owner author here
+    would silently turn every cron turn index-only.
+    """
+    if principal and principal != PRINCIPAL_SYSTEM:
+        return principal in (PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN)
+    return author_class in FOREGROUND_CONTROL_AUTHOR_CLASSES
 
 
 def _turn_summary(user_content: str, assistant_content: str) -> str:
