@@ -5031,7 +5031,7 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
-- `33d674b..HEAD`：P2+P3（DU）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
+- `33d674b..HEAD`：P2+P3（DW）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
   `session_mirror` 加身份门（先于 `[:limit]` 切片，防饥饿）+ 持久排除非主人会话（防永远重扫）；monitor 新增 `event_principal_coverage`
   自包含区块（空样本报 healthy_no_sample、legacy 恒 INFO、缺主体的已标记事件 WARN/生产 FAIL）。全量 4179 passed。**未部署**。
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
@@ -8596,7 +8596,7 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 
 ---
 
-## DU — P2 + P3：事件带主体 + session_mirror 主体过滤（2026-09-23）
+## DW — P2 + P3：事件带主体 + session_mirror 主体过滤（2026-09-23）
 
 - **背景**：规划 Phase 2 P2/P3。今天只有 `conversation_turn` 通过 `sync_turn` 在 `safe_ref.principal` 记录主体；`EventEnvelope` 本身没有
   一等 `principal` 字段，其余 8 个生产者（`cron_mirror` / `state_source_mirror` / `shadow_journal` / `external_intake` /
