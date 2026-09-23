@@ -5031,6 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：monitor 接线 part 1（DP）——C3 右脑退役源的 55C/55G 豁免（显式 INFO，绝不靠历史残留过关）、P0 主体普查
+  （未配置平台近 30 天 ≥2 个不同用户 → 生产 FAIL / clean-host WARN，只出计数不出 id）、G0 新颖度 INFO（刻意不分级）。全量 4059 passed。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8401,3 +8403,28 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DP — monitor 接线 part 1：C3 退役源豁免、P0 主体普查分级、G0 新颖度（2026-09-23）
+
+- **背景**：规划本波把 monitor 归主会话独占（四个 Sonnet 并行，只允许它们登记 `ERROR_RECORD_EMITTING_COMPONENTS`）。part 1 接三项已落地
+  改动的 monitor 面；SFE 输入源新鲜度、C2 压缩新鲜度、J1 / L1 的 backend / provider / model 展示、G1 的 `superseded_by_newer` 留待
+  各自交付后的 part 2（fact_judge 的 `verdicts.jsonl` 不含 provider / model，诊断只在 lane 运行报告里，而 J1 / SFE 正在改这两处）。
+- **C3**：55C 的 `wandering_mind_state`、55G 的 `wandering_mind_cadence` 是右脑源；右脑 archive lifecycle 为 `retirement_pending` /
+  `retired` 时这两项要求豁免，报 INFO `memory_projection_retired_source_exempt`（列出源与 lifecycle）——既不 FAIL，也不因历史残留字段而
+  算作通过；未退役时照旧缺字段 FAIL。`RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES` 由测试钉死必须是真实的 55C/55G 源。退役判定抽成
+  `_legacy_right_brain_retired(snapshot)`，`classify_snapshot` 与 `_classify_left_brain_signal_weaving`（新增 `info` 参数）共用。
+- **P0 主体普查**：嵌入式采集器 `principal_binding_summary` 只读打开 `state.db`（`mode=ro`），按 `started_at`（epoch 数值）取近 30 天，
+  按平台汇总会话数 / 不同用户数 / 无 user 会话数 / 已配置平台的非主人会话数，配置与绑定状态走 `config.load_config` +
+  `principal.principal_binding_status`——只出计数，任何 id 不出主机。分级：机器源（cron / subagent）、本地源、mailbox、api 按规则排除；
+  已绑定 → INFO；未绑定且 ≥2 个不同用户（没有主人名单就无法判断谁是主人，但两个不同用户不可能都是）→ WARN
+  `principal_platform_unbound_with_non_owner_sessions`，clean-host 分类表登记为 `fail_if_production`，生产即 FAIL，提示写明两种补法；
+  其余 INFO；采集失败 / 无 `state.db` → INFO no-sample，绝不 PASS。`principal_binding_status` 的 docstring 从"未接线"改为指向采集器。
+- **G0 新颖度**：`graph_layer_novelty_summary` 调 `prefetch.graph_layer_shadow_novelty_summary`（有界尾读），`error_records` 只出计数；
+  分级刻意只出 INFO（新颖度是词面不相交的代理量，单独优化会奖励无关邻居），作 G1 / G4 的基线。
+- **反事实**（破坏即失败、恢复即通过）：去掉 55C 豁免；把"≥2 用户"门槛放宽；把分类表的 `fail_if_production` 改掉（生产不再升级 FAIL）。
+- **测试**：+9（C3 豁免与词表守卫 2、P0 采集器与分级 5、新颖度 2）；monitor + principal + lane_contracts 493 passed；全量 4059 passed / 13 skipped / 1 failed
+  （已知 Windows 并发 flake `test_completion_append_and_sidecar_are_idempotent_under_concurrency`，见 DN）；五门全绿。
+- **部署**：随规划全部落地后统一部署。部署后预期：main / sannai 的 Telegram 为 `principal_platform_bound`，无 `_unbound_with_non_owner_sessions`；
+  若部署早于 principal 配置写入，Telegram 会报该 FAIL——那正是它要抓的状态。

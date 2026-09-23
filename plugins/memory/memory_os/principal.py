@@ -191,14 +191,15 @@ def resolve_principal(
 def principal_binding_status(
     config: dict[str, Any] | None, *, platforms: "list[str] | None" = None
 ) -> dict[str, dict[str, Any]]:
-    """Per-platform owner-binding state, for a future monitor grading (not wired here).
+    """Per-platform owner-binding state, read by the monitor's principal census
+    (``scripts/memory_os_3_200_monitor.py::principal_binding_summary``).
 
     Returns ``{platform: {"bound": bool, "binding_source": str,
     "identity_count": int}}`` for every platform mentioned in
     ``principal.owner_identities`` or ``principal.binding_sources``, plus any
     platform explicitly requested via ``platforms`` (reported unbound if
-    absent from config). A future monitor lane can flag "platform X carried
-    traffic but ``bound`` is False" without re-deriving this table.
+    absent from config), so the monitor can flag "platform X carried traffic
+    but ``bound`` is False" without re-deriving this table.
     """
     section = _principal_section(config)
     owner_identities = section.get("owner_identities")
