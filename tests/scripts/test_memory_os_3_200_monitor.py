@@ -6466,6 +6466,276 @@ def _healthy_cognitive_loop_step_evidence() -> dict:
     }
 
 
+def test_retired_right_brain_sources_are_exempt_from_55c_55g_never_passed_on_residue():
+    """C3: once the legacy right brain is retired, its projection sources can
+    never be produced again. Requiring them keeps production red forever;
+    passing them on leftover historical records would be green bought by
+    residue. The requirement is exempt and says so as an INFO."""
+    snapshot = _healthy_snapshot()
+    fields = snapshot["memory_projection"]["source_payload_fields"]
+    fields.pop("wandering_mind_state", None)
+    fields.pop("wandering_mind_cadence", None)
+
+    live = classify_snapshot(snapshot)
+    live_fail = {item["code"] for item in live["fail"]}
+    assert "memory_projection_55c_payload_field_coverage_missing" in live_fail
+    assert "memory_projection_55g_payload_field_coverage_missing" in live_fail
+
+    snapshot["legacy_right_brain_archive"] = {"lifecycle": "retired"}
+    retired = classify_snapshot(snapshot)
+    graded = {item["code"] for item in retired["fail"] + retired["warn"]}
+    assert "memory_projection_55c_payload_field_coverage_missing" not in graded
+    assert "memory_projection_55g_payload_field_coverage_missing" not in graded
+    exempt = [item for item in retired["info"] if item["code"] == "memory_projection_retired_source_exempt"]
+    assert exempt and exempt[0]["value"]["sources"] == ["wandering_mind_cadence", "wandering_mind_state"]
+
+    # Residue present (old records still carry the fields): still exempt, not a pass.
+    residue = _healthy_snapshot()
+    residue["legacy_right_brain_archive"] = {"lifecycle": "retirement_pending"}
+    with_residue = classify_snapshot(residue)
+    assert any(item["code"] == "memory_projection_retired_source_exempt" for item in with_residue["info"])
+
+
+def test_disabled_right_brain_is_not_retired_and_keeps_the_55c_55g_requirement():
+    """sannai's right brain is disabled, not retired (plan: disabled != retired):
+    only a recorded retirement exempts the sources."""
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"].pop("wandering_mind_state", None)
+    snapshot["legacy_right_brain_archive"] = {"lifecycle": "disabled"}
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55c_payload_field_coverage_missing" for item in graded["fail"])
+    assert not any(item["code"] == "memory_projection_retired_source_exempt" for item in graded["info"])
+
+
+def test_retired_right_brain_projection_sources_exist_in_the_55c_55g_tables():
+    """The exemption set is vocabulary: a name that is not a real 55C/55G
+    requirement exempts nothing, silently."""
+    required = set(monitor.MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS) | set(
+        monitor.MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS
+    )
+    assert monitor.RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES <= required
+
+
+def _write_state_db(path, rows):
+    """Minimal Hermes state.db `sessions` table: the three columns the census
+    reads (source, user_id, started_at as epoch REAL, as Hermes writes it)."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (id TEXT, source TEXT, user_id TEXT, started_at REAL)")
+    conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_principal_binding_summary_counts_platform_users_from_state_db_without_ids(tmp_path):
+    """The embedded census reads the real state.db shape (epoch REAL
+    started_at, compared numerically -- an ISO string comparison returns
+    nothing) and reports counts only: no raw user id leaves the host."""
+    import time
+
+    from plugins.memory.memory_os.config import save_config
+
+    owner_id, other_id, peer_id = "1000000001", "4000000004", "2000000002"
+    save_config({"principal": {"owner_identities": {"telegram": [owner_id]}}}, tmp_path)
+    now = time.time()
+    old = now - 90 * 86400
+    _write_state_db(tmp_path / "state.db", [
+        ("s1", "telegram", owner_id, now),
+        ("s2", "telegram", owner_id, now),
+        ("s3", "telegram", other_id, now),
+        ("s4", "wecom", owner_id, now),
+        ("s5", "wecom", peer_id, now),
+        ("s6", "weixin", owner_id, now),
+        ("s7", "cron", "", now),
+        ("s8", "telegram", other_id, old),  # outside the 30-day window
+    ])
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["principal_binding_summary"]()
+
+    assert summary["status"] == "ok"
+    platforms = summary["platforms"]
+    assert platforms["telegram"] == {
+        "session_count": 3, "distinct_user_count": 2, "unattributed_session_count": 0,
+        "non_owner_session_count": 1, "configured": True, "binding_source": "",
+    }
+    assert platforms["wecom"]["configured"] is False
+    assert platforms["wecom"]["distinct_user_count"] == 2
+    assert platforms["cron"]["unattributed_session_count"] == 1
+    dumped = json.dumps(summary)
+    assert owner_id not in dumped and other_id not in dumped and peer_id not in dumped
+
+
+def test_principal_binding_summary_names_a_state_db_without_user_id(tmp_path):
+    """A Hermes version whose sessions table has no user_id must say so by
+    name -- not surface as a bare OperationalError that looks like a lock."""
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL)")
+    conn.commit()
+    conn.close()
+
+    summary = _exec_embedded_probe_prefix(str(tmp_path))["principal_binding_summary"]()
+
+    assert summary["status"] == "state_db_without_user_id"
+    assert summary["missing_columns"] == ["user_id"]
+
+
+def test_principal_binding_summary_reports_no_state_db(tmp_path):
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    assert namespace["principal_binding_summary"]()["status"] == "no_state_db"
+
+
+def _principal_snapshot(platforms, *, profile="live"):
+    return {
+        "monitor_profile": profile,
+        "principal_binding": {"status": "ok", "window_days": 30, "platforms": platforms},
+    }
+
+
+def _platform(sessions, users, *, configured=False, non_owner=0, unattributed=0):
+    return {
+        "session_count": sessions, "distinct_user_count": users, "unattributed_session_count": unattributed,
+        "non_owner_session_count": non_owner, "configured": configured, "binding_source": "",
+    }
+
+
+def test_unbound_platform_with_two_users_fails_in_production_and_warns_on_clean_host():
+    """Counterfactual for the P0-lite gate: two distinct users on a platform
+    with no owner identity means a non-owner is driving the owner's task."""
+    platforms = {"wecom": _platform(5, 2)}
+
+    live = classify_snapshot(_principal_snapshot(platforms))
+    assert any(
+        item["code"] == "principal_platform_unbound_with_non_owner_sessions_in_production" for item in live["fail"]
+    )
+
+    clean = classify_snapshot(_principal_snapshot(platforms, profile="clean-host"))
+    assert any(item["code"] == "principal_platform_unbound_with_non_owner_sessions" for item in clean["warn"])
+    unclassified = {item.get("warn_code") for item in clean["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "principal_platform_unbound_with_non_owner_sessions" not in unclassified
+
+
+def test_bound_single_user_and_ruled_sources_are_info_only():
+    platforms = {
+        "telegram": _platform(9, 3, configured=True, non_owner=4),
+        "weixin": _platform(1, 1),
+        "cron": _platform(700, 0, unattributed=700),
+        "subagent": _platform(300, 5),
+        "cli": _platform(2, 2),
+        "mailbox": _platform(4, 2),
+        "api_server": _platform(3, 3),
+    }
+
+    graded = classify_snapshot(_principal_snapshot(platforms))
+
+    codes = {item["code"] for item in graded["fail"] + graded["warn"]}
+    assert not any(code.startswith("principal_platform") for code in codes)
+    info = {item["code"]: item["value"] for item in graded["info"] if item["code"].startswith("principal_platform")}
+    assert info["principal_platform_bound"]["platform"] == "telegram"
+    assert info["principal_platform_bound"]["non_owner_session_count"] == 4
+    assert info["principal_platform_unbound"]["platform"] == "weixin"
+
+
+def test_principal_binding_census_failure_is_no_sample_never_pass():
+    graded = classify_snapshot({
+        "monitor_profile": "live",
+        "principal_binding": {"status": "collection_error", "collection_error": "OperationalError", "platforms": {}},
+    })
+    assert any(item["code"] == "principal_binding_no_sample" for item in graded["info"])
+    assert not any(item["code"].startswith("principal_platform") for item in graded["pass"])
+
+
+def test_graph_layer_novelty_collector_reports_no_sample_without_a_ledger(tmp_path):
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["graph_layer_novelty_summary"]()
+    assert summary["status"] == "no_shadow_ledger"
+    assert summary["mean_novelty"] is None
+    assert "error_records" not in summary and summary["error_record_count"] == 0
+
+
+def test_graph_layer_novelty_is_info_only_never_graded():
+    """Novelty is a baseline for G1/G4, not a gate: optimising a
+    lexical-disjointness proxy alone rewards irrelevant neighbours."""
+    for status, code in (("ok", "graph_layer_novelty"), ("healthy_no_sample", "graph_layer_novelty_no_sample")):
+        graded = classify_snapshot({
+            "monitor_profile": "live",
+            "graph_layer_novelty": {"status": status, "mean_novelty": 0.0, "rows_scanned": 3},
+        })
+        assert any(item["code"] == code for item in graded["info"])
+        for bucket in ("pass", "warn", "fail"):
+            assert not any(item["code"].startswith("graph_layer_novelty") for item in graded[bucket])
+def _retention_snapshot(**retention_overrides):
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection_retention"].update(retention_overrides)
+    return snapshot
+
+
+def test_retention_compaction_that_ran_once_long_ago_is_stale_not_visible():
+    """Counterfactual for C2: the old predicate passed on "compaction_count
+    > 0", so one manual run months ago kept it green forever while the
+    ledger grew without bound. A pre-C2 record carries no status/reason."""
+    snapshot = _retention_snapshot(
+        latest_completed_at="2026-05-01T00:00:00Z", latest_status="", latest_reason=""
+    )
+    snapshot["memory_projection"]["projection_count"] = 400
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_stale" for item in graded["warn"])
+    assert not any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
+def test_retention_compaction_old_but_ledger_unchanged_is_idle_not_stale():
+    snapshot = _retention_snapshot(latest_completed_at="2026-05-01T00:00:00Z")
+    snapshot["memory_projection"]["projection_count"] = snapshot["memory_projection_retention"]["latest_output_count"]
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
+def test_retention_compaction_refused_run_fails_in_production_whatever_its_age():
+    snapshot = _retention_snapshot(latest_status="refused", latest_reason="malformed_lines_present",
+                                   latest_malformed_line_count=2)
+
+    live = classify_snapshot(snapshot)
+    assert any(item["code"] == "memory_projection_retention_compaction_failed_in_production" for item in live["fail"])
+
+    snapshot["monitor_profile"] = "clean-host"
+    clean = classify_snapshot(snapshot)
+    unclassified = {item.get("warn_code") for item in clean["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "memory_projection_retention_compaction_failed" not in unclassified
+
+
+def test_retention_status_from_the_real_compactor_grades_visible(tmp_path):
+    """Field names come from the real producer: run the compactor, read its
+    status, grade it -- a renamed field would drop into the stale branch."""
+    from plugins.memory.memory_os.memory_projection import (
+        compact_memory_projection_records,
+        memory_projection_retention_status,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    compact_memory_projection_records(roots, apply=True)
+    retention = memory_projection_retention_status(roots)
+    assert retention["latest_status"] == "ok" and retention["latest_completed_at"]
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection_retention"] = retention
+    snapshot["memory_projection"]["projection_count"] = 5
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
 def _healthy_snapshot() -> dict:
     return {
         "hostname": "debian",
@@ -6862,6 +7132,10 @@ def _healthy_memory_projection_retention() -> dict:
         "compaction_count": 1,
         "latest_compaction_id": "mproj_compact_test",
         "latest_dry_run": False,
+        "latest_completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "latest_status": "ok",
+        "latest_reason": "compacted",
+        "latest_malformed_line_count": 0,
         "latest_input_count": 30,
         "latest_output_count": 14,
         "latest_archived_count": 16,
