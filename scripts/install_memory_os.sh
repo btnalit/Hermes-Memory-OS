@@ -35,6 +35,9 @@ DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
 LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-}"
 HINDSIGHT_MODE="${HINDSIGHT_MODE:-auto}"
+# Repeatable --owner-identity PLATFORM:ID; declared as an array (not unset)
+# so it is safe to expand under `set -u` even when never populated.
+OWNER_IDENTITIES=()
 
 INSTALL_SHELL=""
 ENABLE_PROVIDER=""
@@ -81,6 +84,12 @@ Options:
                                 mode and preserves an already-active adoption;
                                 active enables retain/recall/reflect for a
                                 controlled live cutover.
+  --owner-identity PLATFORM:ID  Explicit owner identity binding (repeatable),
+                                e.g. telegram:123456789. Always wins over
+                                auto-discovery from this host's own
+                                .env/config.yaml. See the installer's JSON
+                                report's principal_binding_report for what was
+                                bound or why not (never prints raw ids).
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
                                 Cognitive-loop integration harness interval. Default: 6h.
@@ -185,6 +194,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --hindsight)
       HINDSIGHT_MODE="${2:?missing --hindsight value}"
+      shift 2
+      ;;
+    --owner-identity)
+      OWNER_IDENTITIES+=("${2:?missing --owner-identity value}")
       shift 2
       ;;
     --runtime-interval)
@@ -691,6 +704,11 @@ run_installer() {
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
   args+=("--hindsight" "${HINDSIGHT_MODE}")
+  if [[ ${#OWNER_IDENTITIES[@]} -gt 0 ]]; then
+    for identity in "${OWNER_IDENTITIES[@]}"; do
+      args+=("--owner-identity" "${identity}")
+    done
+  fi
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
   # NOTE: --skip-verify is deliberately NOT propagated. It silences this
   # wrapper's own probes only; the Python installer still runs its hot-path

@@ -385,6 +385,7 @@ def install_plugin(
     expression_feedback_schedule: str = "0 5 * * 0",
     memory_sources_feedback_schedule: str = "30 10 * * *",
     hermes_bin: str = "hermes",
+    owner_identity: list[str] | None = None,
     deep_reflection_preset: str | None = None,
     memory_sources_preset: str | None = None,
     llm_judge_preset: str | None = None,
@@ -469,6 +470,25 @@ def install_plugin(
     )
     config_defaults_report = _ensure_config_defaults(
         hermes_home,
+        dry_run=dry_run,
+    )
+    # P0-lite owner principal binding (docs/plans/2026-09-23-memory-os-next-phase-plan.md
+    # S2/S3): runs on every install, not gated behind a preset -- the ruling
+    # requires an unconfigured platform's compatibility state to stay
+    # *visible*, and that only happens if this always runs. Never prints raw
+    # ids; see _write_principal_config / principal.discover_owner_identity_bindings.
+    #
+    # Deliberately AFTER _ensure_config_defaults: that guard's own
+    # created_skeleton detection is `not config_path.exists()`, and this
+    # writer (unlike the preset-gated _write_*_config calls above) always
+    # writes config.json, even on a bare install with no preset. Running
+    # before _ensure_config_defaults would make it observe the file as
+    # already present and skip writing memory_sources.mode -- a real
+    # regression caught by
+    # test_installer_does_not_write_memory_sources_config_by_default.
+    principal_config_path, _principal_config, principal_binding_report = _write_principal_config(
+        hermes_home,
+        owner_identity_args=owner_identity or [],
         dry_run=dry_run,
     )
     cli_wrapper_path = _write_cli_wrapper(hermes_home, dry_run=dry_run)
@@ -771,6 +791,13 @@ def install_plugin(
         "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
         "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
         "low_clue_recall_config": low_clue_recall_config or {},
+        # principal_config (raw owner ids) is written to config.json but
+        # deliberately never echoed into this JSON report; only the masked
+        # principal_binding_report is. Do not add a "principal_config" key
+        # here -- this report is printed to stdout/logs.
+        "principal_config_written": bool(principal_config_path) and not dry_run,
+        "principal_config_path": str(principal_config_path) if principal_config_path else "",
+        "principal_binding_report": principal_binding_report,
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
@@ -1771,6 +1798,69 @@ def _write_low_clue_recall_config(
     return config_path, low_clue_recall_config
 
 
+def _write_principal_config(
+    hermes_home: Path,
+    *,
+    owner_identity_args: list[str],
+    dry_run: bool,
+) -> tuple[Path, dict[str, object], list[dict[str, object]]]:
+    """Write the P0-lite ``principal`` config section for this install.
+
+    Recomputed fresh on every install from the target host's own
+    ``.env``/``config.yaml`` (plus any explicit ``--owner-identity`` args,
+    which always win) -- unlike the session_mirror admission floor, this
+    section is not owner-hand-tuned, so full replacement each run is correct:
+    it should always reflect what the host is configured to allow *right
+    now*. Delegates the actual discovery to
+    ``plugins.memory.memory_os.principal`` (function-scoped import, matching
+    ``_save_memory_os_config``'s existing pattern) so the decision logic
+    lives in exactly one place, testable without this installer.
+
+    Writes via read-modify-write on the raw JSON file -- the same pattern as
+    ``_write_low_clue_recall_config``/``_write_session_mirror_config``, and
+    deliberately NOT ``config.save_config``: that helper re-derives the whole
+    file from ``load_config`` (full-default merge), which would silently
+    strip installer-only keys (e.g. ``low_clue_recall.preset``) that a
+    sibling ``_write_*_config`` call earlier in this same install run wrote
+    raw and un-normalized.
+
+    Returns the config path, the config actually written (raw ids -- callers
+    must never put this in a printed report), and a masked report list
+    (``discover_owner_identity_bindings``'s ``"report"`` -- safe to print).
+    """
+    from plugins.memory.memory_os.principal import (
+        discover_owner_identity_bindings,
+        parse_owner_identity_args,
+    )
+
+    config_path = hermes_home / "memory-os" / "config.json"
+    existing = _read_json_config(config_path)
+    discovery = discover_owner_identity_bindings(
+        hermes_home,
+        explicit=parse_owner_identity_args(owner_identity_args),
+        memory_os_config=existing,
+    )
+    bindings = discovery["bindings"]
+    principal_config = {
+        "owner_identities": {
+            platform: entry["owner_identities"]
+            for platform, entry in bindings.items()
+            if entry.get("owner_identities")
+        },
+        "binding_sources": {
+            platform: entry["binding_source"] for platform, entry in bindings.items() if entry.get("binding_source")
+        },
+    }
+    existing["principal"] = principal_config
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return config_path, principal_config, discovery["report"]
+
+
 def _read_json_config(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return {}
@@ -2007,6 +2097,18 @@ def main() -> int:
         action="store_true",
         help="Explicit owner/operator approval for owner cron onboarding to create or update Hermes cron jobs.",
     )
+    parser.add_argument(
+        "--owner-identity",
+        action="append",
+        default=[],
+        metavar="PLATFORM:ID",
+        help=(
+            "Explicit owner identity binding (repeatable), e.g. telegram:123456789. "
+            "Always wins over auto-discovery from the target host's own .env/config.yaml. "
+            "Platforms without an explicit or auto-discovered binding stay in "
+            "pre-P0-lite compatibility mode (see the principal_binding section of the report)."
+        ),
+    )
     parser.add_argument("--hermes-bin", default="hermes", help="Hermes command used for cron onboarding")
     parser.add_argument("--owner-review-deliver", default="auto", help="Owner-review deliver target; auto discovers the owner home channel")
     parser.add_argument("--right-brain-deliver", default="origin", help="Right-brain expression deliver target, default: origin")
@@ -2109,6 +2211,7 @@ def main() -> int:
         expression_feedback_schedule=args.expression_feedback_schedule,
         memory_sources_feedback_schedule=args.memory_sources_feedback_schedule,
         hermes_bin=args.hermes_bin,
+        owner_identity=args.owner_identity,
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
         llm_judge_preset=args.llm_judge_preset,

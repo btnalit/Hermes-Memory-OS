@@ -212,14 +212,17 @@ class ContextSection:
 
 
 def plan_context_route(
-    query: str, *, current_task_anchor: str | None = None, author_class: str = ""
+    query: str, *, current_task_anchor: str | None = None, author_class: str = "", principal: str = ""
 ) -> dict[str, Any]:
     text = _normalize(query)
     lower = text.lower()
     reason_codes: list[str] = []
-    # Same author as the provider's ingress decision for this turn, so the
-    # router never routes another agent's turn as foreground control.
-    ingress = _classify_ingress(query, current_task_anchor=current_task_anchor, author_class=author_class)
+    # Same author/principal as the provider's ingress decision for this turn,
+    # so the router never routes another agent's (or another non-owner
+    # human's) turn as foreground control.
+    ingress = _classify_ingress(
+        query, current_task_anchor=current_task_anchor, author_class=author_class, principal=principal
+    )
     if ingress.route:
         result = _route(ingress.route, hard_route=ingress.hard_route, reason_codes=list(ingress.reason_codes))
         if ingress.open_issue:
@@ -256,10 +259,13 @@ def route_context_sections(
     sections: list[ContextSection],
     current_task_anchor: str | None = None,
     author_class: str = "",
+    principal: str = "",
     budget_chars: int,
     mode: str = "dry_run",
 ) -> dict[str, Any]:
-    route = plan_context_route(query, current_task_anchor=current_task_anchor, author_class=author_class)
+    route = plan_context_route(
+        query, current_task_anchor=current_task_anchor, author_class=author_class, principal=principal
+    )
     selected: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     used_budget = 0

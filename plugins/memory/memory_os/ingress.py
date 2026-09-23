@@ -66,6 +66,19 @@ AUTHOR_CLASS_BOT = "bot"
 AUTHOR_CLASS_UNKNOWN = "unknown"
 FOREGROUND_CONTROL_AUTHOR_CLASSES = frozenset({AUTHOR_CLASS_HUMAN, AUTHOR_CLASS_UNKNOWN})
 
+# ── Principal (authoritative in principal.py, P0-lite 2026-09-23) ──────────
+# ``principal.resolve_principal()`` folds ``author_class`` in as one signal
+# among several (local source, mailbox, configured owner_identities, ...) and
+# returns a closed set: owner / peer_agent / other_human / system / unknown.
+# Only "owner" and "unknown" (compat) may drive foreground control -- the
+# same two string literals as ``principal.FOREGROUND_CONTROL_PRINCIPALS``,
+# duplicated here rather than imported because ``principal.py`` already
+# imports from this module (``is_scheduled_session_id``, ``AUTHOR_CLASS_*``);
+# importing the other way would cycle. Kept in sync by
+# ``test_ingress_foreground_control_principals_match_principal_module`` in
+# ``tests/plugins/memory/test_memory_os_principal.py``.
+_FOREGROUND_CONTROL_PRINCIPALS = frozenset({"owner", "unknown"})
+
 # ── Hermes framing around the author's own words ─────────────────────────
 # Hermes wraps the author's text before the provider sees it; none of the
 # wrapping is the author's utterance. On 2026-09-22 13 of 22 peer-agent turns
@@ -260,6 +273,7 @@ def classify_ingress(
     current_task_anchor: str | None = None,
     session_id: str = "",
     author_class: str = "",
+    principal: str = "",
 ) -> IngressDecision:
     # Every decision reads the author's own words only, never the Hermes
     # frames around them (reply quote, origin header, sender tag).
@@ -279,13 +293,29 @@ def classify_ingress(
             reason_codes=["machine_authored_query"],
         )
 
-    # Another agent's turn (a peer bot in a shared chat) may be about
-    # anything, including stopping; it is never an instruction to *this*
-    # agent's owner-facing foreground task. 22 of the 33 cancelled anchors
-    # written between 2026-09-10 and 09-22 were peer-agent debate turns.
-    # ``author_class`` defaults to "" (= the caller does not know) so
-    # text-only callers keep the owner-text rules below.
-    if author_class and author_class not in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+    # ``principal`` (P0-lite, 2026-09-23) is the single authority when a
+    # caller has computed one: a peer_agent, other_human, or system principal
+    # is never the owner, whatever the raw ``author_class`` said (a
+    # configured non-owner human is "human" by author_class but must still be
+    # blocked here). Text-only callers that never learned a principal
+    # (``principal == ""``) keep the pre-principal ``author_class`` gate
+    # below unchanged -- this is what keeps this function backward
+    # compatible for callers that only pass ``author_class``.
+    if principal:
+        if principal not in _FOREGROUND_CONTROL_PRINCIPALS:
+            return IngressDecision(
+                intent="non_owner_authored",
+                route="",
+                hard_route=False,
+                reason_codes=["non_owner_authored_turn"],
+            )
+    elif author_class and author_class not in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+        # Another agent's turn (a peer bot in a shared chat) may be about
+        # anything, including stopping; it is never an instruction to *this*
+        # agent's owner-facing foreground task. 22 of the 33 cancelled
+        # anchors written between 2026-09-10 and 09-22 were peer-agent debate
+        # turns. ``author_class`` defaults to "" (= the caller does not
+        # know) so text-only callers keep the owner-text rules below.
         return IngressDecision(
             intent="non_owner_authored",
             route="",

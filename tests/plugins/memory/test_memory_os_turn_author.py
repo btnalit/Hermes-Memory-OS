@@ -19,30 +19,42 @@ import json
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os import _active_task_anchor_path
 from plugins.memory.memory_os.audit import read_audit_entries
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.context_router import plan_context_route
 from plugins.memory.memory_os.inner_drive import classify_event_for_inner_drive
 from plugins.memory.memory_os.roots import MemoryOSRoots
 
 _OWNER_ID = "1000000001"
 _PEER_ID = "2000000002"
+_OTHER_HUMAN_ID = "4000000004"
 _OWNER_ANCHOR = "### Memory-OS Current Task Anchor\n- current task: 安装 ComfyUI 并配置 IPAdapter 插件"
 _APOLOGY = "是我错了，兄弟。我把上一场辩论的“已取消”状态错误地带进了这场 RAG 辩论，误以为当前也要停止。"
 
 
-def _provider(tmp_path, session_id, **kwargs):
+def _provider(tmp_path, session_id, *, platform="telegram", **kwargs):
     provider = load_memory_provider("memory_os")
     provider.initialize(
         session_id,
         hermes_home=str(tmp_path),
-        platform="telegram",
+        platform=platform,
         agent_identity="memoryos-test",
         **kwargs,
     )
     return provider
 
 
+def _seed_owner_identity(tmp_path, platform, owner_id):
+    """Build the fixture via the real producer (config.save_config /
+    _merge_principal_config), not a hand-written config.json shortcut."""
+    save_config({"principal": {"owner_identities": {platform: [owner_id]}}}, tmp_path)
+
+
 def _owner_turn(provider, message=""):
     provider.on_turn_start(1, message, author_id=_OWNER_ID, author_name="owner", author_is_bot=False)
+
+
+def _other_human_turn(provider, message=""):
+    provider.on_turn_start(1, message, author_id=_OTHER_HUMAN_ID, author_name="other-human", author_is_bot=False)
 
 
 def _peer_turn(provider, message=""):
@@ -254,3 +266,182 @@ def test_long_owner_turn_mentioning_later_is_audited_as_refused_deferral(tmp_pat
     assert not (tmp_path / "memory-os" / "system" / "deferred_foreground_tasks.jsonl").exists()
     assert skipped and skipped[-1]["details"]["reason"] == "defer_rejected_turn_too_long"
     assert skipped[-1]["details"]["author_class"] == "human"
+
+
+# ── principal (P0-lite, 2026-09-23): configured owner identities ──────────
+# "human" (author_class) only ever meant "the host admitted a non-bot
+# author" -- never a verified owner. These tests configure
+# principal.owner_identities so a *human*, non-bot author who is not the
+# owner is still blocked, and the owner is still recognized once configured.
+
+
+def test_configured_non_owner_human_cannot_cancel_the_owner_task(tmp_path):
+    """Counterfactual: without resolve_principal wired into
+    _refresh_current_task_anchor_from_query, a configured non-owner human
+    (author_class="human", same as the owner) would still cancel the owner's
+    foreground task -- exactly the gap author_class alone cannot close."""
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_other_human_cancel")
+    try:
+        _other_human_turn(provider)
+        assert provider._turn_principal == "other_human"
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="20260923_other_human_cancel")
+        assert provider._foreground_task_only_prefetch is False
+        skipped = _audit(provider, "ingress_foreground_control_skipped")
+    finally:
+        provider.shutdown()
+    assert [r for r in _records(tmp_path) if r["status"] == "cancelled"] == []
+    assert skipped and skipped[-1]["details"]["reason"] == "non_owner_authored_turn"
+    assert skipped[-1]["details"]["author_class"] == "human"
+    assert skipped[-1]["details"]["principal"] == "other_human"
+
+
+def test_configured_non_owner_human_cannot_approve_an_owner_action(tmp_path):
+    """Counterfactual: without resolve_principal wired into
+    _process_owner_review_reply_ingress (which used to gate on
+    author_class == "bot" only), a configured non-owner human could approve
+    an owner action merely by being a non-bot author."""
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_other_human_review")
+    try:
+        _other_human_turn(provider)
+        result = provider._process_owner_review_reply_ingress(
+            "approve oa_0123456789abcdef", turn_number=1, phase="tool_call"
+        )
+        audits = _audit(provider, "owner_review_reply_ingress")
+    finally:
+        provider.shutdown()
+    assert result["status"] == "ignored"
+    assert result["reason"] == "non_owner_author"
+    assert audits and audits[-1]["details"]["reason"] == "non_owner_author"
+    assert audits[-1]["details"]["principal"] == "other_human"
+
+
+def test_configured_owner_can_still_cancel_once_bound(tmp_path):
+    """The other side of the same rule: configuring owner_identities must not
+    accidentally lock the real owner out."""
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_owner_configured")
+    try:
+        _owner_turn(provider)
+        assert provider._turn_principal == "owner"
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="20260923_owner_configured")
+        assert provider._foreground_task_only_prefetch is True
+    finally:
+        provider.shutdown()
+    assert [r for r in _records(tmp_path) if r["status"] == "cancelled"]
+
+
+def test_configured_owner_can_still_approve_an_owner_action_once_bound(tmp_path):
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_owner_review")
+    try:
+        _owner_turn(provider)
+        result = provider._process_owner_review_reply_ingress(
+            "approve oa_0123456789abcdef", turn_number=1, phase="tool_call"
+        )
+    finally:
+        provider.shutdown()
+    # oa_ token unknown to this fresh store -> not "ignored" for author reasons
+    assert result["reason"] != "non_owner_author"
+
+
+def test_mailbox_source_never_drives_foreground_control(tmp_path):
+    """Owner ruling: mailbox is a peer channel, never owner-authenticated --
+    not even an owner-shaped author_id on the mailbox source may cancel."""
+    provider = _provider(tmp_path, "20260923_mailbox_1", platform="mailbox")
+    try:
+        _owner_turn(provider)
+        assert provider._turn_principal == "peer_agent"
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="20260923_mailbox_1")
+        assert provider._foreground_task_only_prefetch is False
+    finally:
+        provider.shutdown()
+    assert [r for r in _records(tmp_path) if r["status"] == "cancelled"] == []
+
+
+def test_local_cli_source_drives_foreground_control_without_any_configured_identity(tmp_path):
+    """Owner ruling: local shell access already implies higher trust than
+    the conversational owner gate -- no principal.owner_identities entry is
+    needed for a cli/tui/acp session to be treated as owner."""
+    provider = _provider(tmp_path, "20260923_cli_1", platform="cli")
+    try:
+        provider.on_turn_start(1, "", author_id="root", author_name="root", author_is_bot=False)
+        assert provider._turn_principal == "owner"
+        provider._current_task_anchor = _OWNER_ANCHOR
+        provider.prefetch("取消这个任务", session_id="20260923_cli_1")
+        assert provider._foreground_task_only_prefetch is True
+    finally:
+        provider.shutdown()
+    assert [r for r in _records(tmp_path) if r["status"] == "cancelled"]
+
+
+def test_sync_turn_marks_configured_non_owner_human_non_driving(tmp_path):
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_other_human_sync", worker_autostart=False)
+    try:
+        provider.sync_turn(
+            "帮我记一下这个想法",
+            "好的",
+            session_id="20260923_other_human_sync",
+            turn_author={"id": _OTHER_HUMAN_ID, "name": "other-human", "is_bot": False},
+        )
+        event = _queued_event(provider)
+    finally:
+        provider.shutdown()
+    assert event.safe_ref["author_class"] == "human"
+    assert event.safe_ref["principal"] == "other_human"
+    assert event.safe_ref["drive_policy"] == "index_only"
+    assert event.safe_ref["non_driving_reason"] == "non_owner_author"
+
+
+def test_sync_turn_still_drives_for_configured_owner(tmp_path):
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, "20260923_owner_sync", worker_autostart=False)
+    try:
+        provider.sync_turn(
+            "帮我把 ComfyUI 装好",
+            "好的",
+            session_id="20260923_owner_sync",
+            turn_author={"id": _OWNER_ID, "name": "owner", "is_bot": False},
+        )
+        event = _queued_event(provider)
+    finally:
+        provider.shutdown()
+    assert event.safe_ref["principal"] == "owner"
+    assert "drive_policy" not in event.safe_ref
+
+
+def test_router_agrees_with_provider_on_configured_non_owner_human():
+    """Same shape as test_router_agrees_with_provider_on_peer_turns, for the
+    principal parameter: the router must reach the same eligibility verdict
+    the provider does for a configured non-owner human."""
+    assert plan_context_route("取消这个任务", principal="owner")["route"] == "foreground_control"
+    assert plan_context_route("取消这个任务", principal="unknown")["route"] == "foreground_control"
+    assert plan_context_route("取消这个任务", principal="other_human")["route"] != "foreground_control"
+    assert plan_context_route("取消这个任务", principal="peer_agent")["route"] != "foreground_control"
+    assert plan_context_route("取消这个任务", principal="system")["route"] != "foreground_control"
+
+
+def test_cron_session_turn_keeps_its_pre_principal_handling(tmp_path):
+    """Counterfactual: a scheduled session resolves to principal "system".
+    Routing that through the non-owner gate turned every cron turn
+    index-only (non_driving_reason=non_owner_author) and skipped its
+    operation capture -- a behaviour change for ~770 cron sessions a month on
+    production that P0-lite never set out to make. Cron turns keep the
+    scheduled-session handling they had before the principal model."""
+    session_id = "cron_1a2b3c4d5e6f_20260923_010000"
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, session_id, worker_autostart=False)
+    try:
+        provider.on_turn_start(1, "run the nightly digest")
+        provider.sync_turn("run the nightly digest", "digest done", session_id=session_id)
+        event = _queued_event(provider)
+    finally:
+        provider.shutdown()
+    assert event.safe_ref["principal"] == "system"
+    assert "drive_policy" not in event.safe_ref
+    assert "non_driving_reason" not in event.safe_ref
