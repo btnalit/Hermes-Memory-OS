@@ -1193,6 +1193,17 @@ class CognitiveLoopRunner:
             "unresolved_hit_count": result.get("unresolved_hit_count", 0),
             "failed_count": result.get("failed_count", 0),
             "tracked_edge_count": result.get("tracked_edge_count", 0),
+            # G0: orphan-edge cascade + shadow compaction. Same whitelist
+            # hazard as v1 above — a counter the producer computes but this
+            # wrapper drops never reaches reports.jsonl or the monitor.
+            "orphan_scanned_count": result.get("orphan_scanned_count", 0),
+            "orphan_invalidated_count": result.get("orphan_invalidated_count", 0),
+            "orphan_skipped_by_cap_count": result.get("orphan_skipped_by_cap_count", 0),
+            "orphan_cascade_skipped_reason": result.get("orphan_cascade_skipped_reason", ""),
+            "orphan_cascade_error_records": result.get("orphan_cascade_error_records", []),
+            "shadow_compaction_reason": result.get("shadow_compaction_reason", ""),
+            "shadow_compaction_records_archived": result.get("shadow_compaction_records_archived", 0),
+            "shadow_compaction_suppressed_error_count": result.get("shadow_compaction_suppressed_error_count", 0),
             # Cursor-alignment visibility: the outcome branch gives
             # reinforced/forgotten/saturated precedence over
             # "cursor_misaligned", so a misalignment on an otherwise-busy

@@ -619,6 +619,10 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "memory_edges", "state", "text not null default 'candidate'")
     _ensure_column(conn, "memory_edges", "invalidated_at", "text")
     _ensure_column(conn, "memory_edges", "proposed_by", "text not null default 'structural'")
+    # G0: why an edge was invalidated (e.g. "endpoint_inactive" for the orphan
+    # cascade, vs the long-idle forgetting lane which leaves this null) — same
+    # nullable-migration pattern as invalidated_at above.
+    _ensure_column(conn, "memory_edges", "invalidation_reason", "text")
     _ensure_column(conn, "crystallized_candidates", "provenance_json", "text not null default '{}'")
     _ensure_column(conn, "crystallized_records", "canonical_state", "text not null default 'permanent'")
     _ensure_column(conn, "entity_index", "entity_class", "text not null default 'unknown'")
@@ -1128,8 +1132,8 @@ def _index_edges(conn: sqlite3.Connection, roots: MemoryOSRoots) -> int:
                     edge_id, from_record_type, from_record_id,
                     to_record_type, to_record_id, relation_type,
                     weight, created_at, source_event_id,
-                    state, invalidated_at, proposed_by
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    state, invalidated_at, proposed_by, invalidation_reason
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(edge.get("edge_id", "")),
@@ -1144,6 +1148,7 @@ def _index_edges(conn: sqlite3.Connection, roots: MemoryOSRoots) -> int:
                     str(edge.get("state", "candidate")),
                     edge.get("invalidated_at"),
                     str(edge.get("proposed_by", "structural")),
+                    edge.get("invalidation_reason"),
                 ),
             )
             count += 1
@@ -1726,6 +1731,9 @@ def update_edge_weight(
         "state": str(current.get("state", "")),
         "invalidated_at": current.get("invalidated_at"),
         "proposed_by": str(current.get("proposed_by", "structural")),
+        # Carry forward unchanged — a weight update must never blank out a
+        # prior invalidation reason on the last-writer-wins canonical row.
+        "invalidation_reason": current.get("invalidation_reason"),
     }
     if not _write_edge_canonical(roots, updated_edge):
         return {}
@@ -1748,6 +1756,7 @@ def transition_edge_state(
     new_state: str,
     *,
     now: str | None = None,
+    reason: str | None = None,
     roots: MemoryOSRoots,
 ) -> dict[str, Any]:
     """Transition an edge's governance state with validation.
@@ -1765,6 +1774,14 @@ def transition_edge_state(
     be silently reverted within one sync cycle (≤30 min).  ``roots`` is a
     required keyword for exactly that reason: an optional default would make
     non-durable transitions possible again by omission.
+
+    ``reason`` (G0): only meaningful on a transition to ``invalidated`` (e.g.
+    ``"endpoint_inactive"`` for the orphan cascade in edge_weight_feedback.py)
+    — recorded on the canonical row the same way ``invalidated_at`` is.
+    Omitted/None on every other transition, and left untouched (carried
+    forward from the current row) when the transition target is not
+    ``invalidated`` at all — a no-op-shaped call must never blank out a
+    previously recorded reason.
 
     Returns the updated edge dict, or {} on failure/illegal transition.
     """
@@ -1788,6 +1805,9 @@ def transition_edge_state(
     updates: dict[str, Any] = {"state": new_state}
     if new_state == "invalidated":
         updates["invalidated_at"] = _now
+        updates["invalidation_reason"] = reason
+    else:
+        updates["invalidation_reason"] = current.get("invalidation_reason")
     updated_edge = {
         "edge_id": str(current.get("edge_id", "")),
         "from_record_type": str(current.get("from_record_type", "")),
@@ -1801,6 +1821,7 @@ def transition_edge_state(
         "state": updates["state"],
         "invalidated_at": updates.get("invalidated_at"),
         "proposed_by": str(current.get("proposed_by", "structural")),
+        "invalidation_reason": updates.get("invalidation_reason"),
     }
     # Canonical-first (same order as write_governed_edge): if the ledger
     # append fails, the projection is NOT touched — a projection-only
@@ -1809,12 +1830,13 @@ def transition_edge_state(
         return {}
     try:
         conn.execute(
-            "update memory_edges set state = ?, invalidated_at = ? where edge_id = ?",
-            (updates["state"], updates.get("invalidated_at"), edge_id),
+            "update memory_edges set state = ?, invalidated_at = ?, invalidation_reason = ? where edge_id = ?",
+            (updates["state"], updates.get("invalidated_at"), updates.get("invalidation_reason"), edge_id),
         )
         conn.commit()
         current["state"] = updates["state"]
         current["invalidated_at"] = updates.get("invalidated_at")
+        current["invalidation_reason"] = updates.get("invalidation_reason")
         return current
     except sqlite3.Error:
         # Canonical row is already written — the projection will catch up on

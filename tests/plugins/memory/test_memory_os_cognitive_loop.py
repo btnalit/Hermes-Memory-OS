@@ -1027,6 +1027,32 @@ def test_edge_weight_feedback_wrapper_passes_through_cursor_alignment_fields(tmp
     assert summary["cursor_skipped_row_count"] == 20
 
 
+def test_edge_weight_feedback_wrapper_passes_through_every_producer_key(tmp_path):
+    """Census, not a fixture: run the REAL producer and require every key of
+    its summary to survive the wrapper's whitelist.
+
+    The two tests above hand-write the producer's result, so they only ever
+    check the keys someone remembered to list — G0 added eight counters
+    (orphan cascade + shadow compaction) that the wrapper silently dropped,
+    and both stayed green. Deriving the key set from the producer's own
+    output makes the next forgotten key fail here instead of vanishing from
+    reports.jsonl.
+    """
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+    context: dict = {}
+    # begin_at is a run timestamp the producer itself strips from its audit
+    # details; the step envelope carries its own timing.
+    intentionally_dropped = {"begin_at"}
+
+    summary = runner._edge_weight_feedback(context)
+
+    producer_keys = set(context["edge_weight_feedback_result"])
+    assert "orphan_invalidated_count" in producer_keys, "sanity: the real producer ran its full path"
+    missing = sorted(producer_keys - intentionally_dropped - set(summary))
+    assert not missing, f"edge_weight_feedback keys dropped by the cognitive_loop wrapper: {missing}"
+
+
 def test_edge_provenance_wrapper_passes_through_write_failed_count(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).

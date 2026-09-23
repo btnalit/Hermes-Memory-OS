@@ -716,6 +716,8 @@ def _build_prefetch_sections(
             seen=seen,
             source_ids=graph_ids,
             events=events_cache,
+            query=query,
+            session_id=session_id,
         ),
     )
     if graph_ids:
@@ -2581,6 +2583,8 @@ def _graph_layer_shadow_lines(
     seen: set[tuple[str, str]] | None = None,
     source_ids: list[str] | None = None,
     events: list[Any] | None = None,
+    query: str = "",
+    session_id: str = "",
 ) -> list[str]:
     """Knob-gated graph layer edge injection with shadow audit.
 
@@ -2602,6 +2606,8 @@ def _graph_layer_shadow_lines(
       不响 — E5 事故形状)
     - Cross-section dedup via `seen` set
     - events: 调用方的 events 缓存,用于事件类锚点/邻居的预览解析
+    - query / session_id: G0 novelty 指标输入(query+锚点预览的词集是"检索
+      已知"基线,session_id 只落哈希化的 session_ref,不落原始 id)
     """
     if not anchor_ids:
         return []
@@ -2637,7 +2643,7 @@ def _graph_layer_shadow_lines(
             for edge in edges
             if isinstance(edge, dict)
         ]
-        _record_graph_layer_shadow(store, anchor_ids, decisions)
+        _record_graph_layer_shadow(store, anchor_ids, decisions, session_id=session_id)
         return []
 
     lines, decisions = _render_graph_layer_lines(
@@ -2647,9 +2653,10 @@ def _graph_layer_shadow_lines(
         seen=seen,
         source_ids=source_ids,
         events=events,
+        query=query,
     )
     # ── Shadow log written AFTER rendering (audit trail, v1) ────
-    _record_graph_layer_shadow(store, anchor_ids, decisions)
+    _record_graph_layer_shadow(store, anchor_ids, decisions, session_id=session_id)
     return lines
 
 
@@ -2727,6 +2734,7 @@ def _render_graph_layer_lines(
     source_ids: list[str] | None = None,
     events: list[Any] | None = None,
     day_ordinal: int | None = None,
+    query: str = "",
 ) -> tuple[list[str], list[dict]]:
     """Render graph edges as owner-readable Related Memory lines.
 
@@ -2744,6 +2752,12 @@ def _render_graph_layer_lines(
       标记 — 短预览是结晶段同一正文的精确前缀,零歧义对齐键。
     - 同一 (锚点,邻居) 的多条边聚合为一行,短语「、」连接,关联度取最大。
     - 每行 ≤220 字符、最多 GRAPH_MAX_LINES 行、weight < FLOOR 跳过。
+    - G0:活性预解析在选位之前完成(见步骤 1b)——旧实现选位在预览解析
+      之前,inactive 目标进选位后到渲染才发现死亡,白占一个 exploit/
+      explore 名额(生产测得约 8% 的候选决策以 target_inactive 收场)。
+    - G0:每条被注入的边附带 novelty(邻居预览词集里,锚点预览+query 词集
+      未覆盖的份额)——衡量图谱层在检索已知内容之外增加了多少信息,替代
+      缺失的 owner 有用性反馈信号。
     - 返回 (lines, decisions):decisions 给每条边一个封闭 outcome
       (emitted_full / emitted_stub / below_weight_floor / target_inactive /
       non_crystallized_target / unresolved / not_selected),供 shadow 账本
@@ -2790,6 +2804,55 @@ def _render_graph_layer_lines(
     if not workable:
         return [], decisions
 
+    # ── 1b. 活性预解析(G0):选位之前批量解析全部候选的锚点+邻居预览,
+    # 剔除已确认 inactive 的邻居目标 —— 旧实现把预览解析放在选位之后,
+    # inactive 目标进选位后到渲染才发现死亡,白占一个 exploit/explore
+    # 名额(生产测得约 8% 的候选决策以 target_inactive 收场)。这里一次
+    # 结晶扫描的结果(cry_map/event_summaries)供选位过滤与之后的渲染
+    # 共用,不重复扫描。同时建 anchor_context_terms(全体候选锚点预览 ∪
+    # query 的词集)供 novelty 计算复用同一批预览,不逐行重复解析。
+    preview_ids: set[str] = set()
+    for item in workable:
+        preview_ids.add(item["anchor_id"])
+        preview_ids.add(item["neighbor_id"])
+    cry_map = _batch_resolve_crystallized(store, preview_ids)
+    event_summaries: dict[str, str] = {}
+    for ev in events or []:
+        try:
+            ev_id = str(getattr(ev, "id", "") or "")
+            if ev_id and ev_id in preview_ids:
+                event_summaries[ev_id] = str(getattr(ev, "summary", "") or "")
+        except Exception:
+            continue
+
+    live_workable: list[dict] = []
+    for item in workable:
+        neighbor_record = cry_map.get(item["neighbor_id"])
+        if (
+            item["neighbor_type"] in _GRAPH_CRYSTALLIZED_TYPES
+            and neighbor_record is not None
+            and not is_active_crystallized_frontmatter(neighbor_record.frontmatter)
+        ):
+            decisions.append(
+                {"edge": item["edge"], "injected": False, "outcome": "target_inactive"}
+            )
+            continue
+        live_workable.append(item)
+    workable = live_workable
+
+    if not workable:
+        return [], decisions
+
+    # novelty 基线:query 词集 ∪ 全体（存活）候选锚点预览词集。与渲染时
+    # 逐行取的锚点预览共用同一份 cry_map/event_summaries,不重复扫描。
+    anchor_context_terms: set[str] = set(_extract_query_tokens(query))
+    for anchor_id, anchor_type in {
+        (item["anchor_id"], item["anchor_type"]) for item in workable
+    }:
+        a_text, a_status = _graph_preview(anchor_id, anchor_type, cry_map, event_summaries)
+        if a_status == "ok" and a_text:
+            anchor_context_terms.update(_extract_query_tokens(a_text))
+
     # ── 2. 注入位选择:top-K 按权重 + 探索位(反饿死)─────────────────
     # 权重降序(稳定排序保持 SQL 的 created_at desc 次序作并列平局);
     # 排序尾部按天确定性轮转出 2 个探索位:无随机数(热路径必须可复现)、
@@ -2833,20 +2896,7 @@ def _render_graph_layer_lines(
                 )
         workable = exploit + explore
 
-    # ── 3. 预览源批量解析(一次结晶扫描 + events 缓存)────────────────
-    preview_ids: set[str] = set()
-    for item in workable:
-        preview_ids.add(item["anchor_id"])
-        preview_ids.add(item["neighbor_id"])
-    cry_map = _batch_resolve_crystallized(store, preview_ids)
-    event_summaries: dict[str, str] = {}
-    for ev in events or []:
-        try:
-            ev_id = str(getattr(ev, "id", "") or "")
-            if ev_id and ev_id in preview_ids:
-                event_summaries[ev_id] = str(getattr(ev, "summary", "") or "")
-        except Exception:
-            continue
+    # (预览源批量解析已在步骤 1b 完成并被选位过滤复用,此处不再重复)
 
     # ── 4. 按 (锚点,邻居) 聚合 ─────────────────────────────────────
     groups: dict[tuple[str, str], dict] = {}
@@ -2920,9 +2970,22 @@ def _render_graph_layer_lines(
             body_budget = min(body_budget, GRAPH_DEDUP_PREVIEW_CHARS)
         lines.append(prefix + _clip(n_text, body_budget) + suffix)
 
+        # G0 novelty:邻居预览词集里,anchor_context_terms(锚点预览 ∪
+        # query)未覆盖的份额——衡量这条被注入的行在检索已知内容之外
+        # 增加了多少信息。邻居词集为空(极短/无可提取词的预览)时定义为
+        # 0.0(无新增证据),不做除零。
+        neighbor_terms = set(_extract_query_tokens(n_text))
+        novelty = (
+            len(neighbor_terms - anchor_context_terms) / len(neighbor_terms)
+            if neighbor_terms else 0.0
+        )
+
         outcome = "emitted_stub" if dedup_hit else "emitted_full"
         for item in group["items"]:
-            decisions.append({"edge": item["edge"], "injected": True, "outcome": outcome})
+            decisions.append({
+                "edge": item["edge"], "injected": True, "outcome": outcome,
+                "novelty": novelty,
+            })
         if seen is not None:
             seen.add((group["neighbor_type"], group["neighbor_id"]))
         if source_ids is not None:
@@ -2935,6 +2998,8 @@ def _record_graph_layer_shadow(
     store: MemoryOSStore,
     anchor_ids: list[str],
     decisions: list[dict],
+    *,
+    session_id: str = "",
 ) -> None:
     """Append a bounded shadow record to system/graph_layer_shadow.jsonl.
 
@@ -2945,6 +3010,13 @@ def _record_graph_layer_shadow(
     强化。anchor_ids 同步写入(v0 只有 anchor_count,F1 类方向问题在生产
     数据上无法回溯测量)。
 
+    G0(2026-09):owner 有用性反馈恒为 0——新增两个字段作为替代评分信号,
+    ``schema_version`` 不变(纯增量字段,监控端按 v1 读取的现有逻辑不受
+    影响):``session_ref``(session_id 的短哈希,从不落原始 id)与每条被
+    注入边上的 ``novelty``(_render_graph_layer_lines 已算好,直接透传)
+    及行级聚合 ``mean_injected_novelty``(无注入边时为 None,不得算 0——
+    0 会被误读成"全部零新增"而非"无样本")。
+
     This is purely audit/inspection data — NOT injected into agent context.
     """
     path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
@@ -2953,8 +3025,11 @@ def _record_graph_layer_shadow(
     except Exception:
         return  # fail-open: shadow loss must not break prefetch
     _now_stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # 短哈希,从不落原始 session_id(同 session_mirror.py 的哈希口径)。
+    session_ref = sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
     edge_rows = []
     injected_count = 0
+    injected_novelties: list[float] = []
     for decision in decisions:
         if not isinstance(decision, dict):
             continue
@@ -2962,9 +3037,7 @@ def _record_graph_layer_shadow(
         if not isinstance(edge, dict):
             continue
         injected = bool(decision.get("injected", False))
-        if injected:
-            injected_count += 1
-        edge_rows.append({
+        edge_row = {
             "relation_type": str(edge.get("relation_type", "unknown")),
             "from_record_type": str(edge.get("from_record_type", "")),
             "from_record_id": str(edge.get("from_record_id", "")),
@@ -2973,13 +3046,29 @@ def _record_graph_layer_shadow(
             "weight": float(edge.get("weight", 1.0)),
             "injected": injected,
             "outcome": str(decision.get("outcome", "") or "unknown"),
-        })
+        }
+        if injected:
+            injected_count += 1
+            novelty = decision.get("novelty")
+            if isinstance(novelty, (int, float)) and not isinstance(novelty, bool):
+                novelty = float(novelty)
+                edge_row["novelty"] = novelty
+                injected_novelties.append(novelty)
+        edge_rows.append(edge_row)
     record = {
         "schema_version": "memory-os.graph_layer_shadow.v1",
         "anchor_count": len(anchor_ids),
         "anchor_ids": [str(a) for a in anchor_ids],
         "edge_count": len(edge_rows),
         "injected_count": injected_count,
+        "session_ref": session_ref,
+        # None (not 0.0) when there is no injected-neighbor sample this turn
+        # — a real mean of 0.0 ("every injected neighbor was fully covered by
+        # context") must stay distinguishable from "nothing was injected".
+        "mean_injected_novelty": (
+            sum(injected_novelties) / len(injected_novelties)
+            if injected_novelties else None
+        ),
         # created_at is the name metadata_retention._record_created_at ages on
         # (backlog 9); recorded_at stays for existing readers of this ledger.
         # Forward-only: historical recorded_at-only rows remain unaged -- an
@@ -2993,6 +3082,66 @@ def _record_graph_layer_shadow(
         append_jsonl_locked(path, record)
     except Exception:
         pass  # fail-open: shadow loss must not break prefetch
+
+
+def graph_layer_shadow_novelty_summary(
+    store: MemoryOSStore,
+    *,
+    max_records: int = 2000,
+) -> dict[str, Any]:
+    """Aggregate injected-neighbor novelty from the shadow ledger's tail.
+
+    Pure/read-only helper for a future monitor grading step (G0): the ledger
+    itself has no upstream owner-usefulness signal (owner feedback measured
+    at 0 in 30 days on production), so novelty — how much an injected
+    neighbor's preview adds beyond what the anchor previews + query already
+    covered — is the substitute scoring signal. Bounded tail read via
+    jsonl_io.read_jsonl_tail (never a full-file scan; the ledger is
+    size-gated by the edge_weight_feedback lifecycle step, see
+    GRAPH_LAYER_SHADOW_KEEP_RECORDS in edge_weight_feedback.py, but a reader
+    must never assume that on its own).
+
+    Returns a dict with a closed ``status`` (``ok`` / ``no_shadow_ledger`` /
+    ``healthy_no_sample``) so an empty/absent ledger reports no-sample rather
+    than a misleadingly "passing" empty aggregate (era-boundary rule: an
+    empty gated set must never look like PASS-by-omission).
+    """
+    path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    if not path.exists():
+        return {
+            "status": "no_shadow_ledger",
+            "rows_scanned": 0,
+            "injected_edge_count": 0,
+            "mean_novelty": None,
+            "novelty_row_count": 0,
+            "error_records": [],
+        }
+    result = read_jsonl_tail(
+        path,
+        max_records=max_records,
+        component="prefetch.graph_layer_shadow",
+        operation="novelty_summary",
+    )
+    injected_edge_count = 0
+    row_means: list[float] = []
+    for row in result.records:
+        if not isinstance(row, dict):
+            continue
+        try:
+            injected_edge_count += int(row.get("injected_count") or 0)
+        except (TypeError, ValueError):
+            pass
+        mean_value = row.get("mean_injected_novelty")
+        if isinstance(mean_value, (int, float)) and not isinstance(mean_value, bool):
+            row_means.append(float(mean_value))
+    return {
+        "status": "ok" if result.records else "healthy_no_sample",
+        "rows_scanned": len(result.records),
+        "injected_edge_count": injected_edge_count,
+        "mean_novelty": (sum(row_means) / len(row_means)) if row_means else None,
+        "novelty_row_count": len(row_means),
+        "error_records": result.error_records,
+    }
 
 
 def _last_session_lines(

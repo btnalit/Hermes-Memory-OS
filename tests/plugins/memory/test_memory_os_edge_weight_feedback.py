@@ -29,10 +29,42 @@ def _store(tmp_path):
     return store, index
 
 
-def _active_edge(index, i=0, *, weight=0.5):
+def _seed_crystallized(store, record_id):
+    """写规范 markdown 结晶记录(active),真实生产链投影进
+    crystallized_records(与 test_memory_os_edge_provenance._seed_crystallized
+    同构 —— 测试模块间不可 import,故内联)。G0 孤儿边级联需要真实存在的
+    结晶记录背书边端点,否则每条测试边都会被 orphan cascade 判定为端点
+    缺失而作废。"""
+    frontmatter = {
+        "schema_version": "memory-os.crystallized.v0",
+        "id": record_id,
+        "kind": "test",
+        "created_at": "2026-06-01T00:00:00Z",
+        "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z",
+        "approval_purpose": "test",
+        "approval_note": "test seed",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+        "hindsight_indexed": False,
+        "bridge_state": "active",
+    }
+    store.append_crystallized_record(f"{record_id}.md", frontmatter, "test crystallized body")
+
+
+def _active_edge(store, index, i=0, *, weight=0.5):
+    """真实生产者链:先写背书结晶记录 + sync 投影进 crystallized_records,
+    再写治理边——否则 G0 孤儿边级联会把测试边当端点缺失的孤儿边作废
+    (这正是它该做的事:_active_edge 造的裸端点在修复前就是孤儿边的形状)。
+    """
+    from_id, to_id = f"cry_fb_{i}_a", f"cry_fb_{i}_b"
+    _seed_crystallized(store, from_id)
+    _seed_crystallized(store, to_id)
+    index.sync_from_store(store)
     edge = index.write_governed_edge(
-        from_record_type="crystallized_record", from_record_id=f"cry_fb_{i}_a",
-        to_record_type="crystallized_record", to_record_id=f"cry_fb_{i}_b",
+        from_record_type="crystallized_record", from_record_id=from_id,
+        to_record_type="crystallized_record", to_record_id=to_id,
         relation_type="co_occurs", weight=weight, proposed_by="structural",
         state="active",
     )
@@ -78,7 +110,7 @@ def test_r4_hit_reinforces_weight_durably(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 0, weight=0.5)
+    edge = _active_edge(store, index, 0, weight=0.5)
     _record_hit(store, edge)
 
     result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -103,7 +135,7 @@ def test_r4_cap_is_unreachable_asymptote(tmp_path):
     from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 1, weight=0.98)
+    edge = _active_edge(store, index, 1, weight=0.98)
     _record_hit(store, edge)
 
     result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -121,7 +153,7 @@ def test_r4_cursor_prevents_double_counting(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 2, weight=0.5)
+    edge = _active_edge(store, index, 2, weight=0.5)
     _record_hit(store, edge)
 
     run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -143,8 +175,8 @@ def test_r4_forgets_long_unhit_active_edges(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge_old = _active_edge(index, 3, weight=0.5)
-    edge_hit = _active_edge(index, 4, weight=0.5)
+    edge_old = _active_edge(store, index, 3, weight=0.5)
+    edge_hit = _active_edge(store, index, 4, weight=0.5)
     _record_hit(store, edge_hit)
 
     future = datetime.now(timezone.utc) + timedelta(days=FORGET_AFTER_DAYS + 1)
@@ -188,7 +220,7 @@ def test_f2_not_injected_edges_are_not_hits(tmp_path):
     from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 10, weight=0.5)
+    edge = _active_edge(store, index, 10, weight=0.5)
     _record_hit(store, edge, injected=False, outcome="knob_disabled")
 
     result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -212,7 +244,7 @@ def test_f2_legacy_v0_rows_still_count_as_hits(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 11, weight=0.5)
+    edge = _active_edge(store, index, 11, weight=0.5)
     # 历史 v0 行只能手工构造:现行真实生产者只写 v1(此处手写正是被测的
     # 遗留数据形态,不是反事实空转)。
     shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
@@ -253,7 +285,7 @@ def test_f3_saturated_hit_counts_separately_and_refreshes_last_hit(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 12, weight=1.0)
+    edge = _active_edge(store, index, 12, weight=1.0)
     _record_hit(store, edge)
 
     result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -281,7 +313,7 @@ def test_f2_injection_never_live_blocks_forgetting(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge = _active_edge(index, 13, weight=0.5)
+    edge = _active_edge(store, index, 13, weight=0.5)
     _record_hit(store, edge, injected=False, outcome="knob_disabled")
 
     # 第一轮消化 knob_disabled 行(建立 state,但 first_injection_at 保持空)
@@ -309,8 +341,8 @@ def test_r4_cursor_misalignment_on_ledger_truncation_does_not_reprocess(tmp_path
     )
 
     store, index = _store(tmp_path)
-    edge1 = _active_edge(index, 20, weight=0.5)
-    edge2 = _active_edge(index, 21, weight=0.5)
+    edge1 = _active_edge(store, index, 20, weight=0.5)
+    edge2 = _active_edge(store, index, 21, weight=0.5)
     _record_hit(store, edge1)
     _record_hit(store, edge2)
 
@@ -358,8 +390,8 @@ def test_r4_incremental_hits_after_aligned_run_reinforce_only_new_lines(tmp_path
     )
 
     store, index = _store(tmp_path)
-    edge1 = _active_edge(index, 22, weight=0.5)
-    edge2 = _active_edge(index, 23, weight=0.5)
+    edge1 = _active_edge(store, index, 22, weight=0.5)
+    edge2 = _active_edge(store, index, 23, weight=0.5)
     _record_hit(store, edge1)
 
     first = run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -392,8 +424,8 @@ def test_r4_cursor_misalignment_fingerprint_mismatch_reports_nonzero_skipped_cou
     )
 
     store, index = _store(tmp_path)
-    edge1 = _active_edge(index, 40, weight=0.5)
-    edge2 = _active_edge(index, 41, weight=0.5)
+    edge1 = _active_edge(store, index, 40, weight=0.5)
+    edge2 = _active_edge(store, index, 41, weight=0.5)
     _record_hit(store, edge1)
     _record_hit(store, edge2)
 
@@ -415,8 +447,8 @@ def test_r4_cursor_misalignment_fingerprint_mismatch_reports_nonzero_skipped_cou
     real_lines = shadow_path.read_text(encoding="utf-8").splitlines()
     assert len(real_lines) == 2
     shadow_path.write_text(real_lines[1] + "\n", encoding="utf-8", newline="\n")
-    edge3 = _active_edge(index, 42, weight=0.5)
-    edge4 = _active_edge(index, 43, weight=0.5)
+    edge3 = _active_edge(store, index, 42, weight=0.5)
+    edge4 = _active_edge(store, index, 43, weight=0.5)
     _record_hit(store, edge3)
     _record_hit(store, edge4)
     post_compaction_lines = shadow_path.read_text(encoding="utf-8").splitlines()
@@ -456,8 +488,8 @@ def test_r4_torn_last_line_is_not_counted_and_completes_next_run(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edge1 = _active_edge(index, 50, weight=0.5)
-    edge2 = _active_edge(index, 51, weight=0.5)
+    edge1 = _active_edge(store, index, 50, weight=0.5)
+    edge2 = _active_edge(store, index, 51, weight=0.5)
 
     # Both rows built via the real producer first, so their exact serialized
     # form is captured -- only the torn-write SIMULATION below appends raw
@@ -490,7 +522,7 @@ def test_r4_torn_last_line_is_not_counted_and_completes_next_run(tmp_path):
 
     # Complete the torn line (the writer's write() finishes) and append one
     # brand-new full row via the real producer.
-    edge3 = _active_edge(index, 52, weight=0.5)
+    edge3 = _active_edge(store, index, 52, weight=0.5)
     with shadow_path.open("ab") as fh:
         fh.write((complete_line1[len(torn_line1):] + "\n").encode("utf-8"))
     _record_hit(store, edge3)
@@ -518,7 +550,7 @@ def test_r4_forget_backlog_and_never_hit_counters(tmp_path):
     )
 
     store, index = _store(tmp_path)
-    edges = [_active_edge(index, 100 + i, weight=0.5) for i in range(FORGET_MAX_PER_RUN + 5)]
+    edges = [_active_edge(store, index, 100 + i, weight=0.5) for i in range(FORGET_MAX_PER_RUN + 5)]
     _record_hit(store, edges[0])  # 建立 first_injection_at(真实注入)
 
     run_edge_weight_feedback(str(index.roots.index_path), index=index)
@@ -532,3 +564,317 @@ def test_r4_forget_backlog_and_never_hit_counters(tmp_path):
     # 其中未命中者全部计入 never_hit(edges[0] 若在本轮内且曾命中则不计)。
     assert result["invalidated_never_hit_count"] >= FORGET_MAX_PER_RUN - 1
     assert result["invalidated_never_hit_count"] <= result["forgotten_count"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# G0 — 孤儿边级联作废:active 边的结晶端点离开 active 结晶集必须作废,
+# 与按命中信号的遗忘机制互相独立。
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_g0_orphan_edge_with_inactive_endpoint_is_invalidated(tmp_path):
+    """反事实:active 边的结晶端点一旦被 demote(离开 active 结晶集),必须
+    被级联作废,原因码 endpoint_inactive,且不影响端点仍 active 的健康边。
+    修复缺席时:该边永远停留 active——它从未被注入过也从未超龄,现有的
+    按命中信号遗忘机制根本不看端点活性,永远不会处决它(生产实测 96%/
+    82% 的结晶↔结晶边正是这个形状)。"""
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        ORPHAN_CASCADE_INVALIDATION_REASON,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge_ok = _active_edge(store, index, 200, weight=0.6)
+    edge_orphan = _active_edge(store, index, 201, weight=0.6)
+
+    # 真实生产者的增量降级路径(update_canonical_state_in_index),不是
+    # rebuild 丢弃路径——两条路径本作废机制都必须覆盖。
+    CrystallizedMemoryService(store).demote_record(
+        edge_orphan["to_record_id"], demoted_by="owner", reason="test demote",
+    )
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok"
+    assert result["orphan_scanned_count"] >= 2
+    assert result["orphan_invalidated_count"] == 1
+    assert result["orphan_skipped_by_cap_count"] == 0
+
+    conn = sqlite3.connect(str(index.roots.index_path))
+    row_orphan = conn.execute(
+        "select state, invalidation_reason from memory_edges where edge_id = ?",
+        (edge_orphan["edge_id"],),
+    ).fetchone()
+    row_ok = conn.execute(
+        "select state, invalidation_reason from memory_edges where edge_id = ?",
+        (edge_ok["edge_id"],),
+    ).fetchone()
+    conn.close()
+    assert row_orphan[0] == "invalidated"
+    assert row_orphan[1] == ORPHAN_CASCADE_INVALIDATION_REASON
+    assert row_ok[0] == "active", "an edge whose endpoints are both still active must survive"
+    assert row_ok[1] is None
+
+
+def test_g0_orphan_edge_dropped_by_rebuild_is_also_invalidated(tmp_path):
+    """反事实(第二条生产路径):demote_record 原地改写 frontmatter,一次
+    全量 rebuild 后 _index_crystallized_records 跳过 inactive frontmatter,
+    端点从 crystallized_records 表中整体消失——端点在表里"查无此 id",
+    区别于测试 1 的"查到但 canonical_state 不活跃"(增量更新路径,行仍在
+    表里)。级联判定必须把「表里缺席」也算孤儿,否则生产上大多数孤儿边
+    (过期 provisional/discard 经 rebuild 后从不会在表里留一行 inactive
+    记录)会被漏判。"""
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.edge_weight_feedback import (
+        ORPHAN_CASCADE_INVALIDATION_REASON,
+        run_edge_weight_feedback,
+    )
+
+    store, index = _store(tmp_path)
+    edge = _active_edge(store, index, 210, weight=0.6)
+
+    CrystallizedMemoryService(store).demote_record(
+        edge["to_record_id"], demoted_by="owner", reason="test demote before rebuild",
+    )
+    index.rebuild_from_store(store)  # full rebuild, not just the incremental SQL update
+
+    conn = sqlite3.connect(str(index.roots.index_path))
+    present = conn.execute(
+        "select 1 from crystallized_records where id = ?", (edge["to_record_id"],),
+    ).fetchone()
+    conn.close()
+    assert present is None, "a full rebuild must drop the inactive record from the table entirely"
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["orphan_invalidated_count"] == 1
+
+    conn = sqlite3.connect(str(index.roots.index_path))
+    row = conn.execute(
+        "select state, invalidation_reason from memory_edges where edge_id = ?",
+        (edge["edge_id"],),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "invalidated"
+    assert row[1] == ORPHAN_CASCADE_INVALIDATION_REASON
+
+
+def test_g0_orphan_cascade_ignores_event_endpoints(tmp_path):
+    """反事实(越界扫描):event 类型端点从不参与孤儿判定——哪怕
+    from_record_id 指向一个从未存在过的 event id,只要另一端结晶记录仍
+    active,该边不得被误判为孤儿。修复错误若把"不在 crystallized_records
+    表里"当孤儿判据用于所有 record_type(而非只用于 crystallized_record),
+    这条边会被误杀。"""
+    from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
+
+    store, index = _store(tmp_path)
+    to_id = "cry_evt_scope_to"
+    _seed_crystallized(store, to_id)
+    index.sync_from_store(store)
+    edge = index.write_governed_edge(
+        from_record_type="event", from_record_id="evt_never_crystallized_999",
+        to_record_type="crystallized_record", to_record_id=to_id,
+        relation_type="evidence_for", weight=0.7, proposed_by="provenance",
+        state="active",
+    )
+    assert edge and edge.get("edge_id")
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["orphan_invalidated_count"] == 0
+
+    conn = sqlite3.connect(str(index.roots.index_path))
+    row = conn.execute(
+        "select state from memory_edges where edge_id = ?", (edge["edge_id"],),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "active"
+
+
+def test_g0_orphan_cascade_respects_per_run_cap(tmp_path, monkeypatch):
+    """反事实(有界性):孤儿边级联每轮上限必须生效——超额部分计入
+    orphan_skipped_by_cap_count(积压可见),不得静默处理或无界执行。"""
+    import plugins.memory.memory_os.edge_weight_feedback as ewf_module
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+    monkeypatch.setattr(ewf_module, "ORPHAN_CASCADE_MAX_PER_RUN", 2)
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 300 + i, weight=0.5) for i in range(5)]
+    svc = CrystallizedMemoryService(store)
+    for e in edges:
+        svc.demote_record(e["to_record_id"], demoted_by="owner", reason="cap test")
+
+    result = ewf_module.run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["orphan_scanned_count"] == 5
+    assert result["orphan_invalidated_count"] == 2
+    assert result["orphan_skipped_by_cap_count"] == 3
+
+    conn = sqlite3.connect(str(index.roots.index_path))
+    states = [
+        conn.execute(
+            "select state from memory_edges where edge_id = ?", (e["edge_id"],),
+        ).fetchone()[0]
+        for e in edges
+    ]
+    conn.close()
+    assert states.count("invalidated") == 2
+    assert states.count("active") == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# G0 — shadow 账本体积治理:producer 侧 size-gated compaction
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_g0_shadow_ledger_is_compacted_when_oversized(tmp_path, monkeypatch):
+    """反事实:shadow 账本超过阈值时必须被压缩(先归档再丢弃);本轮持久化
+    的游标必须反映压缩前的行数,不受随后压缩的影响——否则下一轮会针对
+    自己造成的收缩误报错位。修复缺席时账本无界增长,从不触发压缩
+    (生产实测约 15MB,过去只有"未来再压缩"的注释)。"""
+    import plugins.memory.memory_os.edge_weight_feedback as ewf_module
+
+    monkeypatch.setattr(ewf_module, "GRAPH_LAYER_SHADOW_COMPACT_MIN_BYTES", 1)
+    monkeypatch.setattr(ewf_module, "GRAPH_LAYER_SHADOW_KEEP_RECORDS", 3)
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 400 + i, weight=0.5) for i in range(5)]
+    for e in edges:
+        _record_hit(store, e)
+
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    lines_before = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines_before) == 5
+
+    result = ewf_module.run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["reinforced_count"] == 5
+    assert result["shadow_compaction_reason"] == "compacted"
+    assert result["shadow_compaction_records_archived"] == 2
+
+    lines_after = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines_after) == 3, "ledger must be size-gated to keep_records after compaction"
+
+    archive_path = shadow_path.with_name("graph_layer_shadow.archive.jsonl")
+    assert archive_path.exists()
+    archived_lines = archive_path.read_text(encoding="utf-8").splitlines()
+    assert len(archived_lines) == 2
+
+    state_path = store.roots.memory_os_root / "system" / ewf_module.STATE_FILENAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["processed_line_count"] == 5, (
+        "this run's own cursor must reflect the PRE-compaction line count, "
+        "never the post-compaction file it caused itself"
+    )
+
+    # A following run must cleanly realign against the shrink it caused,
+    # never crash and never silently reprocess from zero.
+    second = ewf_module.run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert second["cursor_misaligned"] is True
+    assert second["cursor_misalignment_reason"] == "ledger_shorter_than_cursor"
+    assert second["cursor_realigned_line_count"] == 3
+
+
+def test_g0_shadow_ledger_compaction_refuses_on_malformed_lines(tmp_path, monkeypatch):
+    """反事实:账本含有畸形行时压缩必须拒绝(reason=malformed_lines_present),
+    一行都不得删除——否则一次半写入竞态留下的畸形行会让压缩把还没被
+    cursor 消费的真实命中一并冲掉,且不可恢复(见 jsonl_io.compact_jsonl_tail
+    的归档先行契约)。"""
+    import plugins.memory.memory_os.edge_weight_feedback as ewf_module
+
+    monkeypatch.setattr(ewf_module, "GRAPH_LAYER_SHADOW_COMPACT_MIN_BYTES", 1)
+
+    store, index = _store(tmp_path)
+    edge = _active_edge(store, index, 410, weight=0.5)
+    _record_hit(store, edge)
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    with shadow_path.open("a", encoding="utf-8") as fh:
+        fh.write("{not valid json\n")
+
+    lines_before = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines_before) == 2
+
+    result = ewf_module.run_edge_weight_feedback(str(index.roots.index_path), index=index)
+    assert result["shadow_compaction_reason"] == "malformed_lines_present"
+
+    lines_after = shadow_path.read_text(encoding="utf-8").splitlines()
+    assert lines_after == lines_before, "a refused compaction must not touch the live ledger"
+
+
+# ── G0 review: liveness is canonical, and an untrustworthy view fails closed ─
+
+
+def _states(index, edges):
+    return [_weight_of(index, edge["edge_id"])[1] for edge in edges]
+
+
+def test_g0_orphan_cascade_trusts_canonical_files_not_the_index(tmp_path):
+    """Counterfactual (review of G0): liveness was read from the rebuildable
+    index. With ``crystallized_records`` empty — a fresh install, a failed
+    index_sync, a rebuild window — every endpoint read as "absent" and the
+    whole graph was invalidated through canonical writes. The canonical files
+    are intact here, so nothing may be invalidated."""
+    from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 300 + i, weight=0.6) for i in range(3)]
+    conn = sqlite3.connect(str(index.roots.index_path))
+    conn.execute("delete from crystallized_records")
+    conn.commit()
+    conn.close()
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+
+    assert result["orphan_invalidated_count"] == 0
+    assert result["orphan_cascade_skipped_reason"] == ""
+    assert _states(index, edges) == ["active"] * 3
+
+
+def test_g0_orphan_cascade_skips_when_canonical_files_are_missing(tmp_path):
+    from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 310 + i, weight=0.6) for i in range(2)]
+    for path in store.roots.crystallized_root.glob("*.md"):
+        path.unlink()
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+
+    assert result["orphan_cascade_skipped_reason"] == "canonical_empty"
+    assert result["orphan_invalidated_count"] == 0
+    assert _states(index, edges) == ["active"] * 2
+
+
+def test_g0_orphan_cascade_skips_on_canonical_read_failure(tmp_path, monkeypatch):
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 320 + i, weight=0.6) for i in range(2)]
+
+    def _boom(self, file_name):
+        raise OSError("disk read failed")
+
+    monkeypatch.setattr(CrystallizedMemoryService, "read_records", _boom)
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+
+    assert result["orphan_cascade_skipped_reason"] == "canonical_read_failed"
+    assert result["orphan_invalidated_count"] == 0
+    [error] = result["orphan_cascade_error_records"]
+    assert error["component"] == "edge_weight_feedback"
+    assert error["error_code"] == "canonical_read_failed"
+    assert _states(index, edges) == ["active"] * 2
+
+
+def test_g0_orphan_cascade_skips_on_an_unparseable_canonical_file(tmp_path):
+    from plugins.memory.memory_os.edge_weight_feedback import run_edge_weight_feedback
+
+    store, index = _store(tmp_path)
+    edges = [_active_edge(store, index, 330 + i, weight=0.6) for i in range(2)]
+    # a non-empty file that parses to zero records: its ids must not read as "absent"
+    (store.roots.crystallized_root / f"{edges[0]['to_record_id']}.md").write_text(
+        "this is not a crystallized record", encoding="utf-8"
+    )
+
+    result = run_edge_weight_feedback(str(index.roots.index_path), index=index)
+
+    assert result["orphan_cascade_skipped_reason"] == "canonical_unparseable_file"
+    assert result["orphan_invalidated_count"] == 0
+    assert _states(index, edges) == ["active"] * 2

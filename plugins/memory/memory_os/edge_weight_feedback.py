@@ -16,12 +16,25 @@ Owner 决策 2026-08-06:「动态图谱应该是动态去更新关系的…不�
     **首次真实注入**之日起算(v0 用闭环首跑时间,但 knob 关闭期间 shadow
     照样有行,守卫 ``shadow_exists and lines`` 会在从未展示过任何东西的
     时期放行遗忘);无 first_injection_at(注入从未活跃)不遗忘。
+  - **孤儿边级联作废(G0)**:active 边的结晶端点若已离开 active 结晶集
+    (过期 provisional / discard / demote / revoke / superseded ——
+    ``crystallized.INACTIVE_CANONICAL_STATES``)→ invalidated,原因码
+    ``endpoint_inactive``,每轮上限 ``ORPHAN_CASCADE_MAX_PER_RUN``。与
+    遗忘机制独立(不看命中信号,不受 first_injection_at 门控)——生产实测
+    96%(main)/82%(sannai)的结晶↔结晶边指向已失效端点且从未被作废。
+  - **shadow 账本体积治理(G0)**:``graph_layer_shadow.jsonl`` 无界增长
+    (生产实测约 15MB,过去只有"未来再压缩"的注释)——本步骤末尾用
+    ``jsonl_io.compact_jsonl_tail`` 做 size-gated 压缩(先归档再丢弃,
+    见 GRAPH_LAYER_SHADOW_KEEP_RECORDS/_COMPACT_MIN_BYTES),置于 cursor
+    状态持久化**之后**,使一次压缩事件只可能影响下一轮(该游标的错位
+    检测机制本就是为这个场景准备的)。
 
 Durable state: ``system/edge_weight_feedback_state.json``
 (processed_line_count cursor + per-edge last_hit + first_run_at +
 first_injection_at)。Completion Is Not Output: closed outcome +
 production counters(含 already_saturated / skipped_not_injected /
-invalidated_never_hit / forget_eligible_backlog)。
+invalidated_never_hit / forget_eligible_backlog / orphan_scanned /
+orphan_invalidated / orphan_skipped_by_cap / shadow_compaction_reason)。
 
 Runs as a cognitive-loop step.
 """
@@ -34,6 +47,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .audit import append_audit
+from .crystallized import INACTIVE_CANONICAL_STATES, CrystallizedMemoryService
+from .jsonl_io import build_error_record, compact_jsonl_tail
+from .store import MemoryOSStore
 from .state_overlay import _atomic_write_json
 
 # 乘性强化:w += RATE × (1 − w)。1.0 是不可达渐近线 — 高分区并列消失
@@ -44,6 +60,32 @@ HIT_LEARNING_RATE = 0.12
 FORGET_AFTER_DAYS = 60
 FORGET_MAX_PER_RUN = 50
 STATE_FILENAME = "edge_weight_feedback_state.json"
+
+# G0 orphan-edge cascade: an active edge whose crystallized endpoint is no
+# longer in the active crystallized set (expired provisional / discarded /
+# demoted / revoked / superseded — see crystallized.INACTIVE_CANONICAL_STATES)
+# is dead weight the forgetting lane above never catches, because forgetting
+# only fires on 60-day hit-idleness, not on endpoint liveness. Measured on
+# production: 96% (main) / 82% (sannai) of crystallized<->crystallized edges
+# point at an inactive endpoint and are never invalidated. Bounded per run
+# like the forgetting lane above (own cap — a different mechanism, not the
+# same backlog). Event endpoints are out of scope: only endpoints typed
+# "crystallized_record" are checked for liveness.
+ORPHAN_CASCADE_MAX_PER_RUN = 200
+ORPHAN_CASCADE_INVALIDATION_REASON = "endpoint_inactive"
+
+# G0 shadow-ledger size bound: system/graph_layer_shadow.jsonl had no bound
+# at all (measured ~15MB on production, code only said "future compaction").
+# Compaction runs here — the same offline lifecycle step that already reads
+# this ledger via a line-count cursor with built-in misalignment detection
+# (see the "Cursor alignment check" section below), so a compaction event is
+# not a new failure mode for that reader, it is the scenario the cursor
+# fingerprint check was already built to survive. keep_records must stay
+# >= every known reader's tail window: the 3.200 monitor's
+# graph_injection_shadow_state() reads rows[-2000:] over a 7-day cutoff, and
+# prefetch.graph_layer_shadow_novelty_summary() defaults to max_records=2000.
+GRAPH_LAYER_SHADOW_KEEP_RECORDS = 5000
+GRAPH_LAYER_SHADOW_COMPACT_MIN_BYTES = 1_048_576
 
 
 def _load_state(path) -> dict[str, Any]:
@@ -65,6 +107,38 @@ def _line_fingerprint(line: str) -> str:
     >= the old cursor — a bare line-count comparison alone would miss that.
     """
     return hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+
+
+def _canonical_crystallized_states(roots: Any) -> tuple[dict[str, str], str]:
+    """Map every crystallized record id in the canonical files to its canonical_state.
+
+    Returns ``(states, skip_reason)``. A non-empty ``skip_reason`` means the
+    canonical view cannot be trusted this run, so no edge may be judged an
+    orphan: no crystallized files at all, or a non-empty file that parses to
+    zero records (its ids would otherwise all read as "absent"). State changes
+    rewrite a record in place, so an id appears once; should it ever appear
+    twice, any active occurrence wins — ambiguity never invalidates.
+    """
+    crystallized_root = roots.crystallized_root
+    if not crystallized_root.exists():
+        return {}, "canonical_empty"
+    service = CrystallizedMemoryService(MemoryOSStore(roots))
+    states: dict[str, str] = {}
+    for path in sorted(crystallized_root.glob("*.md")):
+        records = service.read_records(path.name)
+        if not records and path.read_text(encoding="utf-8").strip():
+            return {}, "canonical_unparseable_file"
+        for record in records:
+            record_id = str(record.frontmatter.get("id") or "").strip()
+            if not record_id:
+                continue
+            state = str(record.frontmatter.get("canonical_state") or "active").strip().lower()
+            if states.get(record_id, "") not in INACTIVE_CANONICAL_STATES and record_id in states:
+                continue  # an active occurrence already recorded wins
+            states[record_id] = state
+    if not states:
+        return {}, "canonical_empty"
+    return states, ""
 
 
 def run_edge_weight_feedback(
@@ -108,6 +182,12 @@ def run_edge_weight_feedback(
     already_saturated = 0
     invalidated_never_hit = 0
     forget_eligible = 0
+    orphan_scanned = 0
+    orphan_invalidated = 0
+    orphan_skipped_by_cap = 0
+    # Closed set: "" | canonical_empty | canonical_unparseable_file | canonical_read_failed
+    orphan_cascade_skipped_reason = ""
+    orphan_cascade_error_records: list[dict[str, Any]] = []
 
     shadow_exists = shadow_path.exists()
     lines: list[str] = []
@@ -307,10 +387,103 @@ def run_edge_weight_feedback(
                     last_hit.pop(edge_id, None)
                 else:
                     failed += 1
+
+        # ── 3. Cascade-invalidate active edges with an inactive
+        # crystallized endpoint ("orphan" edges, G0) ────────────────────
+        # Independent of the injection/hit signal above — runs regardless
+        # of first_injection_at, because this is a correctness sweep for
+        # edges whose crystallized_record endpoint left the active
+        # crystallized set (expired provisional / discarded / demoted /
+        # revoked / superseded — crystallized.INACTIVE_CANONICAL_STATES),
+        # not a usage-based forgetting decision. An endpoint id absent from
+        # crystallized_records means a full rebuild already dropped it
+        # (_index_crystallized_records skips inactive frontmatter entirely
+        # — the dominant production shape); an endpoint id present with a
+        # canonical_state in INACTIVE_CANONICAL_STATES means it was
+        # demoted/revoked incrementally (update_canonical_state_in_index)
+        # since the last rebuild. Events are out of scope — only
+        # from/to_record_type == "crystallized_record" is checked.
+        try:
+            orphan_candidates = conn.execute(
+                "select edge_id, from_record_type, from_record_id,"
+                " to_record_type, to_record_id from memory_edges"
+                " where state = 'active'"
+                " and (from_record_type = 'crystallized_record'"
+                "      or to_record_type = 'crystallized_record')",
+            ).fetchall()
+        except sqlite3.Error:
+            orphan_candidates = []
+        orphan_scanned = len(orphan_candidates)
+
+        referenced_ids: set[str] = set()
+        for row in orphan_candidates:
+            if str(row["from_record_type"]) == "crystallized_record":
+                referenced_ids.add(str(row["from_record_id"]))
+            if str(row["to_record_type"]) == "crystallized_record":
+                referenced_ids.add(str(row["to_record_id"]))
+
+        # Liveness comes from the canonical crystallized files, never from the
+        # rebuildable index: an empty, mid-rebuild or erroring index would
+        # read every endpoint as "absent" and invalidate the whole graph
+        # through canonical writes. An untrustworthy canonical view skips
+        # the cascade for this run (fail-closed) and says why.
+        crystallized_state_by_id: dict[str, str] = {}
+        if referenced_ids:
+            try:
+                crystallized_state_by_id, orphan_cascade_skipped_reason = _canonical_crystallized_states(roots)
+            except Exception as exc:  # canonical read must never half-succeed silently
+                orphan_cascade_skipped_reason = "canonical_read_failed"
+                orphan_cascade_error_records.append(
+                    build_error_record(
+                        component="edge_weight_feedback",
+                        operation="orphan_cascade_canonical_read",
+                        error_code="canonical_read_failed",
+                        severity="warning",
+                        recoverable=True,
+                        details={"error_type": type(exc).__name__},
+                    )
+                )
+
+        def _endpoint_is_orphaned(record_type: str, record_id: str) -> bool:
+            if record_type != "crystallized_record":
+                return False
+            state_value = crystallized_state_by_id.get(record_id)
+            if state_value is None:
+                # Absent from the canonical files: the record was removed
+                # (edge birth requires a real record), so the edge is an orphan.
+                return True
+            return state_value in INACTIVE_CANONICAL_STATES
+
+        orphan_eligible = 0
+        if orphan_cascade_skipped_reason:
+            orphan_candidates = []
+        for row in orphan_candidates:
+            edge_id = str(row["edge_id"])
+            is_orphan = (
+                _endpoint_is_orphaned(str(row["from_record_type"]), str(row["from_record_id"]))
+                or _endpoint_is_orphaned(str(row["to_record_type"]), str(row["to_record_id"]))
+            )
+            if not is_orphan:
+                continue
+            # 全量计数 eligible(积压可见性),cap 只限制本轮处决数 — 同
+            # forgetting 步骤的 forget_eligible 模式。
+            orphan_eligible += 1
+            if orphan_invalidated >= ORPHAN_CASCADE_MAX_PER_RUN:
+                continue
+            result = transition_edge_state(
+                conn, edge_id, "invalidated", roots=roots,
+                reason=ORPHAN_CASCADE_INVALIDATION_REASON,
+            )
+            if result and result.get("state") == "invalidated":
+                orphan_invalidated += 1
+                last_hit.pop(edge_id, None)
+            else:
+                failed += 1
+        orphan_skipped_by_cap = max(0, orphan_eligible - orphan_invalidated)
     finally:
         conn.close()
 
-    # ── 3. Persist cursor + hit watermarks (durable state) ─────────────
+    # ── 4. Persist cursor + hit watermarks (durable state) ──────────────
     state_out = {
         "schema_version": "memory-os.edge_weight_feedback_state.v1",
         "first_run_at": first_run_at,
@@ -337,7 +510,34 @@ def run_edge_weight_feedback(
     except Exception:
         failed += 1
 
-    if reinforced or forgotten or already_saturated:
+    # ── 5. Producer-side size-gated compaction of the shadow ledger (G0) ─
+    # Deliberately AFTER the cursor/state persist above: this run's cursor
+    # was computed from the PRE-compaction `lines` (read earlier, unaffected
+    # by a later on-disk rewrite), so ordering it after the persist means a
+    # crash between the two steps just leaves compaction un-run — never a
+    # cursor pointed past a file that no longer exists. A FOLLOWING run
+    # observing the shorter, compacted file is exactly the scenario the
+    # cursor-alignment check above was already built to survive ("future
+    # graph_layer_shadow.jsonl compaction" in its own comments) — it
+    # realigns and reports the gap rather than reprocessing from zero.
+    # compact_jsonl_tail refuses (no-op, reason="malformed_lines_present")
+    # if the ledger contains any line this reader could not parse — never
+    # silently deletes what cannot be reconstructed.
+    shadow_compaction: dict[str, Any] = {
+        "reason": "no_file", "records_kept": 0, "records_archived": 0,
+        "error_records": [],
+    }
+    if shadow_exists:
+        shadow_compaction = compact_jsonl_tail(
+            shadow_path,
+            keep_records=GRAPH_LAYER_SHADOW_KEEP_RECORDS,
+            min_bytes=GRAPH_LAYER_SHADOW_COMPACT_MIN_BYTES,
+            archive_path=shadow_path.with_name(f"{shadow_path.stem}.archive.jsonl"),
+            component="edge_weight_feedback",
+            operation="graph_layer_shadow_compaction",
+        )
+
+    if reinforced or forgotten or already_saturated or orphan_invalidated:
         outcome = "reinforced"
     elif cursor_misaligned:
         # Distinct from "no_new_hits": we did NOT verify there was nothing
@@ -352,7 +552,9 @@ def run_edge_weight_feedback(
 
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
     summary = {
-        "status": "ok" if not (failed and not reinforced and not forgotten) else "error",
+        "status": "ok" if not (
+            failed and not reinforced and not forgotten and not orphan_invalidated
+        ) else "error",
         "outcome": outcome,
         "new_hit_record_count": len(new_lines),
         "reinforced_count": reinforced,
@@ -364,6 +566,19 @@ def run_edge_weight_feedback(
         "unresolved_hit_count": unresolved_hits,
         "failed_count": failed,
         "tracked_edge_count": len(last_hit),
+        # G0 orphan-edge cascade counters (Completion Is Not Output: a lane
+        # that scans and finds nothing must say so through a real 0, not by
+        # omitting the keys).
+        "orphan_scanned_count": orphan_scanned,
+        "orphan_invalidated_count": orphan_invalidated,
+        "orphan_skipped_by_cap_count": orphan_skipped_by_cap,
+        "orphan_cascade_skipped_reason": orphan_cascade_skipped_reason,
+        "orphan_cascade_error_records": orphan_cascade_error_records,
+        # G0 shadow-ledger compaction (closed reason set — see
+        # jsonl_io.COMPACT_JSONL_TAIL_REASONS).
+        "shadow_compaction_reason": shadow_compaction["reason"],
+        "shadow_compaction_records_archived": shadow_compaction["records_archived"],
+        "shadow_compaction_suppressed_error_count": len(shadow_compaction.get("error_records") or []),
         # Cursor-alignment fields are unconditional (0/None when aligned) so
         # monitors get a stable schema; they can be non-zero even when
         # `outcome == "reinforced"` (forgetting still runs on a misaligned

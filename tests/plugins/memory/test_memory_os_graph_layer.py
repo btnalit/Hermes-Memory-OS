@@ -54,8 +54,9 @@ def _conn(index: MemoryOSIndex) -> sqlite3.Connection:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_t1_1_1_schema_has_all_12_columns(tmp_path):
-    """T1.1.1: memory_edges schema has all 12 columns."""
+def test_t1_1_1_schema_has_all_13_columns(tmp_path):
+    """T1.1.1: memory_edges schema has all 13 columns (G0 adds
+    invalidation_reason alongside invalidated_at)."""
     _, index = _store(tmp_path)
     conn = _conn(index)
     cols = {str(c[1]) for c in conn.execute("pragma table_info(memory_edges)").fetchall()}
@@ -64,7 +65,7 @@ def test_t1_1_1_schema_has_all_12_columns(tmp_path):
         "edge_id", "from_record_type", "from_record_id",
         "to_record_type", "to_record_id", "relation_type",
         "weight", "created_at", "source_event_id",
-        "state", "invalidated_at", "proposed_by",
+        "state", "invalidated_at", "proposed_by", "invalidation_reason",
     }
     assert cols == expected, f"Missing cols: {expected - cols}"
 
@@ -100,7 +101,7 @@ def test_t1_1_2_rebuild_is_reversible(tmp_path):
         "edge_id", "from_record_type", "from_record_id",
         "to_record_type", "to_record_id", "relation_type",
         "weight", "created_at", "source_event_id",
-        "state", "invalidated_at", "proposed_by",
+        "state", "invalidated_at", "proposed_by", "invalidation_reason",
     }
     assert cols == expected, f"Missing cols: {expected - cols}"
 
@@ -2908,3 +2909,213 @@ def test_explore_rotation_stays_type_blind(tmp_path):
     assert len(co_injected) == GRAPH_EXPLORE_SLOTS, (
         f"explore rotation must stay open to co_occurs: {sorted(injected)}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# G0 — 活性预解析必须发生在选位之前:inactive 目标不得占用 exploit/
+# explore 名额;注入行的 novelty + shadow 行的 session_ref/聚合。
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_g0_inactive_target_does_not_consume_a_selection_slot(tmp_path):
+    """反事实:候选池里权重最高的一条边指向一个已撤销的邻居。旧实现(选位
+    在预览解析之前)会让它凭最高权重抢占一个 exploit 名额,渲染时才发现
+    target_inactive 整行丢弃——那个名额白白浪费,总注入行数从满额 8 掉到
+    7。修复后:活性预解析在选位之前剔除它,不占位,活边正常填满 8 个
+    名额(6 exploit + 2 explore)。"""
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.prefetch import (
+        GRAPH_EXPLOIT_SLOTS,
+        GRAPH_EXPLORE_SLOTS,
+        _render_graph_layer_lines,
+    )
+
+    store, anchor, neighbors = _slot_store(tmp_path, 9)
+    revoked = _write_cry_record(
+        store, body="SECRET-NONCE-REVOKED-HIGH-WEIGHT", candidate_id="cand-slot-revoked",
+        file_name="slot_revoked.md",
+    )
+    CrystallizedMemoryService(store).revoke_record(revoked, revoked_by="owner", reason="test")
+
+    edges = [
+        _slot_edge(f"co-{i}", anchor, neighbors[i], "co_occurs", 0.93 - i * 0.01)
+        for i in range(9)
+    ] + [
+        # Highest weight in the whole pool — wins the top exploit slot under
+        # pure weight ordering if liveness is not resolved first.
+        _slot_edge("co-revoked", anchor, revoked, "co_occurs", 0.99),
+    ]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(), day_ordinal=738000,
+    )
+
+    cap = GRAPH_EXPLOIT_SLOTS + GRAPH_EXPLORE_SLOTS
+    assert len(lines) == cap, (
+        f"an inactive candidate must never consume a selection slot: {len(lines)} lines, "
+        f"expected {cap}"
+    )
+    assert "SECRET-NONCE" not in "\n".join(lines)
+    by_target = {str(d["edge"]["to_record_id"]): d for d in decisions}
+    assert by_target[revoked]["outcome"] == "target_inactive"
+    assert by_target[revoked]["injected"] is False
+
+
+def test_g0_novelty_computed_from_terms_not_covered_by_anchor_and_query(tmp_path):
+    """反事实(novelty 定义,可手算的中文 fixture):锚点正文「深色主题」的
+    双字词集是 {深色,色主,主题}(3 个);邻居正文「深色主题很好用」的双字
+    词集是 {深色,色主,主题,题很,很好,好用}(6 个);query 为空。锚点未
+    覆盖邻居词集中的 {题很,很好,好用}(3 个),novelty = 3/6 = 0.5。修复
+    缺席时 decisions 里没有 novelty 字段。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    anchor = _write_cry_record(
+        store, body="深色主题", candidate_id="cand-novelty-anchor",
+        file_name="novelty_anchor.md",
+    )
+    neighbor = _write_cry_record(
+        store, body="深色主题很好用", candidate_id="cand-novelty-neighbor",
+        file_name="novelty_neighbor.md",
+    )
+    edges = [_slot_edge("edge-novelty", anchor, neighbor, "co_occurs", 0.9)]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(), query="",
+    )
+    assert len(lines) == 1
+    injected = [d for d in decisions if d.get("injected")]
+    assert len(injected) == 1
+    assert injected[0]["novelty"] == pytest.approx(0.5)
+
+
+def test_g0_novelty_query_terms_also_count_as_known_context(tmp_path):
+    """反事实(query 参与基线):同一对锚点/邻居,若 query 本身已经覆盖了
+    邻居新增的那三个词,novelty 必须相应下降——novelty 基线是「锚点预览
+    ∪ query」,不是只看锚点。"""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    anchor = _write_cry_record(
+        store, body="深色主题", candidate_id="cand-novelty-q-anchor",
+        file_name="novelty_q_anchor.md",
+    )
+    neighbor = _write_cry_record(
+        store, body="深色主题很好用", candidate_id="cand-novelty-q-neighbor",
+        file_name="novelty_q_neighbor.md",
+    )
+    edges = [_slot_edge("edge-novelty-q", anchor, neighbor, "co_occurs", 0.9)]
+
+    lines, decisions = _render_graph_layer_lines(
+        store, edges, anchor_ids=[anchor], seen=set(), query="题很好用",
+    )
+    injected = [d for d in decisions if d.get("injected")]
+    assert len(injected) == 1
+    assert injected[0]["novelty"] == pytest.approx(0.0), (
+        "query already covers every term the neighbor would otherwise add"
+    )
+
+
+def test_g0_session_ref_is_hashed_never_raw_in_shadow_row(tmp_path):
+    """反事实(会话脱敏 + 行级聚合):shadow 行必须携带 session_id 的短
+    哈希,原始 session_id 绝不能出现在落盘的行里;同一行的
+    mean_injected_novelty 必须等于本轮唯一注入邻居的 novelty。修复缺席时
+    session_ref 缺失或直接是明文 session_id,mean_injected_novelty 缺失。
+    """
+    import hashlib
+    import json as _json
+
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os.prefetch import _graph_layer_shadow_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    anchor = _write_cry_record(
+        store, body="深色主题", candidate_id="cand-sref-anchor", file_name="sref_anchor.md",
+    )
+    neighbor = _write_cry_record(
+        store, body="深色主题很好用", candidate_id="cand-sref-neighbor", file_name="sref_neighbor.md",
+    )
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id=anchor,
+        to_record_type="crystallized_record", to_record_id=neighbor,
+        relation_type="co_occurs", weight=0.9, proposed_by="structural", state="active",
+    )
+    assert edge and edge.get("edge_id")
+
+    session_id = "sess-super-secret-raw-id-must-never-leak"
+    lines = _graph_layer_shadow_lines(
+        store, [anchor], index=index, seen=set(), session_id=session_id,
+    )
+    assert lines, "sanity: the edge must actually have been injected"
+
+    shadow_path = roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    rows = [
+        _json.loads(raw) for raw in shadow_path.read_text(encoding="utf-8").splitlines()
+        if raw.strip()
+    ]
+    assert rows
+    row = rows[-1]
+
+    expected_ref = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    assert row.get("session_ref") == expected_ref
+    assert session_id not in _json.dumps(row, ensure_ascii=False), (
+        "the raw session id must never be written to the shadow ledger"
+    )
+
+    assert row.get("mean_injected_novelty") == pytest.approx(0.5)
+    injected_edges = [e for e in row["edges"] if e.get("injected")]
+    assert len(injected_edges) == 1
+    assert injected_edges[0]["novelty"] == pytest.approx(0.5)
+
+
+def test_g0_novelty_summary_aggregates_shadow_ledger_tail(tmp_path):
+    """graph_layer_shadow_novelty_summary 必须从 shadow 账本尾部聚合
+    mean_injected_novelty,且空账本报 healthy_no_sample(不得伪装成 0.0
+    或 PASS——era-boundary 规则:空 gated 集不许买绿)。"""
+    from plugins.memory.memory_os.prefetch import (
+        _record_graph_layer_shadow,
+        graph_layer_shadow_novelty_summary,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    empty = graph_layer_shadow_novelty_summary(store)
+    assert empty["status"] == "no_shadow_ledger"
+    assert empty["mean_novelty"] is None
+
+    _record_graph_layer_shadow(
+        store, ["anchor-1"],
+        [{
+            "edge": {
+                "relation_type": "co_occurs", "from_record_type": "crystallized_record",
+                "from_record_id": "a", "to_record_type": "crystallized_record",
+                "to_record_id": "b", "weight": 0.5,
+            },
+            "injected": True, "outcome": "emitted_full", "novelty": 0.5,
+        }],
+        session_id="sess-x",
+    )
+
+    summary = graph_layer_shadow_novelty_summary(store)
+    assert summary["status"] == "ok"
+    assert summary["mean_novelty"] == pytest.approx(0.5)
+    assert summary["injected_edge_count"] == 1
+    assert summary["novelty_row_count"] == 1
