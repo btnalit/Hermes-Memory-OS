@@ -6590,6 +6590,39 @@ def test_principal_binding_summary_reports_no_state_db(tmp_path):
     assert namespace["principal_binding_summary"]()["status"] == "no_state_db"
 
 
+def test_principal_binding_summary_uses_state_db_path_accessor_not_a_rebuilt_literal(tmp_path, monkeypatch):
+    """DU counterfactual: principal_binding_summary must resolve state.db
+    through roots.state_db_path (SFE's accessor), not by rebuilding
+    os.path.join(hermes_home, "state.db") itself -- CLAUDE.md's "path literal
+    repeated at each call site" class of drift.
+
+    Points the accessor at a DIFFERENT file than the rebuilt literal would
+    resolve to, and writes DIFFERENT platform data into each. Only reading
+    through the accessor can see the redirected platform ("wecom" below); a
+    rebuilt literal would read the file at the literal path instead ("telegram")
+    or, since that file does not even exist here, report no_state_db.
+    """
+    import time
+
+    import plugins.memory.memory_os.roots as roots_module
+
+    redirected_db = tmp_path / "redirected" / "state.db"
+    redirected_db.parent.mkdir(parents=True, exist_ok=True)
+    _write_state_db(redirected_db, [("s1", "wecom", "2000000002", time.time())])
+    # Deliberately do NOT create tmp_path/state.db (the rebuilt-literal path) --
+    # if the fix regresses to that literal, this must observe no_state_db, not
+    # accidentally read stale/empty data at the same path.
+
+    monkeypatch.setattr(roots_module, "state_db_path", lambda roots: redirected_db)
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["principal_binding_summary"]()
+
+    assert summary["status"] == "ok"
+    assert "wecom" in summary["platforms"]
+    assert summary["platforms"]["wecom"]["session_count"] == 1
+
+
 def _principal_snapshot(platforms, *, profile="live"):
     return {
         "monitor_profile": profile,
@@ -6641,6 +6674,29 @@ def test_bound_single_user_and_ruled_sources_are_info_only():
     assert info["principal_platform_unbound"]["platform"] == "weixin"
 
 
+def test_classify_principal_binding_ruled_sources_track_principal_machine_session_sources_live(monkeypatch):
+    """DU counterfactual: _classify_principal_binding's ruled_sources must read
+    principal.MACHINE_SESSION_SOURCES live at classification time, not a frozen
+    copy hardcoded inside the monitor module. Removing "subagent" from the
+    accessor's set must make an otherwise machine-exempted unconfigured
+    "subagent" platform with >=2 distinct users gradeable (WARN) -- mirroring
+    the "subagent" row in test_bound_single_user_and_ruled_sources_are_info_only
+    above, which stays silent only because "subagent" IS still exempted there.
+    """
+    import plugins.memory.memory_os.principal as principal_module
+
+    monkeypatch.setattr(principal_module, "MACHINE_SESSION_SOURCES", frozenset({"cron"}))
+
+    platforms = {"subagent": _platform(300, 5)}
+    graded = classify_snapshot(_principal_snapshot(platforms))
+
+    assert any(
+        item["code"] == "principal_platform_unbound_with_non_owner_sessions"
+        and item["value"]["platform"] == "subagent"
+        for item in graded["warn"]
+    )
+
+
 def test_principal_binding_census_failure_is_no_sample_never_pass():
     graded = classify_snapshot({
         "monitor_profile": "live",
@@ -6669,6 +6725,371 @@ def test_graph_layer_novelty_is_info_only_never_graded():
         assert any(item["code"] == code for item in graded["info"])
         for bucket in ("pass", "warn", "fail"):
             assert not any(item["code"].startswith("graph_layer_novelty") for item in graded[bucket])
+
+
+# ─── DU: monitor part 2 -- lane_backend_transport_summary() collector +
+# J1/L1/SFE grading (2026-09-23) ─────────────────────────────────────────────
+
+def test_fact_judge_lane_report_contains_the_keys_the_monitor_reads(tmp_path):
+    """Vocabulary pin: every key lane_backend_transport_summary()'s fact_judge
+    branch reads must exist on the REAL run_fact_judge_lane() report -- a
+    renamed/removed key would otherwise silently degrade to ''/0 with nothing
+    failing (CLAUDE.md: "a gate whose vocabulary drifts from its producer's
+    checks nothing, silently")."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="default"))
+    store.initialize()
+    report = run_fact_judge_lane(store)
+
+    monitored_keys = {
+        "judge_backend", "judged_count", "judge_backend_fallback_count",
+        "judge_backend_fallback_reasons", "judge_backend_fallback_detail_sample",
+        "llm_transport", "llm_provider", "llm_model",
+    }
+    assert monitored_keys <= set(report)
+
+
+def test_session_fact_extraction_lane_report_contains_the_keys_the_monitor_reads(tmp_path):
+    """Vocabulary pin for the session_fact_extraction branch (same rationale
+    as the fact_judge test above)."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.modules.cognition.session_fact_extraction import run_session_fact_extraction_lane
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="default"))
+    store.initialize()
+    report = run_session_fact_extraction_lane(store)
+
+    monitored_keys = {
+        "input_source", "sessions_skipped_by_principal", "group_sessions_scanned",
+        "group_sessions_without_user_suffix", "llm_transport", "llm_provider", "llm_model",
+    }
+    assert monitored_keys <= set(report)
+
+
+def test_lane_backend_transport_summary_no_sample_without_any_ledgers(tmp_path):
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_backend_transport_summary"]()
+    assert summary["lanes"]["fact_judge"]["status"] == "no_sample"
+    assert summary["lanes"]["session_fact_extraction"]["status"] == "no_sample"
+
+
+def test_lane_ledger_collectors_follow_the_producer_path_accessors(tmp_path, monkeypatch):
+    """Counterfactual (path drift): the monitor rebuilt runs.jsonl and
+    verdicts.jsonl as literals in two collectors. If a producer moves its
+    ledger, a literal reader just finds nothing — no error, no counter. Moving
+    both accessors must move both readers."""
+    from plugins.modules.cognition import session_fact_extraction as sfe_module
+    from plugins.modules.governance import fact_judge as fact_judge_module
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    runs = elsewhere / "runs.jsonl"
+    verdicts = elsewhere / "verdicts.jsonl"
+    # llm_calls > 0: the streak collector counts only runs that attempted a call.
+    runs.write_text(json.dumps({"input_source": "state_db", "llm_calls": 1}) + "\n", encoding="utf-8")
+    verdicts.write_text(json.dumps({"failure_reason": ""}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sfe_module, "_runs_path", lambda store: runs)
+    monkeypatch.setattr(fact_judge_module, "_verdicts_path", lambda store: verdicts)
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    transport = namespace["lane_backend_transport_summary"]()["lanes"]["session_fact_extraction"]
+    streak = namespace["llm_lane_failure_streak_summary"]()["lanes"]
+
+    assert transport["status"] == "ok" and transport["input_source"] == "state_db"
+    assert streak["session_fact_extraction"]["sample_count"] == 1
+    assert streak["fact_judge"]["sample_count"] == 1
+
+
+def _add_gate_envelope(store, envelope_id: str, *, lane_id: str, risk_class: str) -> None:
+    """Append one valid ExecutionGate permit record -- run_*_lane's writes go
+    through append_governed_jsonl, which needs a resolvable permit to succeed
+    (mirrors tests/plugins/memory/test_memory_os_session_fact_extraction.py's
+    _add_gate_envelope / tests/plugins/memory/test_memory_os_fact_judge.py's
+    _store_with_gate)."""
+    now = datetime.now(timezone.utc)
+    expires_at = now.replace(year=now.year + 1).isoformat().replace("+00:00", "Z")
+    envelope = {
+        "schema_version": "memory-os.execution_gate_envelope.v0",
+        "stage": "permit",
+        "execution_gate_envelope_id": envelope_id,
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at,
+        "profile": store.roots.profile,
+        "lane_id": lane_id,
+        "trigger_surface": "hermes_cron",
+        "risk_class": risk_class,
+        "human_approval_required": False,
+        "why_no_human_approval": "test",
+        "scope": {"registry_key": lane_id, "raw_script": "test"},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+        "boundary_true": False,
+        "precheck": {"helper_present": True},
+        "permit_decision": "allowed",
+        "permit_reason": "boundary_false",
+    }
+    gate_path = store.roots.hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    gate_path.parent.mkdir(parents=True, exist_ok=True)
+    with gate_path.open("a") as f:
+        f.write(json.dumps(envelope, sort_keys=True) + "\n")
+
+
+def test_lane_backend_transport_summary_reads_real_session_fact_extraction_runs_ledger(tmp_path):
+    """Integration against the REAL producer: run_session_fact_extraction_lane
+    writes a full-shaped run record (via _append_run_report) even on its
+    state_db_absent early exit -- exercising exactly the fields this collector
+    reads, not a hand-typed fixture (counterfactual tests must use the real
+    producer)."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.modules.cognition.session_fact_extraction import run_session_fact_extraction_lane
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    envelope_id = "xgate_test_sfe_001"
+    _add_gate_envelope(store, envelope_id, lane_id="session_fact_extraction", risk_class="local_helper")
+
+    result = run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
+    assert result["skipped_reason"] == "state_db_absent"
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_backend_transport_summary"]()
+
+    sfe = summary["lanes"]["session_fact_extraction"]
+    assert sfe["status"] == "ok"
+    assert sfe["input_source"] == "state_db"
+    assert sfe["sessions_skipped_by_principal"] == {}
+    assert sfe["group_sessions_scanned"] == 0
+    assert sfe["group_sessions_without_user_suffix"] == 0
+    assert sfe["llm_transport"] == ""
+    assert sfe["llm_provider"] == ""
+    assert sfe["llm_model"] == ""
+
+
+def _write_execution_gate_completion(roots, *, lane_id, result_summary, envelope_id):
+    envelope = {
+        "schema_version": "memory-os.execution_gate_envelope.v0",
+        "stage": "completion",
+        "execution_gate_envelope_id": envelope_id,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "profile": roots.profile or "default",
+        "lane_id": lane_id,
+        "execution_status": "success",
+        "result_summary": result_summary,
+    }
+    path = roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(envelope, sort_keys=True) + "\n")
+
+
+def test_lane_backend_transport_summary_reads_real_fact_judge_completion_envelope(tmp_path):
+    """Integration against the REAL producer: fact_judge has no per-tick
+    ledger of its own, so its judge_backend/fallback fields must be read from
+    the ExecutionGate completion ledger's result_summary -- written here using
+    the real run_fact_judge_lane() report, matching exactly how
+    memory_os_fact_judge_lane.py's _write_execution_report assembles it."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    result = run_fact_judge_lane(store)
+    assert result["candidates_read"] == 0
+
+    _write_execution_gate_completion(
+        roots,
+        lane_id="fact_judge",
+        envelope_id="xgate_test_fact_judge_001",
+        result_summary={"lane_id": "fact_judge", "helper": "fact_judge", "returncode": 0, **result},
+    )
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_backend_transport_summary"]()
+
+    fj = summary["lanes"]["fact_judge"]
+    assert fj["status"] == "ok"
+    assert fj["judge_backend"] == "hermes_default"
+    assert fj["judged_count"] == 0
+    assert fj["judge_backend_fallback_count"] == 0
+
+
+def test_lane_backend_transport_summary_fact_judge_picks_the_latest_completion(tmp_path):
+    """Multiple completions for fact_judge, interleaved with a different
+    lane_id, must resolve to the LAST fact_judge one written -- not the first
+    match found scanning from either end."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+
+    _write_execution_gate_completion(
+        roots, lane_id="fact_judge", envelope_id="xgate_old",
+        result_summary={"judge_backend": "hermes_default", "judged_count": 3, "judge_backend_fallback_count": 0},
+    )
+    _write_execution_gate_completion(
+        roots, lane_id="candidate_aggregation", envelope_id="xgate_other",
+        result_summary={"unrelated": True},
+    )
+    _write_execution_gate_completion(
+        roots, lane_id="fact_judge", envelope_id="xgate_new",
+        result_summary={"judge_backend": "typesafe_jev", "judged_count": 4, "judge_backend_fallback_count": 4},
+    )
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_backend_transport_summary"]()
+
+    fj = summary["lanes"]["fact_judge"]
+    assert fj["judge_backend"] == "typesafe_jev"
+    assert fj["judged_count"] == 4
+    assert fj["judge_backend_fallback_count"] == 4
+
+
+def _fact_judge_backend_snapshot(judge_backend, judged_count, fallback_count, *, reasons=None, detail=""):
+    return {
+        "monitor_profile": "live",
+        "lane_backend_transport": {
+            "schema_version": "memory-os.lane_backend_transport.v0",
+            "lanes": {
+                "fact_judge": {
+                    "status": "ok",
+                    "judge_backend": judge_backend,
+                    "judged_count": judged_count,
+                    "judge_backend_fallback_count": fallback_count,
+                    "judge_backend_fallback_reasons": reasons or {},
+                    "judge_backend_fallback_detail_sample": detail,
+                    "llm_transport": "hermes_call_llm",
+                    "llm_provider": "hermes_default",
+                    "llm_model": "some-model",
+                },
+                "session_fact_extraction": {"status": "no_sample"},
+            },
+        },
+    }
+
+
+def test_fact_judge_backend_state_is_always_info():
+    snapshot = _fact_judge_backend_snapshot("hermes_default", 3, 0)
+    graded = classify_snapshot(snapshot)
+    info_values = {item["code"]: item["value"] for item in graded["info"]}
+    assert info_values["fact_judge_backend_state"]["judge_backend"] == "hermes_default"
+    assert info_values["fact_judge_backend_state"]["judged_count"] == 3
+    assert not any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+
+
+def test_fact_judge_backend_fallback_all_warns_when_every_jev_attempt_falls_back():
+    """DS/DU: Jev is opt-in; a tick that selected it but had every judged
+    candidate fall back to hermes_default means it is silently dead, not
+    merely degraded once."""
+    snapshot = _fact_judge_backend_snapshot(
+        "typesafe_jev", 5, 5, reasons={"llm_http_4xx": 5}, detail="HTTP 400: bad request",
+    )
+    graded = classify_snapshot(snapshot)
+    assert any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+
+
+def test_fact_judge_backend_fallback_all_does_not_warn_on_partial_fallback():
+    snapshot = _fact_judge_backend_snapshot("typesafe_jev", 5, 3)
+    graded = classify_snapshot(snapshot)
+    assert not any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+
+
+def test_fact_judge_backend_fallback_all_never_warns_when_default_off():
+    """Counterfactual: default-off (hermes_default) must never WARN even with
+    a nonzero fallback count (defensive -- fallback counting only has meaning
+    when judge_backend==typesafe_jev in the real producer, but the grade
+    itself must not key off fallback_count alone)."""
+    snapshot = _fact_judge_backend_snapshot("hermes_default", 5, 5)
+    graded = classify_snapshot(snapshot)
+    assert not any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+
+
+def test_fact_judge_backend_fallback_all_does_not_warn_on_empty_tick():
+    """Vacuous-truth guard: judged_count==0 with judge_backend==typesafe_jev
+    must not satisfy fallback_count>=judged_count trivially (0>=0)."""
+    snapshot = _fact_judge_backend_snapshot("typesafe_jev", 0, 0)
+    graded = classify_snapshot(snapshot)
+    assert not any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+
+
+def test_fact_judge_backend_fallback_all_is_warn_if_production_on_clean_host():
+    snapshot = _fact_judge_backend_snapshot("typesafe_jev", 2, 2)
+    snapshot["monitor_profile"] = "clean-host"
+    graded = classify_snapshot(snapshot)
+    assert any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
+    unclassified = {item.get("warn_code") for item in graded["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "fact_judge_backend_fallback_all" not in unclassified
+
+
+def test_session_fact_extraction_backend_state_is_info_only():
+    snapshot = {
+        "monitor_profile": "live",
+        "lane_backend_transport": {
+            "lanes": {
+                "fact_judge": {"status": "no_sample"},
+                "session_fact_extraction": {
+                    "status": "ok",
+                    "input_source": "state_db",
+                    "sessions_skipped_by_principal": {"system": 12},
+                    "group_sessions_scanned": 3,
+                    "group_sessions_without_user_suffix": 1,
+                    "llm_transport": "hermes_call_llm",
+                    "llm_provider": "hermes_default",
+                    "llm_model": "some-model",
+                },
+            },
+        },
+    }
+    graded = classify_snapshot(snapshot)
+    info_values = {item["code"]: item["value"] for item in graded["info"]}
+    assert info_values["session_fact_extraction_backend_state"]["group_sessions_scanned"] == 3
+    assert info_values["session_fact_extraction_backend_state"]["sessions_skipped_by_principal"] == {"system": 12}
+    for bucket in ("warn", "fail"):
+        assert not any(item["code"].startswith("session_fact_extraction_backend") for item in graded[bucket])
+
+
+def test_lane_backend_transport_no_sample_reports_info_not_pass():
+    snapshot = {
+        "monitor_profile": "live",
+        "lane_backend_transport": {
+            "lanes": {
+                "fact_judge": {"status": "no_sample"},
+                "session_fact_extraction": {"status": "no_sample"},
+            },
+        },
+    }
+    graded = classify_snapshot(snapshot)
+    assert any(item["code"] == "fact_judge_backend_no_sample" for item in graded["info"])
+    assert any(item["code"] == "session_fact_extraction_backend_no_sample" for item in graded["info"])
+    for bucket in ("pass", "warn", "fail"):
+        assert not any(
+            item["code"].startswith("fact_judge_backend") or item["code"].startswith("session_fact_extraction_backend")
+            for item in graded[bucket]
+        )
+
+
+def test_lane_backend_transport_missing_key_adds_nothing():
+    graded = classify_snapshot({"monitor_profile": "live"})
+    codes = {item["code"] for bucket in ("pass", "warn", "fail", "info") for item in graded[bucket]}
+    assert not any(
+        code.startswith("fact_judge_backend") or code.startswith("session_fact_extraction_backend")
+        for code in codes
+    )
+# ─── end DU test block ──────────────────────────────────────────────────────
+
+
 def _retention_snapshot(**retention_overrides):
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"].update(retention_overrides)
@@ -9567,7 +9988,15 @@ def test_every_structural_edge_proposer_scalar_survives_both_whitelists_end_to_e
         "test crystallized body two",
     )
 
-    wrapper_summary = CognitiveLoopRunner(store)._structural_edge_proposer({})
+    # The wrapper emits every backfill key through its defaults even when the
+    # producer errored, so key presence proves nothing: build the index so the
+    # producer takes its real path, and check that it did.
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    context: dict = {}
+    wrapper_summary = CognitiveLoopRunner(store)._structural_edge_proposer(context)
+    assert context["structural_edge_proposer_result"]["status"] == "ok", "sanity: the producer ran its real path"
     assert "backfill_scanned_count" in wrapper_summary, "sanity: the wrapper passed PR-G1 backfill counters"
 
     report = {
@@ -9593,6 +10022,62 @@ def test_every_structural_edge_proposer_scalar_survives_both_whitelists_end_to_e
     }
     missing = sorted(scalar_keys - set(surfaced))
     assert not missing, f"structural_edge_proposer scalars dropped by the monitor's _edge_fields: {missing}"
+
+
+def test_structural_updates_backfill_failure_is_graded_warn():
+    """PR-G1 review: a failed backfill upgrade can leave a pair with no active
+    structural edge. It must not hide in the ungraded v2_graph_governance_state
+    INFO blob next to benign skips."""
+    for failed_count, expect_warn in ((0, False), (2, True)):
+        evidence = {
+            "status": "ok",
+            "edge_step_results": {
+                "structural_edge_proposer": {
+                    "backfill_scanned_count": 5,
+                    "backfill_skipped_count": 3,
+                    "backfill_failed_count": failed_count,
+                },
+            },
+        }
+        graded = monitor.classify_snapshot({
+            "monitor_profile": "live",
+            "cognitive_loop_step_evidence": evidence,
+        })
+        warn_codes = [
+            item for item in graded["warn"] if item["code"] == "graph_structural_updates_backfill_failed"
+        ]
+        assert bool(warn_codes) is expect_warn, failed_count
+        if expect_warn:
+            assert warn_codes[0]["backfill_failed_count"] == failed_count
+
+
+def test_structural_updates_backfill_scan_failure_is_graded_warn():
+    """Review follow-up counterfactual: when the candidate scan itself fails,
+    every count stays 0 and the run looks idle. The outcome code is what
+    separates the two, so it must be graded too — and only its failure
+    values, never the benign ones."""
+    from plugins.memory.memory_os.structural_edge_proposer import UPDATES_BACKFILL_OUTCOMES
+
+    assert monitor.STRUCTURAL_BACKFILL_FAILED_OUTCOMES <= UPDATES_BACKFILL_OUTCOMES
+    for outcome in sorted(UPDATES_BACKFILL_OUTCOMES):
+        evidence = {
+            "status": "ok",
+            "edge_step_results": {
+                "structural_edge_proposer": {
+                    "backfill_scanned_count": 0,
+                    "backfill_failed_count": 0,
+                    "backfill_outcome": outcome,
+                },
+            },
+        }
+        graded = monitor.classify_snapshot({
+            "monitor_profile": "live",
+            "cognitive_loop_step_evidence": evidence,
+        })
+        warned = any(
+            item["code"] == "graph_structural_updates_backfill_failed" for item in graded["warn"]
+        )
+        assert warned is (outcome in {"scan_failed", "resolve_failed"}), outcome
 
 
 def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):

@@ -2542,8 +2542,11 @@ GRAPH_EXPLORE_SLOTS = 2
 # and the feedback loop are untouched (2026-08-06 owner ruling); co_occurs
 # still fills whatever exploit slots semantic scarcity leaves empty, and the
 # explore rotation stays type-blind so no class can be starved out entirely.
+# PR-G1 `updates` renders only as "已被以下内容取代" (the older endpoint as
+# neighbor is suppressed in step 1b), a supersession notice that must not be
+# starved by co_occurs noise.
 _GRAPH_SEMANTIC_RELATIONS = frozenset(
-    {"refines", "evidence_for", "contradicts", "depends_on"}
+    {"refines", "evidence_for", "contradicts", "depends_on", "updates"}
 )
 GRAPH_ANCHOR_PREVIEW_CHARS = 12
 # 跨段去重命中的短预览长度:是结晶段同一正文 220 字符裁剪的精确前缀,
