@@ -9097,6 +9097,13 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
     low_clue_recall 的 judge 形状合适但今天只有 CLI dry-run 调用、零生产流量。三者都不在"待接入"之列，要做须 owner 另行立项。
   - 与 W4-A（DX）串链合并：两边在 `llm_edge_proposer` 的计数初始化与汇总、cognitive_loop 包装器、monitor `_edge_fields` 各加了
     一组键，全部并集保留；Jev 判成功的那对不带 `llm_route_*` 键，不计入 Hermes 路由计数——Jev 不经 Hermes，本就不是 Hermes 路由。
+- **独立审查（Sonnet）无阻塞，1 SHOULD-FIX 已修**：默认关闭逐字节一致、所有 Jev 失败形状都计数并恰好回落一次、置信度即使越界 / 为
+  `None` / 为字符串也由 `llm_birth_weight` 独立钳制、key 无任何泄漏路径、与路由计数的并集合并正确、外发内容与 CLAUDE.md 一致，均已核实。
+  **SHOULD-FIX**：`jev_backend._clip_state` 自称"独立的第二道防线"，却只裁顶层字符串、不下钻——J2 的 state 是两层
+  （`record_a` / `record_b` 下挂 `body`），审查者实测 5 万字符的正文原样外发。今天被调用点自己的 500 字截断掩盖，但那道闸一旦被
+  后续改动去掉，就没有第二道闸拦住无界内容外发到 api.typesafe.ai——正是 INV-5 推论要防的。改为递归：任意深度的字符串都裁、
+  每个容器都截断、深于 `_MAX_STATE_DEPTH=4` 的容器直接丢弃而不是原样外发。反事实（cp 备份，2/2 先败后过）：嵌套形状单测、
+  以及用 J2 真实 state 构造器去掉调用点截断后经 `call_systemone` 实际发出的请求体。
 - **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY`（与 J1 共用同一凭证）
   并由 owner 登记 `llm_edge_proposer_judge_backend=typesafe_jev` 覆盖；部署后可先跑
   `TYPESAFE_API_KEY=<真实key> python scripts/memory_os_jev_probe.py --mode choice` 做只读连通性验证（key 只经环境变量传入，输出

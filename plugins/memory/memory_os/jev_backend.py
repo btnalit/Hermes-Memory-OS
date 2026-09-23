@@ -88,6 +88,7 @@ JEV_CALL_FAILURE_REASONS = frozenset(
 # second, independent floor so this module is safe standing alone.
 _MAX_STATE_STRING_CHARS = 4000
 _MAX_STATE_ITEMS = 20
+_MAX_STATE_DEPTH = 4
 _MAX_INSTRUCTIONS_CHARS = 2000
 
 MAX_CHOICE_OPTIONS = 255
@@ -100,20 +101,25 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
-def _clip_state(state: Any) -> Any:
-    """Independent defensive bound on the ``state`` payload (INV-5)."""
+def _clip_state(state: Any, _depth: int = 0) -> Any:
+    """Independent defensive bound on the ``state`` payload (INV-5).
+
+    Recurses: J2 sends ``{"record_a": {"kind", "tags", "body"}, ...}``, and a
+    top-level-only clip let a nested body through untouched. Every string at
+    any depth is clipped and every collection truncated; containers nested
+    deeper than ``_MAX_STATE_DEPTH`` are dropped rather than sent unbounded.
+    """
     if isinstance(state, str):
         return _clip(state, _MAX_STATE_STRING_CHARS)
+    if isinstance(state, (dict, list, tuple)) and _depth >= _MAX_STATE_DEPTH:
+        return None
     if isinstance(state, dict):
         return {
-            str(key): (_clip(value, _MAX_STATE_STRING_CHARS) if isinstance(value, str) else value)
+            str(key): _clip_state(value, _depth + 1)
             for key, value in list(state.items())[:_MAX_STATE_ITEMS]
         }
-    if isinstance(state, list):
-        return [
-            (_clip(value, _MAX_STATE_STRING_CHARS) if isinstance(value, str) else value)
-            for value in state[:_MAX_STATE_ITEMS]
-        ]
+    if isinstance(state, (list, tuple)):
+        return [_clip_state(value, _depth + 1) for value in list(state)[:_MAX_STATE_ITEMS]]
     return state
 
 

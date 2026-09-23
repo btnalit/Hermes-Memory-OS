@@ -349,6 +349,50 @@ class TestStateClipping:
         clipped = jev_backend._clip_state({"body": "y" * 10000})
         assert len(clipped["body"]) == jev_backend._MAX_STATE_STRING_CHARS
 
+    def test_nested_record_shapes_are_clipped(self):
+        """#97 review counterfactual: J2 sends {"record_a": {...}, ...}; the
+        top-level-only clip returned nested dicts untouched, so this floor
+        did nothing on that call path."""
+        state = {
+            "record_a": {"kind": "fact", "tags": ["t" * 50000], "body": "Y" * 50000},
+            "record_b": {"kind": "fact", "tags": [], "body": "Z" * 50000},
+        }
+        clipped = jev_backend._clip_state(state)
+        limit = jev_backend._MAX_STATE_STRING_CHARS
+        assert len(clipped["record_a"]["body"]) == limit
+        assert len(clipped["record_a"]["tags"][0]) == limit
+        assert len(clipped["record_b"]["body"]) == limit
+
+    def test_containers_below_the_depth_ceiling_are_dropped(self):
+        deep = {"a": {"b": {"c": {"d": {"e": "x" * 50000}}}}}
+        clipped = jev_backend._clip_state(deep)
+        assert clipped["a"]["b"]["c"]["d"] is None
+
+    def test_call_systemone_clips_a_j2_shaped_state_even_without_the_call_site_slice(self):
+        """The floor must hold on its own: J2's state builder slices bodies to
+        500 today, but the gate exists for the day that slice is lost."""
+        from plugins.memory.memory_os import llm_edge_proposer
+
+        captured = {}
+
+        def _capture_urlopen(request, timeout=None):
+            captured["body"] = request.data
+            return _FakeResponse(
+                json.dumps({"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.5}}}).encode()
+            )
+
+        record = {"id": "r1", "kind": "fact", "tags_json": "[]", "body": "b" * 50000}
+        state = llm_edge_proposer._build_jev_choice_state(record, record)
+        state["record_a"]["body"] = "b" * 50000  # simulate a builder that stopped slicing
+        with patch("urllib.request.urlopen", side_effect=_capture_urlopen):
+            jev_backend.call_systemone(
+                state=state,
+                questions={"q": {"type": "noul", "instructions": "?"}},
+                config=_VALID_CONFIG,
+            )
+        sent_payload = json.loads(captured["body"])
+        assert len(sent_payload["state"]["record_a"]["body"]) == jev_backend._MAX_STATE_STRING_CHARS
+
     def test_call_systemone_clips_oversized_state_before_sending(self):
         """Counterfactual: without _clip_state in call_systemone, the full
         oversized payload would be sent to json.dumps/urlopen."""
