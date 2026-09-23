@@ -111,7 +111,7 @@ class EventEnvelope:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "schema_version": self.schema_version,
             "id": self.id,
             "ts": self.ts,
@@ -125,9 +125,17 @@ class EventEnvelope:
             "body_policy": self.body_policy,
             "hashes": dict(self.hashes),
             "promotion_state": self.promotion_state,
-            "principal": self.principal,
-            "principal_schema_version": self.principal_schema_version,
         }
+        # A legacy row (neither field set) must serialize exactly as it did
+        # before P2: the index's record_hash is sha256 of this dict, so adding
+        # empty keys would make every pre-P2 event read as an
+        # index_content_mismatch (doctor/deploy postcheck FAIL) until the next
+        # index_sync rewrote the hashes. A marked row always carries both,
+        # even an empty principal -- that is what the coverage monitor gates.
+        if self.principal or self.principal_schema_version:
+            data["principal"] = self.principal
+            data["principal_schema_version"] = self.principal_schema_version
+        return data
 
 
 @dataclass(frozen=True)

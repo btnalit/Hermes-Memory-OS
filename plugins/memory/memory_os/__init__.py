@@ -1272,10 +1272,12 @@ class MemoryOSProvider(MemoryProvider):
             },
             hashes={"content_sha256": _sha256(content)},
             # No per-call author is available on this hook (Hermes' built-in
-            # memory tool does not pass one) -- self._turn_principal is the
-            # on_turn_start-cached principal for whichever turn is currently
-            # driving, the same fallback sync_turn uses when it has no
-            # turn_author of its own.
+            # memory tool does not pass one), so this is always the
+            # on_turn_start-cached principal. Unlike sync_turn -- which only
+            # falls back to it when the host sends no turn_author, and marks
+            # that fallback with author_source -- nothing here records that
+            # the value was cached; if Hermes ever fires this hook across a
+            # turn boundary the principal can belong to the next turn.
             principal=self._turn_principal,
         )
         self._enqueue(event, drop_action="memory_write_dropped")

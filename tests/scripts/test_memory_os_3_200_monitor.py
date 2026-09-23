@@ -6789,6 +6789,12 @@ def test_event_principal_coverage_summary_counts_marked_and_legacy_events(tmp_pa
     assert summary["marked_with_principal_count"] == 2
     assert summary["marked_without_principal_count"] == 0
     assert summary["legacy_unattributed_event_count"] == 1
+    # #95 review: machine producers can fill the window, so the breakdown is
+    # what shows whether owner turns were sampled at all.
+    assert summary["marked_by_principal"] == {"owner": 1, "system": 1}
+    graded = monitor.classify_snapshot({"monitor_profile": "live", "event_principal_coverage": summary})
+    ok_entry = next(item for item in graded["info"] if item["code"] == "event_principal_coverage_ok")
+    assert ok_entry["value"]["marked_by_principal"] == {"owner": 1, "system": 1}
 
 
 def test_event_principal_coverage_summary_reports_marked_events_missing_principal(tmp_path):

@@ -1627,6 +1627,9 @@ def _classify_event_principal_coverage(
             "value": {
                 "marked_event_count": marked_count,
                 "marked_with_principal_count": coverage.get("marked_with_principal_count"),
+                # A window of only system events has not sampled owner turns;
+                # this is what separates that from "owner turns all correct".
+                "marked_by_principal": coverage.get("marked_by_principal", {}),
             },
         })
 
@@ -7193,6 +7196,9 @@ def event_principal_coverage_summary(recent_window=500):
     marked_without_principal_count = 0
     legacy_unattributed_event_count = 0
     sources_without_principal = Counter()
+    # Machine producers (system) can fill the whole window; the breakdown is
+    # what says whether owner turns were sampled at all this tick.
+    marked_by_principal = Counter()
     for record in recent_records:
         if not isinstance(record, dict):
             continue
@@ -7202,6 +7208,7 @@ def event_principal_coverage_summary(recent_window=500):
         marked_count += 1
         if str(record.get("principal") or "") in PRINCIPALS:
             marked_with_principal_count += 1
+            marked_by_principal[str(record.get("principal"))] += 1
         else:
             marked_without_principal_count += 1
             sources_without_principal[str(record.get("source") or "unknown")] += 1
@@ -7215,6 +7222,7 @@ def event_principal_coverage_summary(recent_window=500):
         "marked_without_principal_count": marked_without_principal_count,
         "legacy_unattributed_event_count": legacy_unattributed_event_count,
         "sources_without_principal": dict(sources_without_principal),
+        "marked_by_principal": dict(marked_by_principal),
     }
 
 def graph_layer_novelty_summary(max_records=2000):
