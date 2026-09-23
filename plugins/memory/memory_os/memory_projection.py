@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import any_boundary_true, complete_execution_gate_envelope, resolve_execution_gate_permit
-from .jsonl_io import append_jsonl_locked, read_jsonl_result, write_json_atomic
+from .jsonl_io import append_jsonl_locked, locked_jsonl_file, read_jsonl_result, write_json_atomic
 from .signal_collectors import collect_signal_sources
 from .signal_source_registry import signal_source_specs
 from .store import MemoryOSStore
@@ -22,6 +22,17 @@ MEMORY_PROJECTION_RECORD_SCHEMA_VERSION = "memory-os.memory_projection_record.v0
 MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION = "memory-os.memory_projection_compaction.v0"
 PROJECTION_LANE_ID = "memory_projection_collect"
 PROJECTION_RISK_CLASS = "governance_projection"
+
+# Closed outcome set for compact_memory_projection_records -- "Completion Is
+# Not Output": a reader must be able to tell "nothing needed compacting" from
+# "the ledger was too corrupt to compact" from an on-disk `reason` alone,
+# without re-running anything.  Mirrors jsonl_io.COMPACT_JSONL_TAIL_REASONS'
+# vocabulary style even though this is a distinct, retention-class-aware
+# compactor (keep-latest-per-scope, not keep-latest-N-total), so it is not a
+# drop-in caller of compact_jsonl_tail.
+MEMORY_PROJECTION_COMPACTION_REASONS: frozenset[str] = frozenset(
+    {"compacted", "nothing_to_drop", "malformed_lines_present", "write_failed"}
+)
 
 
 def memory_projection_records_path(roots: MemoryOSRoots) -> Path:
@@ -43,61 +54,147 @@ def compact_memory_projection_records(
     apply: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    """Retention-class-aware compaction of ``memory_projections.jsonl``.
+
+    Archives ``short_lived_status`` records beyond the newest
+    *keep_latest_status_per_source* per (source_scope_ref, source_key), while
+    permanently preserving any record with a true boundary flag or
+    ``raw_body_included``.  Governance/operational records (any other
+    retention_class) are never touched.
+
+    Read-modify-write runs under the same sidecar flock
+    (``jsonl_io.locked_jsonl_file``) that ``append_governed_jsonl`` /
+    ``append_jsonl_locked`` use for this same path, so a concurrent
+    ``collect_and_project_signals`` append can never be silently clobbered by
+    the whole-file rewrite below.
+
+    Malformed lines cause a refusal (``reason="malformed_lines_present"``):
+    a rewrite keeps only what parsed, so compacting a ledger with unparsable
+    lines would delete exactly the content nobody can reconstruct -- the live
+    file is left untouched.  Archive-before-drop still holds: the archive
+    file is written before the live file is overwritten, so a crash between
+    the two can duplicate archive rows but never lose a record.
+    """
     started = now or datetime.now(timezone.utc)
-    records = _read_jsonl(memory_projection_records_path(roots))
+    records_path = memory_projection_records_path(roots)
     keep_latest = max(int(keep_latest_status_per_source), 0)
-    short_lived_by_scope: dict[str, list[int]] = {}
-    retention_class_counts: dict[str, int] = {}
-    for index, record in enumerate(records):
-        retention_class = str(record.get("retention_class") or "unknown")
-        retention_class_counts[retention_class] = retention_class_counts.get(retention_class, 0) + 1
-        if retention_class == "short_lived_status" and not _projection_safety_preserved(record):
-            short_lived_by_scope.setdefault(_status_compaction_scope(record), []).append(index)
 
-    keep_indices: set[int] = set()
-    for index, record in enumerate(records):
-        if str(record.get("retention_class") or "") != "short_lived_status":
-            keep_indices.add(index)
-        if _projection_safety_preserved(record):
-            keep_indices.add(index)
-    for indices in short_lived_by_scope.values():
-        keep_indices.update(indices[-keep_latest:] if keep_latest else [])
+    with locked_jsonl_file(records_path):
+        read_result = read_jsonl_result(
+            records_path,
+            component="memory_projection",
+            operation="compact_memory_projection_records",
+        )
+        records = read_result.records
+        if read_result.error_records:
+            completed = datetime.now(timezone.utc)
+            report = {
+                "schema_version": MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION,
+                "compaction_id": "mproj_compact_" + hashlib.sha256(
+                    f"{started.isoformat()}:{len(records)}:refused".encode("utf-8")
+                ).hexdigest()[:20],
+                "status": "refused",
+                "reason": "malformed_lines_present",
+                "dry_run": not apply,
+                "started_at": started.isoformat().replace("+00:00", "Z"),
+                "completed_at": completed.isoformat().replace("+00:00", "Z"),
+                "input_count": len(records),
+                "output_count": len(records),
+                "archived_count": 0,
+                "archive_path": "",
+                "keep_latest_status_per_source": keep_latest,
+                "retention_class_counts": {},
+                "malformed_line_count": len(read_result.error_records),
+                "boundary_true_preserved_count": sum(
+                    1 for record in records if any_boundary_true(record.get("boundary"))
+                ),
+                "raw_body_included_preserved_count": sum(
+                    1 for record in records if record.get("raw_body_included") is True
+                ),
+                "boundary_true_archived_count": 0,
+                "raw_body_included_archived_count": 0,
+                "boundary": _false_boundary(),
+                "raw_body_included": False,
+            }
+            if apply:
+                _append_jsonl(memory_projection_compactions_path(roots), report)
+            return report
 
-    kept = [record for index, record in enumerate(records) if index in keep_indices]
-    archived = [record for index, record in enumerate(records) if index not in keep_indices]
-    compaction_id = "mproj_compact_" + hashlib.sha256(
-        f"{started.isoformat()}:{len(records)}:{len(archived)}".encode("utf-8")
-    ).hexdigest()[:20]
-    archive_rel = ""
-    if apply and archived:
-        archive_path = roots.memory_os_root / "archive" / "memory_projection" / f"{compaction_id}.jsonl"
-        _write_jsonl_atomic(archive_path, archived)
-        archive_rel = str(archive_path.relative_to(roots.memory_os_root)).replace("\\", "/")
-        _write_jsonl_atomic(memory_projection_records_path(roots), kept)
-    completed = datetime.now(timezone.utc)
-    report = {
-        "schema_version": MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION,
-        "compaction_id": compaction_id,
-        "status": "ok",
-        "dry_run": not apply,
-        "started_at": started.isoformat().replace("+00:00", "Z"),
-        "completed_at": completed.isoformat().replace("+00:00", "Z"),
-        "input_count": len(records),
-        "output_count": len(kept),
-        "archived_count": len(archived),
-        "archive_path": archive_rel,
-        "keep_latest_status_per_source": keep_latest,
-        "retention_class_counts": retention_class_counts,
-        "boundary_true_preserved_count": sum(1 for record in kept if any_boundary_true(record.get("boundary"))),
-        "raw_body_included_preserved_count": sum(1 for record in kept if record.get("raw_body_included") is True),
-        "boundary_true_archived_count": sum(1 for record in archived if any_boundary_true(record.get("boundary"))),
-        "raw_body_included_archived_count": sum(1 for record in archived if record.get("raw_body_included") is True),
-        "boundary": _false_boundary(),
-        "raw_body_included": False,
-    }
-    if apply:
-        _append_jsonl(memory_projection_compactions_path(roots), report)
-    return report
+        short_lived_by_scope: dict[str, list[int]] = {}
+        retention_class_counts: dict[str, int] = {}
+        for index, record in enumerate(records):
+            retention_class = str(record.get("retention_class") or "unknown")
+            retention_class_counts[retention_class] = retention_class_counts.get(retention_class, 0) + 1
+            if retention_class == "short_lived_status" and not _projection_safety_preserved(record):
+                short_lived_by_scope.setdefault(_status_compaction_scope(record), []).append(index)
+
+        keep_indices: set[int] = set()
+        for index, record in enumerate(records):
+            if str(record.get("retention_class") or "") != "short_lived_status":
+                keep_indices.add(index)
+            if _projection_safety_preserved(record):
+                keep_indices.add(index)
+        for indices in short_lived_by_scope.values():
+            keep_indices.update(indices[-keep_latest:] if keep_latest else [])
+
+        kept = [record for index, record in enumerate(records) if index in keep_indices]
+        archived = [record for index, record in enumerate(records) if index not in keep_indices]
+        compaction_id = "mproj_compact_" + hashlib.sha256(
+            f"{started.isoformat()}:{len(records)}:{len(archived)}".encode("utf-8")
+        ).hexdigest()[:20]
+        archive_rel = ""
+        write_failed = False
+        write_error = ""
+        if apply and archived:
+            try:
+                archive_path = roots.memory_os_root / "archive" / "memory_projection" / f"{compaction_id}.jsonl"
+                # Archive before drop: a crash between the two writes can
+                # duplicate archive rows (harmless -- the archive is debris,
+                # not canonical) but can never lose a record from the live
+                # ledger.
+                _write_jsonl_atomic(archive_path, archived)
+                archive_rel = str(archive_path.relative_to(roots.memory_os_root)).replace("\\", "/")
+                _write_jsonl_atomic(records_path, kept)
+            except OSError as exc:
+                write_failed = True
+                write_error = f"{type(exc).__name__}: {exc}"[:160]
+        completed = datetime.now(timezone.utc)
+        if write_failed:
+            reason = "write_failed"
+        elif archived:
+            reason = "compacted"
+        else:
+            reason = "nothing_to_drop"
+        report = {
+            "schema_version": MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION,
+            "compaction_id": compaction_id,
+            "status": "ok" if not write_failed else "error",
+            "reason": reason,
+            "write_error": write_error,
+            "dry_run": not apply,
+            "started_at": started.isoformat().replace("+00:00", "Z"),
+            "completed_at": completed.isoformat().replace("+00:00", "Z"),
+            "input_count": len(records),
+            # On write_failed the live ledger still holds every input record
+            # (the rewrite never landed), so report what is on disk, not the
+            # split that was intended.
+            "output_count": len(records) if write_failed else len(kept),
+            "archived_count": 0 if write_failed else len(archived),
+            "archive_path": archive_rel,
+            "keep_latest_status_per_source": keep_latest,
+            "retention_class_counts": retention_class_counts,
+            "boundary_true_preserved_count": sum(1 for record in kept if any_boundary_true(record.get("boundary"))),
+            "raw_body_included_preserved_count": sum(1 for record in kept if record.get("raw_body_included") is True),
+            "boundary_true_archived_count": sum(1 for record in archived if any_boundary_true(record.get("boundary"))),
+            "raw_body_included_archived_count": sum(
+                1 for record in archived if record.get("raw_body_included") is True
+            ),
+            "boundary": _false_boundary(),
+            "raw_body_included": False,
+        }
+        if apply:
+            _append_jsonl(memory_projection_compactions_path(roots), report)
+        return report
 
 
 def memory_projection_retention_status(roots: MemoryOSRoots) -> dict[str, Any]:
@@ -109,6 +206,15 @@ def memory_projection_retention_status(roots: MemoryOSRoots) -> dict[str, Any]:
         "compaction_count": len(records),
         "latest_compaction_id": str(latest.get("compaction_id") or ""),
         "latest_dry_run": latest.get("dry_run"),
+        # Every entry in this ledger is an apply=True attempt (dry runs are
+        # never persisted here), so completed_at is the last time the lane
+        # actually ran to a decision -- what a "compaction freshness vs file
+        # growth" monitor predicate needs to distinguish a lane that runs
+        # daily from one that ran once and stopped.
+        "latest_completed_at": str(latest.get("completed_at") or ""),
+        "latest_status": str(latest.get("status") or ""),
+        "latest_reason": str(latest.get("reason") or ""),
+        "latest_malformed_line_count": int(latest.get("malformed_line_count") or 0),
         "latest_input_count": int(latest.get("input_count") or 0),
         "latest_output_count": int(latest.get("output_count") or 0),
         "latest_archived_count": int(latest.get("archived_count") or 0),

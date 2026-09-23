@@ -168,13 +168,14 @@ def test_subset_snapshot_narrows_group_membership_to_installed_lanes(tmp_path):
 
 
 def test_active_closure_profile_installs_eight_hermes_cron_jobs():
-    """The point of the consolidation: 22 lanes -> 8 Hermes jobs.
+    """The point of the consolidation: 23 lanes -> 8 Hermes jobs.
 
     Asserted on the DERIVED job count rather than a hand-typed job list, so a
     newly registered lane joins an existing tick instead of silently adding a
     cron job. History: 20 lanes at consolidation; +clearance_cycle activated
-    and +state_source_mirror registered on 2026-08-06 (both ride existing
-    ticks — the 8-job invariant is the one that must never move silently).
+    and +state_source_mirror registered on 2026-08-06; +memory_projection_
+    compaction registered 2026-09-23 (all three ride existing ticks — the
+    8-job invariant is the one that must never move silently).
     """
     from plugins.memory.memory_os.cron_registry import ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
 
@@ -183,7 +184,7 @@ def test_active_closure_profile_installs_eight_hermes_cron_jobs():
         if spec.key not in ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
     ]
 
-    assert len(active) == 22
+    assert len(active) == 23
     assert len({spec.name for spec in active}) == 8
 
 
