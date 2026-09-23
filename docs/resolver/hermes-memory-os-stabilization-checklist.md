@@ -5031,6 +5031,11 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `ace7434..HEAD`：J2（DY）——`llm_edge_proposer.py` 判定关系类型可选走 Jev 原生 `choice`（refines/contradicts/depends_on/co_occurs/none，
+  5 元闭集，带原生 confidence），共用 J1 的凭证约定与 `llm_birth_weight` 权重公式；knob 默认 `hermes_default`（省略/显式传 `roots` 解析
+  一致，逐字节不变）、任何 Jev 失败回落到未改动的 `_call_llm` 并计数；续完前一 agent 因 harness 故障中断的 WIP（`f82118a`），补齐
+  测试 +24（llm_edge_proposer +19、cognitive_loop 透传 +1、monitor 双层白名单普查 +1、probe choice 模式 +3）、CLAUDE.md 数据外发句、
+  checklist、三处反事实（默认关闭守卫/回落计数/调用侧闭集防御，cp 备份实测）。全量 4248 passed / 13 skipped，五门全绿。**未部署、未开启**。
 - `33d674b..HEAD`：P2+P3（DW）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
   `session_mirror` 加身份门（先于 `[:limit]` 切片，防饥饿）+ 持久排除非主人会话（防永远重扫）；monitor 新增 `event_principal_coverage`
   自包含区块（空样本报 healthy_no_sample、legacy 恒 INFO、缺主体的已标记事件 WARN/生产 FAIL）。全量 4179 passed。**未部署**。
@@ -8864,3 +8869,58 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署**：随规划全部落地后统一部署；部署后验收：`event_principal_coverage` 在近窗口出现 `marked_event_count>0` 且
   `marked_without_principal_count=0`；两 profile 的 `session_mirror` 若曾经镜像过 mailbox/群内他人会话，新版本上线后不再新增（历史已
   写入的旧事件不回填，只影响新写入）。
+
+---
+
+## DY — J2：llm_edge_proposer 可选 Jev choice 判官后端（2026-09-23）
+
+- **背景**：延续 DS（J1，fact_judge 试点原生 `noul`）。规划 J2 行把第二个 lane 接入 Jev：`llm_edge_proposer.py` 判定两条结晶记录关系类型
+  （refines / contradicts / depends_on / co_occurs / none）的自由文本判官改为可选走 Jev 原生 `choice`（≤255 选项、带原生 confidence）。
+  本任务在前一个被 harness 故障中断的 agent（WIP 提交 `f82118a`）之上续完：验证其已完成部分、补测试/普查/探针/文档/清单/反事实/五门，
+  在 `ace7434` 之上新增一次提交，不改写 `f82118a`。
+- **`f82118a` 已完成部分（本次核实无需重做）**：`jev_backend.py` 新增 `JevChoiceResult` + `judge_choice()`，与 `judge_noul()` 同一失败契约
+  （声明的答案 `type` 必须恰为 `"choice"`，返回的 `choice` 必须是发送的 criteria 键之一，否则 `llm_parse_failed`）；
+  `llm_edge_proposer.py` 新增 `_JEV_RELATION_CHOICE_INSTRUCTIONS` / `_JEV_RELATION_CHOICE_CRITERIA`（5 个关系标签，描述逐字取自
+  `_RELATION_PROMPT_TEMPLATE` 的项目符号列表）、`_build_jev_choice_state()`（record_a/record_b 的 kind、tags、body 截断到 500 字符）、
+  `_call_jev(..., config=None)`（返回与 `_call_llm` 同形的字典，失败时 `outcome="jev_failed"` 并带类型化的
+  `jev_failure_reason`/`jev_failure_detail`）；`run_llm_proposer(..., roots=None)` 每次运行解析一次 `llm_edge_proposer_judge_backend` knob，
+  `typesafe_jev` 先试 Jev、失败落回未改动的 `_call_llm` 并计数（`judge_backend_fallback_count`/`_reasons`/`_detail_sample`），默认
+  `hermes_default` 走完全不变的旧路径；`cognitive_loop._llm_edge_proposer` 透传 `roots=store.roots` 与四个新键；`knob_overrides.py` 登记
+  `llm_edge_proposer_judge_backend`（`lane_switch`，永不自动批准）；monitor `_edge_fields` 白名单加入四个新键。
+- **`reasoning` 字段决策**：`_call_jev` 为与 `_call_llm` 的返回形状对齐，用 `_format_jev_reasoning()` 合成一个 `"jev_choice=…_probability=…
+  _confidence=…"` 字符串填入 `reasoning`。全项目 grep 确认 `_call_llm` 自己的 `reasoning` 字段唯一消费方是本模块的 pair 循环，而该循环
+  从不读取它（只有 `relation_type`/`confidence` 喂 `write_governed_edge`）——因此合成串不是任何消费方读取的字段，只为形状对齐存在，
+  非承重（non-load-bearing）。
+- **权重映射**：Jev 的原生 `confidence` 与 `_call_llm` 的 confidence 共用同一张出生权重表——`edge_weights.llm_birth_weight()` 按
+  `confidence` 取值计算 `0.45 + 0.30 × confidence`，不区分调用来源，因此 J2 未新增权重公式，只是让同一个函数吃到另一个来源的
+  confidence（`confidence=None` 时按 0 处理，同 `_call_llm` 路径）。
+- **默认关闭逐字节不变证明**：`run_llm_proposer`（`index=index` 但省略显式 `roots=`）会退到 `index.roots` 作为 knob 解析的
+  effective roots（与 `run_vector_proposer` 同一 fallback 形状），因此"省略 `roots`"（J2 前每个调用点的形状）与"显式传
+  `roots=store.roots`"在未注册 override 时解析结果完全一致——两条路径的 `judge_backend` 都是 `"hermes_default"`，且核心摘要键（除
+  `duration_ms`/`begin_at` 等易变时间戳）逐一相等；`patch.object(jev_backend, "judge_choice")` 在默认关闭下断言 `mock_jev.called is False`。
+- **改动**：`CLAUDE.md` 在 J1 数据外发句旁新增 J2 独立一句（启用后每对两条记录正文截断到 500 字符 + kind + tags 发往
+  api.typesafe.ai，与 J1 各自独立计数/回落）；`scripts/memory_os_jev_probe.py` 新增 `--mode {noul,choice}`（choice 模式复用
+  `llm_edge_proposer._call_jev` 私有跨模块导入，3 组合成记录对 refines/contradicts/unrelated，输出恒不含 key）。
+- **测试**（全部驱动真实 producer，禁真实 API 调用）：`test_memory_os_llm_edge_proposer.py` 新增 `TestJ2JudgeBackendKnobRegistered`
+  （knob 登记/往返解析/拒绝未登记值/`lane_switch` 永不自动批准）、`TestJ2DefaultOffByteIdentical`（不调用 Jev、省略/显式传 roots
+  解析一致、`run_llm_proposer` 的 `roots` 形参默认值锁定为 `None`）、`TestJ2JevBackendRouting`（成功路由跳过 `_call_llm`、Jev 原生
+  "none" 不计入回落）、`TestJ2JevFallback`（各类失败回落并计数、缺 key 联网前短路、跨多对聚合、调用侧闭集防御反例）、
+  `TestJ2NativeChoiceConfidenceMapping`（confidence 映射进共享出生权重公式、`confidence=None` 落到 0 下限）、`TestJ2CallJevUnit`
+  （`_call_jev` 成功/失败形状、state 截断、5 元关系闭集）——合计 +19。`test_memory_os_cognitive_loop.py` +1（wrapper 层四个 J2 键透传）。
+  `tests/scripts/test_memory_os_3_200_monitor.py` +1（`test_j2_judge_backend_fields_survive_both_whitelists_end_to_end`，真实 producer
+  经真实 wrapper 喂真实监控采集器，双层白名单普查）。`tests/scripts/test_memory_os_jev_probe.py` +3（choice 模式缺 key 短路/三对齐验
+  probe/报告不含 key）。全量 4248 passed / 13 skipped / 0 failed；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` /
+  static-hygiene `pass` / public-checkout `--strict` `PASS` / `git diff --check` 无输出）。
+- **反事实**（cp 备份实测破坏即失败、恢复即通过，未用 `git checkout --`/`git stash`）：① 去掉 pair 循环里
+  `judge_backend == jev_backend.JEV_BACKEND_NAME` 守卫（改 `if True`）→ `test_default_off_never_calls_jev_backend` FAIL（默认关闭下
+  Jev 仍被调用）；② 去掉 `judge_backend_fallback_count += 1` 计数 → `TestJ2JevFallback` 四个测试全 FAIL（回落发生但计数恒 0）；
+  ③ 关闭 `_call_jev` 的调用侧闭集防御（`if rtype not in _JEV_RELATION_CHOICE_CRITERIA` 改 `if False`）→
+  `test_caller_side_closed_set_defence_rejects_choice_outside_criteria` FAIL（越界 choice 被当作合法关系写边而非回落）。三处均
+  cp 恢复后 diff 逐字节一致，对应测试转回 PASS。
+- **遗留 / 待 owner 定**：与 DS 相同的两条阈值/monitor 展示遗留项不适用于 J2（choice 无需 lean/strict 阈值，四个新键已在本任务
+  接入 monitor，不再是"待 monitor part 2"）；未评估的其他 lane 沿用 DS 结论（clearance_cycle/llm_contradiction_lane/low_clue 仍待
+  各自单独接入，避免多件事搅在一起）。
+- **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY`（与 J1 共用同一凭证）
+  并由 owner 登记 `llm_edge_proposer_judge_backend=typesafe_jev` 覆盖；部署后可先跑
+  `TYPESAFE_API_KEY=<真实key> python scripts/memory_os_jev_probe.py --mode choice` 做只读连通性验证（key 只经环境变量传入，输出
+  恒不含 key）。

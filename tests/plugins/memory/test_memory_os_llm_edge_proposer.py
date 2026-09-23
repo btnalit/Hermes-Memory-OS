@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import sqlite3
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -375,3 +377,444 @@ def test_run_llm_proposer_status_ok_when_no_failures(tmp_path, monkeypatch):
     assert result["llm_call_failure_count"] == 0
     assert result["llm_call_failure_reasons"] == {}
     assert result["proposed_count"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# J2: optional Jev native-choice judge backend (owner ruling 2026-09-23,
+# next-phase plan row J2). Default OFF -- mirrors fact_judge.py's J1 test
+# shape (tests/plugins/memory/test_memory_os_fact_judge.py's TestJ1*
+# classes): byte-identical default-off, correct routing/fallback when the
+# knob is set, and native-primitive confidence mapping through the shared
+# edge_weights.llm_birth_weight formula (0.45 + 0.30 x confidence).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _write_knob_override(store: MemoryOSStore, knob_name: str, value: Any) -> None:
+    """Write a knob override directly to the knob-override store for testing
+    (mirrors test_memory_os_fact_judge.py's helper of the same name)."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    path = store.roots.memory_os_root / "system" / "knob_overrides.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = _dt.now(_tz.utc)
+    record = {
+        "schema_version": "memory-os.knob_override.v0",
+        "id": f"ko_test_{knob_name}",
+        "knob": knob_name,
+        "override_value": value,
+        "prior_value": None,
+        "provisional": False,
+        "expires_at": "",
+        "proposed_by": "test",
+        "approved_via": "test",
+        "state": "active",
+        "ts": now.isoformat(),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+class TestJ2JudgeBackendKnobRegistered:
+    def test_judge_backend_knob_registered(self):
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        assert "llm_edge_proposer_judge_backend" in OVERRIDABLE_KNOBS
+        knob = OVERRIDABLE_KNOBS["llm_edge_proposer_judge_backend"]
+        assert knob["module"] == "llm_edge_proposer"
+        assert knob["default"] == "hermes_default"
+        assert knob["kind"] == "lane_switch"
+        assert knob["allowed"] == ["hermes_default", "typesafe_jev"]
+        assert knob["meta"] is False
+
+    def test_judge_backend_knob_round_trips_through_register_and_resolve(self, tmp_path):
+        from plugins.memory.memory_os.knob_overrides import register_override, resolve_knob
+
+        store_root = tmp_path / "system"
+        store_root.mkdir(parents=True, exist_ok=True)
+
+        assert resolve_knob(
+            "llm_edge_proposer_judge_backend", default="hermes_default", _store_root=store_root,
+        ) == "hermes_default"
+
+        register_override(
+            "llm_edge_proposer_judge_backend", "typesafe_jev",
+            prior="hermes_default", proposed_by="test", approved_via="test",
+            expires_at="", _store_root=store_root,
+        )
+        assert resolve_knob(
+            "llm_edge_proposer_judge_backend", default="hermes_default", _store_root=store_root,
+        ) == "typesafe_jev"
+
+    def test_judge_backend_knob_rejects_unregistered_value(self):
+        from plugins.memory.memory_os.knob_overrides import register_override
+        with pytest.raises(ValueError, match="not in allowed"):
+            register_override(
+                "llm_edge_proposer_judge_backend", "openai_direct",
+                prior="hermes_default", proposed_by="test", approved_via="test",
+                expires_at="",
+            )
+
+    def test_judge_backend_lane_switch_never_auto_approvable(self):
+        """lane_switch kind is always owner-gated -- same rule as
+        fact_judge_judge_backend / llm_transport."""
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        assert knob_override_auto_approvable("llm_edge_proposer_judge_backend", "typesafe_jev") is False
+
+
+class TestJ2DefaultOffByteIdentical:
+    """Default-off (no knob override registered) must be byte-identical to
+    pre-J2 run_llm_proposer behaviour -- Section W counterfactual."""
+
+    def test_default_off_never_calls_jev_backend(self, tmp_path, monkeypatch):
+        """Counterfactual: remove the `judge_backend ==
+        jev_backend.JEV_BACKEND_NAME` guard in the pair loop and this call
+        would happen even with the knob unset."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_off_a", "created_at": "2026-06-01T10:00:00Z", "body": "Record A body."},
+            {"id": "cry_j2_off_b", "created_at": "2026-06-01T11:00:00Z", "body": "Record B body."},
+        ])
+        index.rebuild_from_store(store)
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        _queued_responses(monkeypatch, [_VALID_REFINES_JSON])
+
+        with patch.object(llm_edge_proposer.jev_backend, "judge_choice") as mock_jev:
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert not mock_jev.called, "default-off must never call the Jev backend"
+        assert result["judge_backend"] == "hermes_default"
+        assert result["judge_backend_fallback_count"] == 0
+        assert result["judge_backend_fallback_reasons"] == {}
+        assert result["judge_backend_fallback_detail_sample"] == ""
+        assert result["proposed_count"] == 1
+
+    def test_default_off_identical_whether_or_not_roots_is_passed(self, tmp_path, monkeypatch):
+        """``roots`` is documented to fall back to ``index.roots`` when
+        omitted (same fallback shape as ``run_vector_proposer``) -- so with
+        no override registered, omitting ``roots`` entirely (every pre-J2
+        call site's shape) must resolve the SAME "hermes_default" backend
+        and produce an identical core summary to passing it explicitly."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_shape_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_shape_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        _queued_responses(monkeypatch, [_VALID_NONE_JSON])
+        result_without_roots = run_llm_proposer(str(index.roots.index_path), index=index)
+
+        store2, index2 = _store(tmp_path / "shape2")
+        _seed_canonical_crystallized(store2, [
+            {"id": "cry_j2_shape_a2", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_shape_b2", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index2.rebuild_from_store(store2)
+        _queued_responses(monkeypatch, [_VALID_NONE_JSON])
+        result_with_roots = run_llm_proposer(str(index2.roots.index_path), index=index2, roots=store2.roots)
+
+        _volatile_keys = {"duration_ms", "begin_at", "end_at", "started_at", "finished_at"}
+        stable_keys = set(result_without_roots) - _volatile_keys
+        assert set(result_with_roots) - _volatile_keys == stable_keys
+        for key in stable_keys:
+            assert result_with_roots[key] == result_without_roots[key], (
+                f"J2 default-off must resolve identically regardless of key {key!r}"
+            )
+        assert result_without_roots["judge_backend"] == "hermes_default"
+        assert result_with_roots["judge_backend"] == "hermes_default"
+
+    def test_run_llm_proposer_default_parameter_is_none(self):
+        """Every pre-J2 call site of run_llm_proposer omits `roots` -- this
+        locks the default so those call sites stay byte-identical."""
+        sig = inspect.signature(run_llm_proposer)
+        assert sig.parameters["roots"].default is None
+
+
+class TestJ2JevBackendRouting:
+    """Knob override routes to the Jev backend; success skips _call_llm
+    entirely for that pair."""
+
+    def test_knob_override_routes_to_jev_and_skips_call_llm(self, tmp_path, monkeypatch):
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_route_a", "created_at": "2026-06-01T10:00:00Z", "body": "Record A body."},
+            {"id": "cry_j2_route_b", "created_at": "2026-06-01T11:00:00Z", "body": "Record B body."},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(
+                choice="refines", confidence=0.9, probabilities={"refines": 0.9}, failure_reason="",
+            ),
+        ) as mock_jev, patch.object(llm_edge_proposer, "_call_hermes_runtime_model_result") as mock_hermes:
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert mock_jev.called
+        assert not mock_hermes.called, "Jev success must not fall through to _call_llm"
+        assert result["judge_backend"] == "typesafe_jev"
+        assert result["judge_backend_fallback_count"] == 0
+        assert result["proposed_count"] == 1
+
+    def test_jev_none_choice_is_not_a_relationship(self, tmp_path, monkeypatch):
+        """A legitimate Jev "none" answer must behave exactly like
+        _call_llm's own "none" -- no edge written, not counted as failure."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_none_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_none_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(choice="none", confidence=0.7, failure_reason=""),
+        ):
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert result["judge_backend_fallback_count"] == 0
+        assert result["proposed_count"] == 0
+
+
+class TestJ2JevFallback:
+    """Any Jev failure must fall back to the _call_llm path and be counted --
+    Completion Is Not Output."""
+
+    def test_jev_failure_falls_back_to_call_llm_and_counts(self, tmp_path, monkeypatch):
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_fb_a", "created_at": "2026-06-01T10:00:00Z", "body": "Record A body."},
+            {"id": "cry_j2_fb_b", "created_at": "2026-06-01T11:00:00Z", "body": "Record B body."},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        _queued_responses(monkeypatch, [_VALID_REFINES_JSON])
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(failure_reason="llm_timeout", detail="socket_timeout"),
+        ) as mock_jev:
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert mock_jev.called
+        assert result["judge_backend"] == "typesafe_jev"
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_timeout": 1}
+        assert result["judge_backend_fallback_detail_sample"] == "socket_timeout"
+        assert result["proposed_count"] == 1, "the fallback call_llm result must still produce the edge"
+
+    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path, monkeypatch):
+        """Counterfactual for jev_backend._resolve_api_key, exercised through
+        the real (unmocked) jev_backend.judge_choice with no TYPESAFE_API_KEY."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_key_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_key_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        import os
+        old_key = os.environ.pop("TYPESAFE_API_KEY", None)
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        _queued_responses(monkeypatch, [_VALID_NONE_JSON])
+        try:
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+        finally:
+            if old_key is not None:
+                os.environ["TYPESAFE_API_KEY"] = old_key
+
+        assert not mock_urlopen.called, "missing key must never reach the network"
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_missing_key": 1}
+
+    def test_fallback_counts_aggregate_across_pairs(self, tmp_path, monkeypatch):
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_agg_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_agg_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+            {"id": "cry_j2_agg_c", "created_at": "2026-06-01T12:00:00Z", "body": "C"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        # 3 records -> 3 pairs, every Jev call fails the same way.
+        _queued_responses(monkeypatch, [_VALID_NONE_JSON, _VALID_NONE_JSON, _VALID_NONE_JSON])
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(failure_reason="llm_exception", detail="boom"),
+        ):
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert result["judge_backend_fallback_count"] == 3
+        assert result["judge_backend_fallback_reasons"] == {"llm_exception": 3}
+
+    def test_caller_side_closed_set_defence_rejects_choice_outside_criteria(self, tmp_path, monkeypatch):
+        """Defense in depth: even if jev_backend's own wire-contract guard
+        were bypassed (simulated here via a direct mock returning a choice
+        outside _JEV_RELATION_CHOICE_CRITERIA), _call_jev's own closed-set
+        check must still catch it and fall back rather than writing an edge
+        with an unrecognised relation_type."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_closed_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_closed_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        _queued_responses(monkeypatch, [_VALID_NONE_JSON])
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(choice="not_a_real_relation", confidence=0.9, failure_reason=""),
+        ):
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_parse_failed": 1}
+
+
+class TestJ2NativeChoiceConfidenceMapping:
+    """The native choice confidence must feed the same
+    edge_weights.llm_birth_weight formula (0.45 + 0.30 x confidence) as
+    _call_llm's confidence -- no separate weight formula for the Jev path."""
+
+    def test_jev_confidence_maps_into_shared_birth_weight_formula(self, tmp_path, monkeypatch):
+        from plugins.memory.memory_os.edge_weights import llm_birth_weight
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_weight_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_weight_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(choice="refines", confidence=0.8, failure_reason=""),
+        ):
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert result["proposed_count"] == 1
+        conn = sqlite3.connect(str(index.roots.index_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "select weight from memory_edges where proposed_by = 'llm' and relation_type = 'refines'"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert float(rows[0]["weight"]) == pytest.approx(llm_birth_weight(0.8))
+        assert float(rows[0]["weight"]) == pytest.approx(0.45 + 0.30 * 0.8)
+
+    def test_jev_none_confidence_falls_back_to_zero_bound(self, tmp_path, monkeypatch):
+        """llm_birth_weight's own None-safety (bounded to 0) must be exercised
+        through the Jev path exactly as it is through _call_llm's."""
+        from plugins.memory.memory_os.edge_weights import llm_birth_weight
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_noconf_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+            {"id": "cry_j2_noconf_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(choice="co_occurs", confidence=None, failure_reason=""),
+        ):
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert result["proposed_count"] == 1
+        conn = sqlite3.connect(str(index.roots.index_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "select weight from memory_edges where proposed_by = 'llm' and relation_type = 'co_occurs'"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert float(rows[0]["weight"]) == pytest.approx(llm_birth_weight(0.0))
+        assert float(rows[0]["weight"]) == pytest.approx(0.45)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# J2: _call_jev unit tests (state building, criteria, reasoning parity)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestJ2CallJevUnit:
+    def test_call_jev_success_shape_matches_call_llm(self):
+        """_call_jev's success dict must carry the same relation_type/
+        confidence/outcome keys _call_llm's pair-loop consumer reads."""
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(
+                choice="contradicts", confidence=0.55, probabilities={"contradicts": 0.55}, failure_reason="",
+            ),
+        ):
+            result = llm_edge_proposer._call_jev(
+                {"kind": "note", "tags_json": [], "body": "a"},
+                {"kind": "note", "tags_json": [], "body": "b"},
+            )
+
+        assert result["outcome"] == "ok"
+        assert result["relation_type"] == "contradicts"
+        assert result["confidence"] == 0.55
+        assert result["judge_backend"] == llm_edge_proposer.jev_backend.JEV_BACKEND_NAME
+
+    def test_call_jev_failure_never_returns_ok_outcome(self):
+        from plugins.memory.memory_os.jev_backend import JevChoiceResult
+
+        with patch.object(
+            llm_edge_proposer.jev_backend, "judge_choice",
+            return_value=JevChoiceResult(failure_reason="llm_http_4xx", detail="HTTP 400: bad"),
+        ):
+            result = llm_edge_proposer._call_jev(
+                {"kind": "note", "tags_json": [], "body": "a"},
+                {"kind": "note", "tags_json": [], "body": "b"},
+            )
+
+        assert result["outcome"] == "jev_failed"
+        assert result["jev_failure_reason"] == "llm_http_4xx"
+        assert result["jev_failure_detail"] == "HTTP 400: bad"
+        assert result["relation_type"] == "none"
+
+    def test_build_jev_choice_state_clips_body_to_500_chars(self):
+        long_body = "x" * 800
+        state = llm_edge_proposer._build_jev_choice_state(
+            {"kind": "note", "tags_json": [], "body": long_body},
+            {"kind": "note", "tags_json": [], "body": "short"},
+        )
+        assert len(state["record_a"]["body"]) == 500
+        assert state["record_b"]["body"] == "short"
+
+    def test_relation_choice_criteria_is_closed_five_way_set(self):
+        assert set(llm_edge_proposer._JEV_RELATION_CHOICE_CRITERIA.keys()) == {
+            "refines", "contradicts", "depends_on", "co_occurs", "none",
+        }

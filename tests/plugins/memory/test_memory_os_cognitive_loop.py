@@ -1246,3 +1246,82 @@ def test_llm_edge_proposer_degraded_status_maps_to_warning_at_step_level(tmp_pat
     # ...but the step-level classification that _cycle_status/the report
     # consume must not lie "ok" through an all-calls-failed run.
     assert step["status"] == "warning"
+
+
+def test_llm_edge_proposer_wrapper_propagates_j2_judge_backend_fields(tmp_path, monkeypatch):
+    """J2 census (wrapper layer): the four Jev judge-backend diagnostics
+    (``judge_backend`` / ``judge_backend_fallback_count`` / ``_reasons`` /
+    ``_detail_sample``) must survive ``_llm_edge_proposer``'s own key
+    whitelist -- the same L1/D2b hazard the four transport keys above were
+    dropped by before their own passthrough was added. Drives the REAL
+    producer (run_llm_proposer with the judge_backend knob set to
+    typesafe_jev) through a monkeypatched jev_backend.judge_choice that
+    always fails, so the fallback path is real, not hand-built."""
+    import json as _json
+
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.jev_backend import JevChoiceResult
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
+
+    store = _init_store(tmp_path)
+    index = MemoryOSIndex(store.roots)
+
+    for rec_id, created_at in (
+        ("cry_llm_j2_a", "2026-06-01T10:00:00Z"),
+        ("cry_llm_j2_b", "2026-06-01T11:00:00Z"),
+    ):
+        store.append_crystallized_record(
+            "test_llm_edge_proposer_j2_wrapper.md",
+            {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": rec_id,
+                "kind": "test",
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "test",
+                "approval_note": "test seed",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            },
+            "test crystallized record body",
+        )
+    index.rebuild_from_store(store)
+
+    override_dir = store.roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        _json.dumps({
+            "knob": "llm_edge_proposer_judge_backend",
+            "override_value": "typesafe_jev",
+            "state": "active",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(
+            text=_json.dumps({"relation_type": "refines", "confidence": 0.6, "reasoning": "fallback"}),
+        ),
+    )
+    monkeypatch.setattr(
+        llm_edge_proposer.jev_backend, "judge_choice",
+        lambda **kwargs: JevChoiceResult(failure_reason="llm_timeout", detail="socket_timeout"),
+    )
+
+    runner = CognitiveLoopRunner(store)
+    summary = runner._llm_edge_proposer({})
+
+    assert summary["judge_backend"] == "typesafe_jev"
+    assert summary["judge_backend_fallback_count"] == 1
+    assert summary["judge_backend_fallback_reasons"] == {"llm_timeout": 1}
+    assert summary["judge_backend_fallback_detail_sample"] == "socket_timeout"
