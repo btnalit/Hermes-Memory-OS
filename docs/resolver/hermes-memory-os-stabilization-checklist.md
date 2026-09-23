@@ -5041,7 +5041,7 @@ sannai-community 仓库 README。）
 - `33d674b..HEAD`：monitor 接线 part 2（DU）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
   两个既有 accessor（不再手写路径/副本）；新增 `lane_backend_transport_summary` 展示 fact_judge 的 `judge_backend` / Jev 回落计数
   （全部回落时 WARN，默认关闭恒 INFO）与 SFE 的 `input_source` / `group_sessions_*` 计数（INFO only）；`llm_route_unexpected` 因跨两个
-  越界文件才能落地而不实现，记为遗留。全量 4179 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
+  越界文件才能落地而不实现，记为遗留。全量 4190 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
   新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿；审查后回填失败单独计数并 WARN、
   补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins、每个回填出口带封闭集结果码。全量 4172 passed / 13 skipped；五门全绿。**未部署**。
@@ -8655,7 +8655,7 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   回落）时另出 WARN `fact_judge_backend_fallback_all`（Jev 静默失活，而非一次性抖动）——默认关闭（`hermes_default`）恒为 INFO，`judged_count`
   守卫防止空 tick 的 `0>=0` 假阳性。`judge_backend_fallback_detail_sample` 的可信度已核实：`jev_backend.py` 的 HTTP 错误 detail 只取
   `exc.read()`（远端 API 自己的错误响应体），`api_key` 只出现在出站 `Authorization` 头里、从未进入任何 `detail=` 构造；样本在
-  jev_backend→fact_judge→本采集器三层各裁一次（200/160/160/200 字符）。SFE 的四个新计数刻意不分级（INFO only），与
+  jev_backend→fact_judge→本采集器三层各裁一次（依次 200 / 160 / 200 字符）。SFE 的四个新计数刻意不分级（INFO only），与
   `session_fact_extraction.py` 自己"group-chat tripwire"docstring 的处置一致。`fact_judge_backend_fallback_all` 登记进
   `CLEAN_HOST_WARN_CLASSIFICATIONS`（`expected_clean_host` / `warn_if_production`——Jev 默认关闭，clean-host 不可能命中）。
 - **`llm_route_unexpected` 前置条件核实（规划 L1 行，未实现）**：先查 `LlmCallResult`（`low_clue_recall.py`）是否已经暴露"应答模型"——
@@ -8678,9 +8678,9 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **词表钉死**：两条测试直接调用真实 `run_fact_judge_lane` / `run_session_fact_extraction_lane`（真实 store，非手写 fixture）断言其返回字典
   包含本采集器所读的全部键；另两条集成测试用真实生产者写出真实账本记录（含 SFE 所需的 ExecutionGate permit 信封）再经采集器读回，核对字段
   与值——不是手造 JSON 断言字段存在。
-- **测试**：monitor +21（含上述 5 类反事实、2 条词表钉死、2 条真生产者集成、latest-wins 选取、no-sample、INFO-only 边界、clean-host 归类）；
-  `test_memory_os_3_200_monitor.py` 单文件 321 passed；连带 `lane_contracts` / `fact_judge` / `session_fact_extraction` / `principal`
-  四个文件 320 passed；全量 4179 passed / 13 skipped / 0 failed（未复现已知 Windows 并发 flake）；五门全绿（import-cycle 0 环 /
+- **测试**：monitor +18（含主会话集成 1 条；子代理原记 +21 有误，独立审查按 `def test_` 实数 306→324 更正；含上述 5 类反事实、2 条词表钉死、2 条真生产者集成、latest-wins 选取、no-sample、INFO-only 边界、clean-host 归类）；
+  `test_memory_os_3_200_monitor.py` 单文件 324 passed；连带 `lane_contracts` / `fact_judge` / `session_fact_extraction` / `principal`
+  四个文件 320 passed；全量 4190 passed / 13 skipped / 0 failed（本 PR 链上尖端，未复现已知 Windows 并发 flake）；五门全绿（import-cycle 0 环 /
   write-surface `unclassified_count=0` / static-hygiene `pass` / public-checkout `--strict` `PASS` / `git diff --check` 无输出）。
 - **遗留**：`llm_route_unexpected`（应答模型 ≠ 主模型时的 WARN）未实现——见上方"前置条件核实"，需要 owner 决定是否值得为它单独改
   fact_judge.py / session_fact_extraction.py 的报告聚合逻辑（跨两个 lane 文件的改动，且两处已各自手写字段白名单，不共享一处"转发全部
@@ -8775,6 +8775,15 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   的审批逐字节相同。修复：入口成功审计补上 `principal`，注释改指真实位置；反事实（未配置平台、主人轮解析为 `unknown`、审计必须带
   `principal=unknown`）cp 备份法先败后过。另记两处局限（未修）：系统提示词若被 Hermes 按会话缓存，其脱敏只反映构建那一刻的发言者
   （与 P1 之前相比不更差，但不是逐轮关闭）；`apply_owner_action` 本身仍无主体自检，当前仅本地 CLI 可达。
+- **独立审查（Sonnet，安全向）无阻塞**：独立核对了两个令牌生成器（`oa_` 为 14 位小写 hex、`ppmt_` 为 urlsafe base64）均落在脱敏正则内、
+  拒绝审计不含令牌、`apply_owner_action` 四个生产调用点都在门后或本地 CLI、插件别名 CLI 是同一份 `cli.py` 进程内调用。据其两条
+  SHOULD-FIX 补两条测试（各有破坏即失败的反事实）：① 防火墙测试用 AST 扫描 `plugins/` 与 `scripts/`，把 `apply_owner_action(` 的调用点
+  钉成封闭集（CLI `_review_command` / `memory_os_command`，`parse_owner_review_reply` 与其内的 `_parse_permanent_promotion_reply`）——
+  它自己没有主体检查，新增一个绕过门的调用点即失败；② 端到端测试走真实 provider 的 `on_turn_start → system_prompt_block`：此前所有
+  P1 测试都显式传 `principal=`，没有任何测试证明 provider 在每轮注入的系统提示词里传的是本轮主体。只把 surface 主体替换成本块读取的
+  形状，真实的脱敏包装与 provider 生命周期照常运行；把 provider 的实参改成固定 `owner` 即令牌泄漏、测试失败。注：本块读取顶层
+  `action_required` 与 surface 实际的 `sections[...]` 形状不符（既有问题，上文已记），所以今天生产上它多半渲染为空——脱敏接线仍须
+  就位，否则修好读取路径的那一天就开始泄漏。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
   人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
   `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。
