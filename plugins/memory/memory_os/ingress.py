@@ -75,7 +75,11 @@ FOREGROUND_CONTROL_AUTHOR_CLASSES = frozenset({AUTHOR_CLASS_HUMAN, AUTHOR_CLASS_
 # contracts, stripped only at the start of the turn, in any stacking order.
 _LEADING_FRAME_PATTERNS = (
     # f'[Replying to{" your previous message"}: "{reply_text}"]\n\n{message}'
-    # (gateway/run_inbound.py)
+    # (gateway/run_inbound.py). The exact delimiter first: a quote that itself
+    # contains '"]' plus a space (JSON, code) must not end the frame early and
+    # leave the rest of the quote to be read as the author's own words.
+    re.compile(r'^\[Replying to(?: your previous message)?: ".*?"\]\n\n', re.S),
+    # Whitespace-tolerant form for text whose newlines were already collapsed.
     re.compile(r'^\[Replying to(?: your previous message)?: ".*?"\](?:\s+|$)', re.S),
     # Origin header prepended to queued/busy messages (gateway/run_busy.py).
     re.compile(
@@ -290,15 +294,17 @@ def classify_ingress(
         )
 
     decision = _classify_author_text(text, has_anchor=has_anchor)
-    if (
-        decision.intent != "cancellation"
-        and len(text) > _MAX_FOREGROUND_CONTROL_TURN_CHARS
-        and _match_cancellation_rule(text)
-    ):
-        # Report-only: the long turn contained an imperative shape the length
-        # bound refused. Lets production tell "the gate held" from "nothing
-        # to gate" without re-reading the transcript.
-        decision = replace(decision, reason_codes=[*decision.reason_codes, "cancel_rejected_turn_too_long"])
+    if len(text) > _MAX_FOREGROUND_CONTROL_TURN_CHARS:
+        # Report-only: the long turn contained an order shape the length bound
+        # refused. Lets production tell "the gate held" from "nothing to gate"
+        # without re-reading the transcript.
+        rejected = []
+        if decision.intent != "cancellation" and _match_cancellation_rule(text):
+            rejected.append("cancel_rejected_turn_too_long")
+        if has_anchor and decision.intent != "defer_current_task" and _matches_defer_pattern(text):
+            rejected.append("defer_rejected_turn_too_long")
+        if rejected:
+            decision = replace(decision, reason_codes=[*decision.reason_codes, *rejected])
     return decision
 
 
@@ -384,10 +390,10 @@ def is_machine_authored_query(text: str) -> bool:
 def extract_own_text(text: str) -> str:
     """Return the turn with its leading Hermes frames removed.
 
-    Idempotent, and safe on already-normalized text (the frame patterns accept
-    any whitespace after the closing bracket). A quote that itself contains
-    ``"]`` followed by whitespace ends early; what remains is then still
-    classified, so the failure direction is keeping text, not dropping it.
+    Idempotent, and safe on already-normalized text (a whitespace-tolerant
+    reply-quote form backs up the exact Hermes delimiter). Only on normalized
+    text can a quote containing ``"]`` plus whitespace still end early; the
+    provider and the classifiers strip frames from the raw query.
     """
     own = str(text or "").lstrip()
     for _ in range(_MAX_LEADING_FRAMES):
@@ -405,7 +411,13 @@ def author_class_from_host(
     *, author_id: object = None, author_name: object = None, author_is_bot: object = None
 ) -> str:
     """Map the host's per-turn author fields onto the closed author classes."""
-    if author_is_bot is True:
+    # Same truthiness as Hermes' own ``agent.turn_author._bot_flag``, so a flag
+    # that crossed a serialisation boundary ("true", 1) still reads as a bot.
+    if isinstance(author_is_bot, str):
+        is_bot = author_is_bot.strip().lower() in {"true", "1", "yes"}
+    else:
+        is_bot = isinstance(author_is_bot, (bool, int)) and bool(author_is_bot)
+    if is_bot:
         return AUTHOR_CLASS_BOT
     if str(author_id or "").strip() or str(author_name or "").strip():
         return AUTHOR_CLASS_HUMAN
@@ -515,6 +527,10 @@ def matches_defer_current_task(text: str) -> bool:
     normalized = normalize_query(extract_own_text(text))
     if len(normalized) > _MAX_FOREGROUND_CONTROL_TURN_CHARS:
         return False
+    return _matches_defer_pattern(normalized)
+
+
+def _matches_defer_pattern(normalized: str) -> bool:
     return any(pattern.search(normalized) for pattern in _DEFER_CURRENT_TASK_PATTERNS)
 
 

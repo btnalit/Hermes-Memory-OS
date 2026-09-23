@@ -604,9 +604,17 @@ class MemoryOSProvider(MemoryProvider):
                 author_name=turn_author.get("name"),
                 author_is_bot=turn_author.get("is_bot"),
             )
+            author_source = "turn_author"
         else:
             author_class = self._turn_author_class
-        safe_ref: dict[str, Any] = {"session_id": session_id or self.session_id, "author_class": author_class}
+            # Only this path can race the next turn's on_turn_start; recorded
+            # so a host that stops sending turn_author is visible per event.
+            author_source = "turn_start_fallback"
+        safe_ref: dict[str, Any] = {
+            "session_id": session_id or self.session_id,
+            "author_class": author_class,
+            "author_source": author_source,
+        }
         non_driving_reason = self._non_driving_turn_reason(
             user_content, author_class=author_class, session_id=session_id or self.session_id
         )
@@ -1501,14 +1509,19 @@ class MemoryOSProvider(MemoryProvider):
             session_id=session_id or self.session_id,
             author_class=self._turn_author_class,
         )
-        if decision.intent == "non_owner_authored" or "cancel_rejected_turn_too_long" in decision.reason_codes:
+        rejected_long = [code for code in decision.reason_codes if code.endswith("_rejected_turn_too_long")]
+        if decision.intent == "non_owner_authored" or rejected_long:
             # Both are the gate *holding*; recorded so production can tell
             # that apart from "nothing reached the gate".
             self._audit(
                 "ingress_foreground_control_skipped",
                 "ok",
                 {
-                    "reason": decision.reason_codes[-1],
+                    "reason": (
+                        "non_owner_authored_turn"
+                        if decision.intent == "non_owner_authored"
+                        else ",".join(rejected_long)
+                    ),
                     "author_class": self._turn_author_class,
                     "session_id": session_id or self.session_id,
                 },

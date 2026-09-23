@@ -23,8 +23,8 @@ from plugins.memory.memory_os.context_router import plan_context_route
 from plugins.memory.memory_os.inner_drive import classify_event_for_inner_drive
 from plugins.memory.memory_os.roots import MemoryOSRoots
 
-_OWNER_ID = "6808688675"
-_PEER_ID = "8579933942"
+_OWNER_ID = "1000000001"
+_PEER_ID = "2000000002"
 _OWNER_ANCHOR = "### Memory-OS Current Task Anchor\n- current task: 安装 ComfyUI 并配置 IPAdapter 插件"
 _APOLOGY = "是我错了，兄弟。我把上一场辩论的“已取消”状态错误地带进了这场 RAG 辩论，误以为当前也要停止。"
 
@@ -46,7 +46,7 @@ def _owner_turn(provider, message=""):
 
 
 def _peer_turn(provider, message=""):
-    provider.on_turn_start(1, message, author_id=_PEER_ID, author_name="orangepi4", author_is_bot=True)
+    provider.on_turn_start(1, message, author_id=_PEER_ID, author_name="peer-bot", author_is_bot=True)
 
 
 def _records(tmp_path):
@@ -176,7 +176,7 @@ def test_sync_turn_marks_peer_and_control_turns_non_driving(tmp_path):
             f'[Replying to: "{_APOLOGY}"]\n\n第一阶段·反方立论',
             "收到",
             session_id="20260922_owner_group",
-            turn_author={"id": _PEER_ID, "name": "orangepi4", "is_bot": True},
+            turn_author={"id": _PEER_ID, "name": "peer-bot", "is_bot": True},
         )
         peer_event = _queued_event(provider)
         provider.sync_turn(
@@ -193,17 +193,25 @@ def test_sync_turn_marks_peer_and_control_turns_non_driving(tmp_path):
             turn_author={"id": _OWNER_ID, "name": "owner", "is_bot": False},
         )
         normal_event = _queued_event(provider)
+        # a host that sends no turn_author: the on_turn_start value is used,
+        # and the event says so
+        _owner_turn(provider)
+        provider.sync_turn("再装一个插件", "好的。", session_id="20260922_owner_group")
+        fallback_event = _queued_event(provider)
     finally:
         provider.shutdown()
 
     assert peer_event.safe_ref["drive_policy"] == "index_only"
     assert peer_event.safe_ref["non_driving_reason"] == "non_owner_author"
     assert peer_event.safe_ref["author_class"] == "bot"
+    assert peer_event.safe_ref["author_source"] == "turn_author"
     # the summary carries the author's words, not the quoted apology
     assert "误以为" not in peer_event.summary
     assert control_event.safe_ref["non_driving_reason"] == "foreground_control_exchange"
     assert "drive_policy" not in normal_event.safe_ref
     assert normal_event.safe_ref["author_class"] == "human"
+    assert fallback_event.safe_ref["author_source"] == "turn_start_fallback"
+    assert fallback_event.safe_ref["author_class"] == "human"
 
     for event in (peer_event, control_event):
         decision = classify_event_for_inner_drive(event)
@@ -230,3 +238,19 @@ def test_peer_author_cannot_exercise_owner_review_actions(tmp_path):
 def test_router_agrees_with_provider_on_peer_turns():
     assert plan_context_route("取消这个任务")["route"] == "foreground_control"
     assert plan_context_route("取消这个任务", author_class="bot")["route"] != "foreground_control"
+
+
+def test_long_owner_turn_mentioning_later_is_audited_as_refused_deferral(tmp_path):
+    provider = _provider(tmp_path, "20260922_owner_dm")
+    try:
+        _owner_turn(provider)
+        provider._current_task_anchor = _OWNER_ANCHOR
+        long_instruction = "保守清理，清理完成后核对一遍功能和状态：删除 15 个旧 paused job 定义，" * 4 + "其余明天再说。"
+        provider.prefetch(long_instruction, session_id="20260922_owner_dm")
+        skipped = _audit(provider, "ingress_foreground_control_skipped")
+    finally:
+        provider.shutdown()
+    # no deferral was recorded for a long instruction that merely says "明天再说"
+    assert not (tmp_path / "memory-os" / "system" / "deferred_foreground_tasks.jsonl").exists()
+    assert skipped and skipped[-1]["details"]["reason"] == "defer_rejected_turn_too_long"
+    assert skipped[-1]["details"]["author_class"] == "human"

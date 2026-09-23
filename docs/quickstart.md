@@ -78,7 +78,7 @@ disabled and recall kept advisory.
 Automated deployment wrapper examples:
 
 The wrapper defaults `--llm-judge-preset` to `none`: the low-clue judge stays
-off and the post-install judge probe reports `skipped`. Pass
+off and the post-install judge probe reports `not_requested`. Pass
 `--llm-judge-preset report-only` for report-only probes, or `bounded-vote` /
 `active` to reuse the current Hermes provider/model in bounded-vote mode.
 

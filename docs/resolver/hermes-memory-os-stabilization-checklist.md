@@ -5039,7 +5039,8 @@ sannai-community 仓库 README。）
   前台控制轮，peer / 非 primary 会话的 pre-compress 与 session-end 不再碰主人锚点；peer 轮与取消往来
   不进 lingering/候选。独立提交 `f2607b8`：llm_judge 安装/部署默认关闭，clearance 可用性与 low-clue
   配置解耦。生产语料回放 33/33 正确、历史 167 条零新增命中；14 项反事实逐项成立；+56 测试，全量
-  3782 passed / 13 skipped / 0 failed（基线 3726，零回归），五门全绿。**未部署**。
+  3782 passed / 13 skipped / 0 failed（基线 3726，零回归），五门全绿。独立评审 FIX-FIRST 5 项已修（DJ.9），
+  全量 3784 passed / 13 skipped / 0 failed。**owner 裁定：合并后不部署，等规划全部落地后统一部署**。
 
 - `2a7f806..HEAD`：选择策略分叉（DI）——`2a7f806` 把
   SessionMirror 的选择策略劈成两半（审查面过滤 + 最近优先，执行面完全不过滤），于是
@@ -8051,14 +8052,14 @@ DG 部署（09-10）后两 profile 共写 **33** 条 cancelled 锚点，逐条�
 
 | 类别 | main | sannai | 判定 |
 |---|---|---|---|
-| 同行 agent（orangepi4 `8579933942` / lumi `8628467257`）的辩论发言或忙碌提示 | 9 | 13 | 误判；其中 **13 条取消词只在 `[Replying to: "…"]` 引文里** |
+| 同行 agent（对方辩手 bot / 主持 bot）的辩论发言或忙碌提示 | 9 | 13 | 误判；其中 **13 条取消词只在 `[Replying to: "…"]` 引文里** |
 | Hermes 自注入 `[ASYNC DELEGATION BATCH COMPLETE …]`（主人 DM 会话） | 4 | 0 | 误判（DG 已观察到此类，只收了 cron 前导语） |
 | 主人会话里粘贴的 bot 输出 / 长公告 | 2 | 1 | 误判 |
 | 主人本人，长距否定（"不要乱了无故停下，…继续!"） | 0 | 1 | **反向执行主人意图** |
 | 主人真实取消（7 / 10 / 28 字） | 1 | 2 | 正确 |
 
-- **一级根因：Memory-OS 把"user 轮"等同于"主人话语"**。群 `❄️hermes大宝贝们` 里三个 agent 互相辩论，
-  Hermes 给每个发言者开独立会话（`agent:main:telegram:group:-100…:8579933942`），同行 agent 的
+- **一级根因：Memory-OS 把"user 轮"等同于"主人话语"**。一个 Telegram 群里三个 agent 互相辩论，
+  Hermes 给每个发言者开独立会话（`agent:main:telegram:group:<chat_id>:<sender_id>`），同行 agent 的
   每句话都以 user 轮进入 provider。宿主**早已提供作者**：`on_turn_start(author_id, author_name,
   author_is_bot)` 在同一线程紧接 prefetch 之前调用、`sync_turn(turn_author=…)` 只发给签名接收它的
   provider——Memory-OS 的 `on_turn_start` 丢弃了 kwargs，`sync_turn` 不接这个参数，所以宿主根本不发。
@@ -8137,7 +8138,7 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   恢复 + refresh 会补回。
 - **共享群会话**（Hermes 若配置为群内不按发送者分会话）：`on_pre_compress` 从全体 user 消息建锚，可能取到
   peer 文本；当前两 profile 均按发送者分会话，未处理。
-- **未核实**：8579933942 / 8628467257 在宿主侧是否真的 `author_is_bot=True`（用户名以 bot 结尾，几乎必然；
+- **未核实**：两个同行 bot 在宿主侧是否真的 `author_is_bot=True`（用户名以 bot 结尾，几乎必然；
   但无日志证据）——这正是部署验收第一项要看的。文本层已独立关闭全部语料，作者门是其上的结构层。
 - **Rule 5 同族、本批未修（依赖主人身份白名单，列入后续规划 P 阶段）**：`session_mirror._session_record`
   把 `role=="user"` 一律当主人话语导入（peer bot 的 Hermes 会话同样会被镜像成主人对话）；
@@ -8168,6 +8169,27 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   两 profile 的 `low_clue_recall` 段重写为 `none` 预设（judge 关 ≠ lane 关）。
 - 48h 验收：① `active_task_anchor_recorded` 中 `status=cancelled ∧ author_class=bot` = 0，Telegram 群会话
   `author_class=unknown` 占比≈0（否则作者门未生效）；② `ingress_foreground_control_skipped` 在群会话计数 > 0；
-  ③ `lingering.json` 无 peer 来源新条目；④ 锚点账本不再出现 session_id 含 `:8579933942` / `:8628467257` 的
+  ③ `lingering.json` 无 peer 来源新条目；④ 锚点账本不再出现同行 bot 会话（session_id 以其发送者 id 结尾）写出的
   superseded/completed；⑤ 主人以"引用回复 + 停止"取消仍产出 `author_class=human, ingress_rule=cjk_imperative`；
   ⑥ 一场受监督的辩论中无"已停止/已取消"道歉；⑦ 部署 postcheck 出现 `llm_judge_probe_not_requested`、无判官 WARN。
+
+### DJ.9 独立评审（PR #82）与修复
+
+- 评审方：独立 Sonnet 子代理（未见作者推理，只读代码 + CLAUDE.md + 本节），结论 **FIX-FIRST**：1 MAJOR / 3 MINOR / 1 NIT，全部处理：
+  - **MAJOR** `sync_turn` 在宿主不传 `turn_author` 时回退到 `on_turn_start` 的值，后台 worker 下可能已属下一轮。宿主侧已核实网关每轮都传
+    （`run_turn_runner.py:1573`、`run_agent.py:898`），不改逻辑；事件 `safe_ref` 增 `author_source`（`turn_author` / `turn_start_fallback`），
+    部署后可逐事件看回退是否真的发生（并入 DJ.8 验收①）。
+  - **MINOR** 延期被长度界拒绝时无记录，与取消不对称 → 补 `defer_rejected_turn_too_long`（仅在有前台任务时）；provider 审计取全部
+    `*_rejected_turn_too_long` 码。
+  - **MINOR** 引文帧正则非贪婪早停：引文自身含 `"]` + 空白时，引文剩余部分会被当成本人话语。改为先匹配 Hermes 精确分隔符 `"]
+
+`，
+    宽松式只作已归一化文本的兜底。反事实夹具：引文 `配置写成 ["a"] 然后停止吧` 在旧式下判出 `cjk_imperative`。
+  - **MINOR** `docs/quickstart.md` 写成 `skipped`，与代码新状态 `not_requested` 漂移 → 改正。
+  - **NIT** `author_is_bot is True` 过严 → 与 Hermes 自己的 `_bot_flag` 同口径（`"true"`/`1` 也算 bot）。
+- **公开仓库卫生**：本 PR 引入的真实 Telegram 账号 id、bot 用户名与群名（测试夹具与本节）全部换成占位值；主人 id 此前已出现在 main 的
+  旧测试里，本 PR 不再新增。
+- **规划文档纳入追踪**：`docs/plans/2026-09-23-memory-os-next-phase-plan.md`（owner 要求；`docs/plans/` 默认被忽略，用 `git add -f`；内容不含账号 id）。
+- **反事实**：5 项逐项单独破坏，对应测试各自 FAIL、恢复后 PASS。
+- **测试**：+2（ingress 新增短引文含 `"]` 的夹具、turn_author 新增延期拒绝审计用例；其余断言并入既有测试）；全量 **3784 passed / 13 skipped / 0 failed**（上轮 3782，基线 3726，累计 +58）；五门全绿（public-checkout `--strict` PASS 4/0/0）。
+- **部署**：owner 裁定合并后不部署，等下一阶段规划全部落地后统一部署并执行 DJ.8 验收。

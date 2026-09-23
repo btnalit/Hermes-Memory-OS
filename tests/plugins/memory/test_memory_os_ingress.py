@@ -189,16 +189,19 @@ _APOLOGY = (
 @pytest.mark.parametrize(
     "text",
     [
-        _reply(_APOLOGY, "@latagentcocobot 第一阶段·反方立论 我方主张：传统RAG已经不适合作为默认方案。"),
+        _reply(_APOLOGY, "@agent_a_bot 第一阶段·反方立论 我方主张：传统RAG已经不适合作为默认方案。"),
         _reply(_APOLOGY, "继续辩论", own=True),
-        _reply("第二阶段·正方驳论 @btnalitbot 反方不能因为治理复杂就取消证据链。", "第三阶段·正方总结陈词\n\n请发言。"),
+        _reply("第二阶段·正方驳论 @agent_b_bot 反方不能因为治理复杂就取消证据链。", "第三阶段·正方总结陈词\n\n请发言。"),
         _origin(_reply(_APOLOGY, "已看到中断上下文，不重复补发公约。")),
-        "[orangepi4❄️|8579933942]\n已看到中断上下文，不重复补发公约。",
+        "[peer-bot❄️|2000000002]\n已看到中断上下文，不重复补发公约。",
         # short quotes: only frame stripping (not the turn-length bound) keeps
         # the quoted order from being read as this author's
         _reply("取消这个任务", "继续"),
         _reply("停止吧", "好的，我们进入第二阶段", own=True),
         _reply("停下来，别继续了", "收到"),
+        # a quote that itself contains '"]' plus a space must not end the frame
+        # early and leave its tail ("然后停止吧") to be read as the author's own
+        _reply('配置写成 ["a"] 然后停止吧', "继续"),
     ],
 )
 def test_cancel_words_inside_hermes_frames_are_not_the_authors(text):
@@ -213,7 +216,7 @@ def test_cancel_words_inside_hermes_frames_are_not_the_authors(text):
         (_reply("长篇辩论发言" * 40, "先停止吧"), "cjk_imperative"),
         (_reply("x", "取消这个任务", own=True), "cjk_imperative"),
         (_origin("停下吧，先别理群消息"), "cjk_imperative"),
-        ("[owner|6808688675]\n小宝贝你先停止", "cjk_imperative"),
+        ("[owner|1000000001]\n小宝贝你先停止", "cjk_imperative"),
     ],
 )
 def test_own_words_after_frames_still_cancel(text, rule):
@@ -222,7 +225,7 @@ def test_own_words_after_frames_still_cancel(text, rule):
 
 
 def test_extract_own_text_strips_stacked_frames_and_is_idempotent():
-    framed = _origin(_reply(_APOLOGY, "[orangepi4❄️|8579933942]\n继续"))
+    framed = _origin(_reply(_APOLOGY, "[peer-bot❄️|2000000002]\n继续"))
     assert extract_own_text(framed) == "继续"
     assert extract_own_text(extract_own_text(framed)) == "继续"
     # already-normalized text (newlines collapsed) is stripped too
@@ -276,10 +279,15 @@ def test_human_or_unknown_author_keeps_owner_rules(author_class):
 
 def test_author_class_from_host_maps_hermes_turn_author_fields():
     # the kwarg names Hermes passes to on_turn_start (agent/turn_context.py)
-    assert author_class_from_host(author_id="8579933942", author_name="orangepi4", author_is_bot=True) == "bot"
-    assert author_class_from_host(author_id="6808688675", author_name="owner", author_is_bot=False) == "human"
+    assert author_class_from_host(author_id="2000000002", author_name="peer-bot", author_is_bot=True) == "bot"
+    assert author_class_from_host(author_id="1000000001", author_name="owner", author_is_bot=False) == "human"
     assert author_class_from_host(author_id=None, author_name=None, author_is_bot=False) == "unknown"
     assert author_class_from_host() == "unknown"
+    # same truthiness as Hermes' own _bot_flag, across a serialisation boundary
+    assert author_class_from_host(author_id="x", author_is_bot="true") == "bot"
+    assert author_class_from_host(author_id="x", author_is_bot=1) == "bot"
+    assert author_class_from_host(author_id="x", author_is_bot="false") == "human"
+    assert author_class_from_host(author_id="x", author_is_bot=0) == "human"
 
 
 def test_long_turn_cannot_cancel_and_says_so():
@@ -330,6 +338,11 @@ def test_long_turn_mentioning_later_does_not_park_the_task():
     long_instruction = "保守清理，清理完成后核对一遍功能和状态：删除 15 个旧 paused job 定义，" * 4 + "其余明天再说。"
     assert len(long_instruction) > 120
     assert matches_defer_current_task(long_instruction) is False
-    assert classify_ingress(long_instruction, current_task_anchor=anchor).intent != "defer_current_task"
+    decision = classify_ingress(long_instruction, current_task_anchor=anchor)
+    assert decision.intent != "defer_current_task"
+    # the refusal is reported, symmetric with cancel_rejected_turn_too_long
+    assert "defer_rejected_turn_too_long" in decision.reason_codes
+    # without a foreground task there is nothing to defer, so no refusal either
+    assert "defer_rejected_turn_too_long" not in classify_ingress(long_instruction).reason_codes
     # the short order still defers
     assert classify_ingress("先放一下，明天再说", current_task_anchor=anchor).intent == "defer_current_task"
