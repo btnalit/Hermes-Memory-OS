@@ -8766,6 +8766,12 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   的 `build_session_review_block` / `build_session_feedback_block` 读取的 `surface.get("action_required", [])` /
   `surface.get("feedback", [])` 顶层键与 `owner_review_surface_report` 实际返回的 `sections["action_required"]` 结构不匹配（既有代码，
   与本次改动无关，未修）；规划 Phase 2 的 P2（事件带 author/principal）、P3（session_mirror 主体过滤）仍未做。
+- **主会话集成审查**：`unknown` 可执行 owner action 这一取舍之所以能接受，前提是审计能把它与已核实的主人区分开——`OWNER_ACTION_PRINCIPALS`
+  的注释也这么写，并指向 `parse_owner_review_reply`。核对发现**这个前提不成立**：模块内部只在拒绝时写审计，成功路径不记主体；provider
+  入口 `owner_review_reply_ingress` 只在拒绝分支带 `principal`，成功分支没有。于是未配置平台上以 `unknown` 执行的审批，在审计里与主人
+  的审批逐字节相同。修复：入口成功审计补上 `principal`，注释改指真实位置；反事实（未配置平台、主人轮解析为 `unknown`、审计必须带
+  `principal=unknown`）cp 备份法先败后过。另记两处局限（未修）：系统提示词若被 Hermes 按会话缓存，其脱敏只反映构建那一刻的发言者
+  （与 P1 之前相比不更差，但不是逐轮关闭）；`apply_owner_action` 本身仍无主体自检，当前仅本地 CLI 可达。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
   人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
   `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。

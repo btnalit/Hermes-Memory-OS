@@ -79,9 +79,9 @@ FOREGROUND_CONTROL_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})
 # and rejecting it would lock the owner out of approving/rejecting their own
 # digest. This is a deliberate trade-off, not an oversight -- an action taken
 # under ``unknown`` is still recorded with that principal on the audit trail
-# (see ``owner_actions.parse_owner_review_reply``), so it stays visible for a
-# monitor to grade, rather than being silently indistinguishable from a
-# verified owner.
+# (the ``owner_review_reply_ingress`` audit in the provider), so it stays
+# visible for a monitor to grade, rather than being silently
+# indistinguishable from a verified owner.
 OWNER_ACTION_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})
 
 # Sources whose author is the operator's own local shell/tool session.

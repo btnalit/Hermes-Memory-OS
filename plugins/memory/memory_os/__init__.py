@@ -1209,6 +1209,9 @@ class MemoryOSProvider(MemoryProvider):
                 "anchor": (result.get("parsed") or {}).get("anchor", ""),
                 "action_token": (result.get("parsed") or {}).get("action_token", ""),
                 "action_type": (result.get("parsed") or {}).get("action_type", ""),
+                # An owner action taken under ``unknown`` (unconfigured
+                # platform) must stay distinguishable from a verified owner.
+                "principal": self._turn_principal,
             },
         )
         return result

@@ -348,6 +348,25 @@ def test_configured_owner_can_still_approve_an_owner_action_once_bound(tmp_path)
     assert result["reason"] != "non_owner_author"
 
 
+def test_owner_action_under_unknown_principal_is_attributed_in_the_audit(tmp_path):
+    """P1 integration counterfactual: `unknown` may perform owner actions
+    (unconfigured platform = the owner's own replies), which is acceptable
+    only because the audit keeps it distinguishable from a verified owner.
+    The success-path ingress audit recorded no principal at all."""
+    provider = _provider(tmp_path, "20260923_unknown_review")
+    try:
+        _owner_turn(provider)
+        assert provider._turn_principal == "unknown"
+        result = provider._process_owner_review_reply_ingress(
+            "approve oa_0123456789abcdef", turn_number=1, phase="tool_call"
+        )
+        audits = _audit(provider, "owner_review_reply_ingress")
+    finally:
+        provider.shutdown()
+    assert result["reason"] != "non_owner_author"
+    assert audits and audits[-1]["details"]["principal"] == "unknown"
+
+
 def test_mailbox_source_never_drives_foreground_control(tmp_path):
     """Owner ruling: mailbox is a peer channel, never owner-authenticated --
     not even an owner-shaped author_id on the mailbox source may cancel."""
