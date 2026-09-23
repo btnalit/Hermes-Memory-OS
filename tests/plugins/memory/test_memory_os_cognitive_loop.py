@@ -1094,6 +1094,7 @@ def test_llm_edge_proposer_wrapper_propagates_outcome_and_call_counters(tmp_path
     that hand fixtures let counterfactuals pass vacuously."""
     from plugins.memory.memory_os.index import MemoryOSIndex
     from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 
     store = _init_store(tmp_path)
     index = MemoryOSIndex(store.roots)
@@ -1129,7 +1130,10 @@ def test_llm_edge_proposer_wrapper_propagates_outcome_and_call_counters(tmp_path
     )
     # Every LLM reply is empty -> every _call_llm outcome is
     # "empty_llm_response" -> the run is degraded, not "no relationships".
-    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(text="", failure_reason="llm_empty_content"),
+    )
 
     runner = CognitiveLoopRunner(store)
     summary = runner._llm_edge_proposer({})
@@ -1158,6 +1162,7 @@ def test_llm_edge_proposer_degraded_status_maps_to_warning_at_step_level(tmp_pat
     """
     from plugins.memory.memory_os.index import MemoryOSIndex
     from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 
     store = _init_store(tmp_path)
     index = MemoryOSIndex(store.roots)
@@ -1193,7 +1198,10 @@ def test_llm_edge_proposer_degraded_status_maps_to_warning_at_step_level(tmp_pat
     )
     # Every LLM reply is empty -> every _call_llm outcome is
     # "empty_llm_response" -> the run is degraded, not "no relationships".
-    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(text="", failure_reason="llm_empty_content"),
+    )
 
     runner = CognitiveLoopRunner(store)
     step = runner._run_step("llm_edge_proposer", runner._llm_edge_proposer, {})

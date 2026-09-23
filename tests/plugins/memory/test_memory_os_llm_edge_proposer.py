@@ -43,6 +43,7 @@ from plugins.memory.memory_os import llm_edge_proposer
 from plugins.memory.memory_os.audit import read_audit_records
 from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.llm_edge_proposer import _call_llm, run_llm_proposer
+from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -92,18 +93,25 @@ def _ok_runtime(config: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}}
 
 
+def _as_call_result(text: str) -> LlmCallResult:
+    """Wrap a plain response string as the transport now returns it."""
+    if not text:
+        return LlmCallResult(text="", failure_reason="llm_empty_content")
+    return LlmCallResult(text=text)
+
+
 def _queued_responses(monkeypatch: pytest.MonkeyPatch, responses: list[str]) -> list[str]:
-    """Monkeypatch _call_hermes_runtime_model (the real producer surface
-    _call_llm consumes) to return *responses* in call order. Records prompts
-    seen, for assertions that don't care about exact per-pair mapping."""
+    """Monkeypatch _call_hermes_runtime_model_result (the real producer
+    surface _call_llm consumes) to return *responses* in call order. Records
+    prompts seen, for assertions that don't care about exact per-pair mapping."""
     queue = list(responses)
     prompts_seen: list[str] = []
 
-    def _fake(prompt: str, config: dict[str, Any]) -> str:
+    def _fake(prompt: str, config: dict[str, Any]) -> LlmCallResult:
         prompts_seen.append(prompt)
-        return queue.pop(0) if queue else ""
+        return _as_call_result(queue.pop(0) if queue else "")
 
-    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", _fake)
+    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model_result", _fake)
     return prompts_seen
 
 
@@ -124,10 +132,10 @@ def test_call_llm_non_numeric_confidence_returns_typed_failure(monkeypatch):
     """D1 counterfactual: {"confidence": "high"} used to raise ValueError out
     of the unguarded float() call. Must now return a typed failure dict."""
     monkeypatch.setattr(
-        llm_edge_proposer, "_call_hermes_runtime_model",
-        lambda prompt, config: json.dumps(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(text=json.dumps(
             {"relation_type": "refines", "confidence": "high", "reasoning": "x"}
-        ),
+        )),
     )
     result = _call_llm({"kind": "note", "body": "a"}, {"kind": "note", "body": "b"})
     assert result["outcome"] == "invalid_confidence"
@@ -139,8 +147,10 @@ def test_call_llm_null_confidence_returns_typed_failure(monkeypatch):
     """D1 counterfactual: {"confidence": null} used to raise TypeError out of
     the unguarded float(None) call. Must now return a typed failure dict."""
     monkeypatch.setattr(
-        llm_edge_proposer, "_call_hermes_runtime_model",
-        lambda prompt, config: '{"relation_type": "refines", "confidence": null, "reasoning": "x"}',
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(
+            text='{"relation_type": "refines", "confidence": null, "reasoning": "x"}'
+        ),
     )
     result = _call_llm({"kind": "note", "body": "a"}, {"kind": "note", "body": "b"})
     assert result["outcome"] == "invalid_confidence"
@@ -152,10 +162,10 @@ def test_call_llm_valid_confidence_still_succeeds(monkeypatch):
     """Regression guard: the D1 try/except must not swallow legitimate
     numeric (including numeric-string) confidence values."""
     monkeypatch.setattr(
-        llm_edge_proposer, "_call_hermes_runtime_model",
-        lambda prompt, config: json.dumps(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(text=json.dumps(
             {"relation_type": "refines", "confidence": "0.7", "reasoning": "ok"}
-        ),
+        )),
     )
     result = _call_llm({"kind": "note", "body": "a"}, {"kind": "note", "body": "b"})
     assert result["outcome"] == "ok"

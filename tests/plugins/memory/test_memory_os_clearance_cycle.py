@@ -11,7 +11,16 @@ from typing import Any
 
 import pytest
 
+from plugins.memory.memory_os.low_clue_recall import LlmCallResult
+
 pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
+
+def _wrap_llm_response(text: str) -> LlmCallResult:
+    """Wrap a plain response string as the transport now returns it."""
+    if not text:
+        return LlmCallResult(text="", failure_reason="llm_empty_content")
+    return LlmCallResult(text=text)
 
 
 class FakeRoots:
@@ -274,8 +283,8 @@ class TestAntiRubberStamp:
             "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
             return_value=mock_pairs,
         ), patch(
-            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-            return_value=mock_llm_response,
+            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text=mock_llm_response),
         ), patch(
             "plugins.memory.memory_os.clearance_cycle._check_llm_available",
             return_value=True,
@@ -383,8 +392,8 @@ class TestAntiRubberStamp:
             "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
             return_value=mock_pairs2,
         ), patch(
-            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-            return_value=mock_llm_response,
+            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text=mock_llm_response),
         ), patch(
             "plugins.memory.memory_os.clearance_cycle._check_llm_available",
             return_value=True,
@@ -927,8 +936,8 @@ def test_dead_judge_returning_empty_for_every_pair_fails_closed(tmp_path: Path) 
         "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
         return_value=mock_pairs,
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value="",
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",
         return_value=True,
@@ -965,8 +974,8 @@ def test_dead_judge_returning_empty_for_every_pair_fails_closed(tmp_path: Path) 
         "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
         return_value=two_pairs,
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        side_effect=lambda prompt, config: next(responses),
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        side_effect=lambda prompt, config: _wrap_llm_response(next(responses)),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",
         return_value=True,
@@ -982,6 +991,143 @@ def test_dead_judge_returning_empty_for_every_pair_fails_closed(tmp_path: Path) 
         )
     assert verdict == "clear"
     assert unknown_reason == ""
+
+
+def test_llm_call_stats_records_typed_failure_for_transport_exception(tmp_path: Path) -> None:
+    """W2 counterfactual: the per-pair judge's transport call must record a
+    typed, counted failure into ``llm_call_stats`` instead of a silent
+    ``except Exception: continue``.
+
+    Counterfactual: without the typed-stats plumbing in
+    ``_judge_against_permanents``'s per-pair loop, ``llm_call_stats`` stays
+    ``{}`` (calls/failures_by_reason never populated) even though the pair
+    was attempted and failed -- the bare except swallows the failure with no
+    telemetry, which is exactly the "Completion Is Not Output" shape.
+    """
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _judge_against_permanents
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+
+    perm_records_list = [
+        {"id": "perm_exc", "body": "The sky is blue.",
+         "frontmatter": {"id": "perm_exc", "provisional": False}},
+    ]
+    mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+    llm_call_stats: dict = {}
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        side_effect=RuntimeError("connection refused"),
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        verdict, _refs, _entities, _mode, unknown_reason = (
+            _judge_against_permanents(
+                store, "cand_exc_judge", "The sky is green.", {},
+                perm_records_list, max_pairs=5,
+                llm_call_stats=llm_call_stats,
+            )
+        )
+
+    # Pre-existing fail-closed behavior must be unchanged.
+    assert verdict == "unknown"
+    assert unknown_reason == "judge_unavailable"
+    # New: the failure is typed and counted, not silently swallowed.
+    assert llm_call_stats.get("calls") == 1, f"expected 1 attempted call, got {llm_call_stats}"
+    assert llm_call_stats.get("failures_by_reason") == {"llm_exception": 1}, (
+        f"expected a typed+counted llm_exception failure, got {llm_call_stats}"
+    )
+
+
+def test_run_clearance_cycle_report_exposes_llm_transport_diagnostics(tmp_path: Path) -> None:
+    """W2: run_clearance_cycle's report (the cycle-level ledger the helper
+    script persists) must expose typed LLM transport diagnostics -- ADD-only,
+    alongside the pre-existing judged/verdict_distribution keys."""
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.clearance_cycle import run_clearance_cycle
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate,
+        CrystallizedMemoryService,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+    service = CrystallizedMemoryService(store)
+
+    provisional = CrystallizedCandidate(
+        "cand_diag_a", "fact", "The project status is complete.", ["evt_diag"],
+    )
+    prov_decision = ApprovalDecision(
+        "cand_diag_a", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+        "2026-07-01T00:00:00Z", provisional=True,
+        expires_at="2026-08-01T00:00:00Z",
+    )
+    service.write_approved_record(provisional, prov_decision, file_name="prov_diag.md")
+
+    permanent = CrystallizedCandidate(
+        "cand_diag_b", "fact", "The project status is blocked.", ["evt_diag2"],
+    )
+    perm_decision = ApprovalDecision(
+        "cand_diag_b", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+        "2026-06-15T00:00:00Z", provisional=False,
+    )
+    service.write_approved_record(permanent, perm_decision, file_name="perm_diag.md")
+
+    mock_llm_response = (
+        '{"claim_a": {"subject": "status", "predicate": "is", '
+        '"object": "complete", "confidence": 0.9}, '
+        '"claim_b": {"subject": "status", "predicate": "is", '
+        '"object": "blocked", "confidence": 0.9}}'
+    )
+    # _pair_with_permanents needs embeddings/entity overlap to produce a real
+    # pair; mock it directly (same pattern as the direct-_judge_against_
+    # permanents tests above) so the LLM call path is actually reached.
+    mock_pairs = [{
+        "permanent": {"id": "cand_diag_b", "body": permanent.body,
+                      "frontmatter": {"id": "cand_diag_b", "provisional": False}},
+        "similarity": 0.9,
+    }]
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(
+            text=mock_llm_response, provider="openai-codex", model="gpt-5.6-luna",
+        ),
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        report = run_clearance_cycle(store, v2e_enabled=True)
+
+    assert report["judged"] >= 1
+    assert report["llm_calls"] >= 1
+    assert report["llm_provider"] == "openai-codex"
+    assert report["llm_model"] == "gpt-5.6-luna"
+    assert report["llm_transport"] == "hermes_call_llm"
+    assert isinstance(report["llm_failures_by_reason"], dict)
 
 
 def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(
@@ -1031,8 +1177,8 @@ def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(
         "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
         return_value=mock_pairs,
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value=malformed_reply,
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text=malformed_reply),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",
         return_value=True,
@@ -1093,8 +1239,8 @@ def test_non_dict_json_reply_does_not_crash_and_is_not_counted_as_evaluated(
         "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
         return_value=mock_pairs,
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value="[1, 2, 3]",
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="[1, 2, 3]"),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",
         return_value=True,

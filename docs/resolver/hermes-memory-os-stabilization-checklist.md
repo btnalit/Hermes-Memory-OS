@@ -5031,6 +5031,9 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `d3adc7c..HEAD`：LLM 调用面迁移 L1（DN）——五条治理 LLM lane 与 low_clue 判官改走 Hermes 自己的 `call_llm`（显式 provider、
+  `model=None`，`-900k` 等私有别名由 Hermes 自行归一，Memory-OS 不再做 provider 特例），失败闭集化、导入失败 fail-closed，旧 wire 只经
+  `llm_transport` knob 回滚；主会话修掉"导入作用域先恢复再调用"（真 Hermes 惰性导入必然 ImportError）与"knob 登记却无人读"两处。全量 3966 passed。**未部署**。
 - `e9a2c92..HEAD`：收敛冲刺 C0（DM）——lane 契约普查表 + 冻结门（23 条 lane 与全部认知循环步骤各有 reads / produces /
   consumers-或-disposition / monitor_codes，缺项或陈旧即 FAIL）、monitor 三条新 WARN 分级（输入源陈旧 / 追加账本超限 / LLM lane
   连续失败），按裁定删除 mailbox 与 symbolic_offloader；主会话补上监控码词表守卫与采集路径对生产者 accessor 的守卫。全量 3949 passed。**未部署**。
@@ -8298,3 +8301,50 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署**：随规划全部落地后统一部署。部署后预期：main 上 `lane_input_stale`（SFE，session_*.json 最新 2026-05）与 shadow / candidate_triage /
   v3_seed_edges / cognitive_loop reports 的 `append_only_ledger_oversized` 即刻报出（证明门是活的），shadow 一项在 G0 压缩生效后应消失；
   核对主机上已删模块的旧文件与 `system-modules/mailbox`、`symbolic_offloader` 旧产物是否残留。
+
+---
+
+## DN — LLM 调用面迁移 L1：治理 lane 改走 Hermes `call_llm`（2026-09-23）
+
+- **背景**：Memory-OS 自己手写 chat_completions / codex_responses / anthropic_messages 三套客户端，并把 Hermes 私有的上下文变体别名
+  （`-900k`）原样发往上游被 400；自 8 月中起 fact_judge / session_fact_extraction / llm_edge_proposer 恒空回复。owner 裁定
+  （2026-09-10）：记忆层不做 provider 特例。L0 探针（只读）核实 `agent.auxiliary_client.call_llm` 同步、自行剥别名、显式 provider
+  只在付费 / 配额 / 429 时跨 provider、`task=None` 不计量、可从 cron 式 python3 导入。
+- **改动**（Sonnet 子代理实现，主会话审查）：
+  - `low_clue_recall`：`LlmCallResult`（text / failure_reason / detail / provider / model / latency_ms / usage / transport），失败闭集
+    `llm_transport_unavailable` / `llm_http_4xx` / `llm_timeout` / `llm_empty_content` / `llm_exception` / `llm_missing_key`；
+    `_call_hermes_runtime_model_result` 默认走 `call_llm(None, provider=<显式解析>, model=None, …)`，从响应取实际 provider / model / usage；
+    旧字符串接口保留为薄包装。导入失败 fail-closed，绝不静默回落旧 wire。
+  - 旧 wire 只经 `llm_transport=legacy_wire` knob 可达（回滚开关），`transport` 字段始终可见。
+  - fact_judge / session_fact_extraction / llm_edge_proposer / llm_contradiction_lane / clearance_cycle 迁到结果 API；报告只增不改
+    （新增 `llm_transport*` / `llm_usage_*`），C0 的连续失败采集所读的 `failure_reason` / `llm_calls` / `llm_failures_by_reason` /
+    `outcome` 语义不变。transport 层的 `llm_missing_key`（缺凭证）与 fact_judge 既有同名值（JSON 缺键）含义不同，细分原因放在
+    `llm_transport_failure_reason`，不混入原词表。
+- **主会话整合审查修掉的三处**（每处都有在原交付稿上失败、修复后通过的反事实）：
+  - **调用发生在导入作用域之外**：`_import_hermes_call_llm` 在 `finally` 恢复 `sys.path` 并删除新导入的 `agent.*` 后才返回
+    `call_llm`，而生产 Hermes 的 `auxiliary_client.py` 在调用时大量函数级导入 `agent.*` / `hermes_cli.*` / `tools.*`（已只读核实）——
+    Hermes 根目录不在默认 `sys.path` 的 cron 进程里，每次真实调用都会 ImportError，被归为 `llm_transport_unavailable`。原有
+    `_resolve_hermes_default_runtime` 一直是在作用域内调用的，新代码没沿用。改为 context manager `_hermes_call_llm_scope`，调用在块内完成；
+    测试在磁盘上造一个假 Hermes 根，其 `call_llm` 调用时惰性导入 `agent.lazy_dep`。子代理的测试全部把假模块直接塞进
+    `sys.modules`，所以从未触及这条路径。全项目同类作用域只有这两处。
+  - **knob 登记却无人读**：各 lane 传入的是自己的 config，从不含 `llm_transport`，所以 `OVERRIDABLE_KNOBS` 里的回滚开关是死开关。
+    新增 `_resolve_llm_transport`：knob 覆盖（按运行 profile 的 `HERMES_HOME` 读覆盖存储）优先于 lane config，再次默认值；测试用真实
+    `register_override` 写覆盖，验证不带 `llm_transport` 的 lane config 被切到 `legacy_wire`。
+  - **monitor `_edge_fields` 丢键**：llm_edge_proposer 的六个传输诊断键过了 cognitive_loop 白名单，却在 monitor 采集层被丢弃；既有端到端
+    测试补上普查断言（包装器全部键 ⊆ monitor 采集结果）。
+- **独立审查（Sonnet）无阻塞，据其 SHOULD-FIX 再修两处**（各有破坏即失败的反事实）：作用域只在自己改过 `sys.path` 时才恢复并清理
+  （首次导入即成功说明宿主已加载 Hermes，那些模块归宿主，删掉会让宿主下次导入重新执行模块），清理范围与导入面对齐为
+  `agent` / `hermes_cli` / `tools`；`timeout_ms` / `max_tokens` 非数值时两种传输都返回 `llm_exception`（`invalid_call_config`），
+  "永不抛出"在接缝处成立，而非靠五个调用方各自兜底。fact_judge / SFE / clearance 的 provider / model 尚无 monitor 读者（失败本身
+  已由 C0 连续失败分级覆盖），随 monitor 接线 PR。
+- **测试**：+18 个测试函数（low_clue_recall +13，含主会话四条反事实；knob_lane_switch +3；clearance_cycle +2；monitor 普查断言并入
+  既有端到端测试）；7 个既有测试文件的 mock 目标改名；
+  全量 3966 passed / 13 skipped / 1 failed——失败的是 Windows 上的并发 flake
+  `test_completion_append_and_sidecar_are_idempotent_under_concurrency`（两线程并发完成同一信封，无 `fcntl` 进程锁时
+  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。单测对照采样：C0 末端 0/18、
+  L1 末端 2/18（Fisher p≈0.24，不显著），以 Linux CI 为准；若 CI 上也出现，再作为 L1 相关问题深挖。五门全绿。
+- **遗留**：每次调用都会重新导入 `agent.auxiliary_client`（作用域结束即清理，约 0.45s/次，cron lane 可接受）；`llm_route_unexpected`
+  （实际 provider ≠ 请求 provider）的 monitor 分级与 `response.model` 展示待 monitor 接线 PR。
+- **部署**：随规划全部落地后统一部署。部署后验收：fact_judge / SFE / llm_edge_proposer 的 `llm_transport=hermes_call_llm`、
+  `llm_transport_model` 为 Hermes 归一后的模型名（不带 `-900k`）、`llm_empty_content` 连续失败停止；若出问题，登记
+  `llm_transport=legacy_wire` 覆盖即可回滚，无需重新部署。

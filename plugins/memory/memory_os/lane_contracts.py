@@ -514,7 +514,7 @@ _COGNITIVE_LOOP_STEP_CONTRACTS: dict[str, LaneContract] = {
     ),
     "llm_edge_proposer": LaneContract(
         kind=COGNITIVE_LOOP_STEP,
-        reads=("roots.index_path", "low_clue_recall._call_hermes_runtime_model (LLM edge judging)"),
+        reads=("roots.index_path", "low_clue_recall._call_hermes_runtime_model_result (LLM edge judging via Hermes call_llm)"),
         produces=("active graph edges; born at 0.45 + 0.30 x confidence per CLAUDE.md",),
         consumers=("plugins.memory.memory_os.prefetch",),
         monitor_codes=("llm_lane_consecutive_failure_streak",),

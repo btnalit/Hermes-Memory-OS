@@ -80,6 +80,15 @@ def main() -> int:
             "budget_used": report.get("budget_used", 0),
             "verdict_distribution": report.get("verdict_distribution", {}),
             "initial_never_judged_queued": report.get("initial_never_judged_queued", 0),
+            # W2: typed LLM transport diagnostics -- must be listed explicitly
+            # here, this whitelist does not spread **report.
+            "llm_calls": report.get("llm_calls", 0),
+            "llm_failures_by_reason": report.get("llm_failures_by_reason", {}),
+            "llm_provider": report.get("llm_provider", ""),
+            "llm_model": report.get("llm_model", ""),
+            "llm_transport": report.get("llm_transport", ""),
+            "llm_usage_prompt_tokens": report.get("llm_usage_prompt_tokens", 0),
+            "llm_usage_completion_tokens": report.get("llm_usage_completion_tokens", 0),
         },
         "boundary": {
             "actual_send": False,

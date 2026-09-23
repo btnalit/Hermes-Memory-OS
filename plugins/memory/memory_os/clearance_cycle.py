@@ -95,6 +95,9 @@ def run_clearance_cycle(
         "error_records": [],
         "verdict_distribution": {"clear": 0, "conflict": 0, "unknown": 0},
     }
+    # W2: one accumulator shared across every _judge_against_permanents call
+    # this cycle, folded into the report below.
+    llm_call_stats: dict[str, Any] = {}
 
     budget: int = int(resolve_knob(
         "clearance_rejudge_budget_per_cycle", default=10, roots=roots,
@@ -233,6 +236,7 @@ def run_clearance_cycle(
                         max_pairs=int(resolve_knob(
                             "clearance_pair_top_k", default=5, roots=roots,
                         )),
+                        llm_call_stats=llm_call_stats,
                     )
                 )
 
@@ -280,6 +284,16 @@ def run_clearance_cycle(
     # real failure, not silently reported "ok".
     if batch and len(report["error_records"]) == len(batch):
         report["status"] = "error"
+
+    # W2: typed LLM transport diagnostics (ADD-only), folded from the shared
+    # per-cycle accumulator every _judge_against_permanents call updated.
+    report["llm_calls"] = llm_call_stats.get("calls", 0)
+    report["llm_failures_by_reason"] = llm_call_stats.get("failures_by_reason", {})
+    report["llm_provider"] = llm_call_stats.get("provider", "")
+    report["llm_model"] = llm_call_stats.get("model", "")
+    report["llm_transport"] = llm_call_stats.get("transport", "")
+    report["llm_usage_prompt_tokens"] = llm_call_stats.get("usage_prompt_tokens", 0)
+    report["llm_usage_completion_tokens"] = llm_call_stats.get("usage_completion_tokens", 0)
 
     return report
 
@@ -346,6 +360,7 @@ def _judge_against_permanents(
     permanent_records: list[dict[str, Any]],
     *,
     max_pairs: int = 5,
+    llm_call_stats: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[str], str, str]:
     """Judge a provisional record against the permanent corpus.
 
@@ -363,6 +378,14 @@ def _judge_against_permanents(
     Returns ``(verdict, conflict_refs, checked_entity_set, invalidation_mode, unknown_reason)``.
     C3: ``unknown_reason`` disambiguates infra gaps from judge decisions:
     ``"candidate_unindexed"`` | ``"judge_unavailable"`` | ``"judge_verdict"`` | ``""``.
+
+    ``llm_call_stats`` (W2, optional): when given a dict, this call
+    accumulates per-pair transport diagnostics into it in place (``calls``,
+    ``failures_by_reason``, ``provider``, ``model``, ``transport``,
+    ``usage_prompt_tokens``, ``usage_completion_tokens``) so a caller judging
+    a whole batch (``run_clearance_cycle``) can fold typed telemetry into its
+    cycle-level report. Passing ``None`` (the default) just skips telemetry
+    collection -- it is never required for correct judging.
     """
     import hashlib
     import json as _json
@@ -385,7 +408,7 @@ def _judge_against_permanents(
 
     # ── Prepare LLM config ──────────────────────────────────────────────
     from .low_clue_recall import (
-        _call_hermes_runtime_model,
+        _call_hermes_runtime_model_result,
         _extract_json_object,
         _resolve_hermes_default_runtime,
     )
@@ -428,10 +451,11 @@ def _judge_against_permanents(
     )
 
     # Backlog 14 (completion is not output): count pairs the judge actually
-    # judged. _call_hermes_runtime_model reports most failures as "" (27.5%
-    # measured on fact_judge), so with per-pair skips alone a dead judge falls
-    # through every pair and returns "clear" -- exactly the constant verdict
-    # this function's docstring forbids.
+    # judged. The legacy _call_hermes_runtime_model reported most failures as
+    # "" (27.5% measured on fact_judge); _call_hermes_runtime_model_result
+    # (W2) types them instead, but with per-pair skips alone a dead judge
+    # still falls through every pair and returns "clear" -- exactly the
+    # constant verdict this function's docstring forbids.
     pairs_evaluated = 0
 
     for pair in pairs:
@@ -443,13 +467,46 @@ def _judge_against_permanents(
         )
 
         try:
-            response = _call_hermes_runtime_model(prompt, llm_config)
+            call_result = _call_hermes_runtime_model_result(prompt, llm_config)
         except Exception:
-            # LLM call failed → this pair can't be judged, skip to next
+            # Defensive only: _call_hermes_runtime_model_result is designed
+            # to never raise (every failure is a typed LlmCallResult).
+            if llm_call_stats is not None:
+                llm_call_stats["calls"] = llm_call_stats.get("calls", 0) + 1
+                reasons = llm_call_stats.setdefault("failures_by_reason", {})
+                reasons["llm_exception"] = reasons.get("llm_exception", 0) + 1
             continue
 
-        if not response or not response.strip():
+        if llm_call_stats is not None:
+            llm_call_stats["calls"] = llm_call_stats.get("calls", 0) + 1
+            if call_result.failure_reason:
+                reasons = llm_call_stats.setdefault("failures_by_reason", {})
+                reasons[call_result.failure_reason] = reasons.get(call_result.failure_reason, 0) + 1
+            if call_result.provider:
+                llm_call_stats["provider"] = call_result.provider
+            if call_result.model:
+                llm_call_stats["model"] = call_result.model
+            llm_call_stats["transport"] = call_result.transport
+            if call_result.usage:
+                llm_call_stats["usage_prompt_tokens"] = (
+                    llm_call_stats.get("usage_prompt_tokens", 0)
+                    + int(call_result.usage.get("prompt_tokens") or 0)
+                )
+                llm_call_stats["usage_completion_tokens"] = (
+                    llm_call_stats.get("usage_completion_tokens", 0)
+                    + int(call_result.usage.get("completion_tokens") or 0)
+                )
+
+        if call_result.failure_reason:
+            # Transport-level failure (exception, timeout, HTTP 4xx, missing
+            # credential, transport unavailable) or empty content -- this
+            # pair cannot be judged. Replaces the old bare
+            # `except Exception: continue` / silent-empty `continue` (both
+            # uncounted) with a typed, counted skip (Section W /
+            # "Completion Is Not Output").
             continue
+
+        response = call_result.text
 
         # Parse LLM response (robust JSON extraction). Converge on the
         # project's canonical parser (_extract_json_object) for contract

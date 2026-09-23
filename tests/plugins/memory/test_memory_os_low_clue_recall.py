@@ -837,7 +837,13 @@ def test_run_hermes_default_judge_prechecks_runtime_and_classifies_empty_respons
             "api_mode": "chat_completions",
         },
     )
-    monkeypatch.setattr(low_clue_recall_module, "_call_hermes_runtime_model", lambda prompt, config: "")
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_call_hermes_runtime_model_result",
+        lambda prompt, config: low_clue_recall_module.LlmCallResult(
+            text="", failure_reason="llm_empty_content"
+        ),
+    )
 
     result = low_clue_recall_module._run_hermes_default_judge(
         {
@@ -1212,3 +1218,403 @@ def test_resolve_hermes_default_runtime_dedupes_stale_explicit_root_to_front(tmp
             del _sys.modules[name]
         _sys.modules.update(saved_modules)
         _sys.path[:] = saved_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W2 — _call_hermes_runtime_model_result: typed transport, no hand-rolled
+# wire clients on the default path (hermes_call_llm), legacy_wire kept only
+# for rollback. Every test injects a FAKE agent.auxiliary_client module via
+# sys.modules -- never a real network call. _resolve_hermes_default_runtime
+# (the provider-resolution step, unrelated to this migration) is monkeypatched
+# directly rather than re-deriving the hermes_cli import chain, since that
+# chain has its own dedicated tests above.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _install_fake_call_llm(monkeypatch, fn):
+    """Inject a fake ``agent.auxiliary_client.call_llm`` via sys.modules.
+
+    Never touches the network or the filesystem -- ``fn`` is a plain Python
+    callable standing in for Hermes' own client.
+    """
+    import sys
+    import types
+
+    fake_agent = types.ModuleType("agent")
+    fake_auxiliary_client = types.ModuleType("agent.auxiliary_client")
+    fake_auxiliary_client.call_llm = fn
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_auxiliary_client)
+
+
+def _ok_provider_resolution(monkeypatch, *, provider="openai-codex"):
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "provider": provider, "model": "", "credential_present": True},
+    )
+
+
+class _FakeUsage:
+    def __init__(self, prompt_tokens=12, completion_tokens=7):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+class _FakeChatCompletion:
+    def __init__(self, content, model="gpt-5.6-luna", usage=None):
+        self.choices = [_FakeChoice(content)] if content is not None else []
+        self.usage = usage if usage is not None else _FakeUsage()
+        self.model = model
+
+
+class _FakeAPIStatusError(Exception):
+    """Stand-in for openai.APIStatusError: carries a .status_code."""
+
+    def __init__(self, status_code, message="api error"):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _FakeAPITimeoutError(Exception):
+    """Stand-in for openai.APITimeoutError -- classified by type-name substring."""
+
+
+def test_call_hermes_runtime_model_result_success_records_provider_model_usage(monkeypatch):
+    """W2: success returns text plus provider/model/usage/transport --
+    not just a bare string (Completion Is Not Output)."""
+    _ok_provider_resolution(monkeypatch)
+    captured_kwargs: dict = {}
+
+    def _fake_call_llm(task, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeChatCompletion('{"ok": true}')
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "timeout_ms": 5000, "max_tokens": 256},
+    )
+
+    assert result.text == '{"ok": true}'
+    assert result.failure_reason == ""
+    assert result.provider == "openai-codex"
+    assert result.model == "gpt-5.6-luna"
+    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 7}
+    assert result.transport == "hermes_call_llm"
+    # Deliverable #7: provider is always explicit; model is None unless the
+    # caller's config names one explicitly.
+    assert captured_kwargs["provider"] == "openai-codex"
+    assert captured_kwargs["model"] is None
+
+
+def test_call_hermes_runtime_model_result_explicit_config_model_is_passed_through(monkeypatch):
+    """A caller-configured explicit model wins over the None default."""
+    _ok_provider_resolution(monkeypatch)
+    captured_kwargs: dict = {}
+
+    def _fake_call_llm(task, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeChatCompletion('{"ok": true}')
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "model": "custom-model-x"},
+    )
+    assert captured_kwargs["model"] == "custom-model-x"
+    assert captured_kwargs["provider"] == "openai-codex"
+
+
+def test_call_hermes_runtime_model_result_http_4xx_maps_to_llm_http_4xx(monkeypatch):
+    """openai.APIStatusError-shaped 400 must classify as llm_http_4xx, never
+    collapse to a bare empty string."""
+    _ok_provider_resolution(monkeypatch)
+
+    def _fake_call_llm(task, **kwargs):
+        raise _FakeAPIStatusError(400, "bad request")
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert result.text == ""
+    assert result.failure_reason == "llm_http_4xx"
+    assert result.transport == "hermes_call_llm"
+
+
+def test_call_hermes_runtime_model_result_auth_error_maps_to_llm_missing_key(monkeypatch):
+    """A 401/authentication-shaped error is a credential problem, distinct
+    from a generic 4xx."""
+    _ok_provider_resolution(monkeypatch)
+
+    def _fake_call_llm(task, **kwargs):
+        raise _FakeAPIStatusError(401, "invalid api key")
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert result.failure_reason == "llm_missing_key"
+
+
+def test_call_hermes_runtime_model_result_timeout_maps_to_llm_timeout(monkeypatch):
+    _ok_provider_resolution(monkeypatch)
+
+    def _fake_call_llm(task, **kwargs):
+        raise _FakeAPITimeoutError("timed out")
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert result.failure_reason == "llm_timeout"
+
+
+def test_call_hermes_runtime_model_result_empty_content_maps_to_llm_empty_content(monkeypatch):
+    _ok_provider_resolution(monkeypatch)
+
+    def _fake_call_llm(task, **kwargs):
+        return _FakeChatCompletion(None)  # no choices -> empty content
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert result.text == ""
+    assert result.failure_reason == "llm_empty_content"
+
+
+def _write_fake_hermes_root(tmp_path):
+    """A Hermes root on disk whose call_llm lazily imports agent.lazy_dep at
+    call time, the way the real auxiliary_client imports agent.* /
+    hermes_cli.* / tools.* inside the call."""
+    hermes_root = tmp_path / "hermes-agent"
+    (hermes_root / "agent").mkdir(parents=True)
+    (hermes_root / "agent" / "__init__.py").write_text("", encoding="utf-8")
+    (hermes_root / "agent" / "lazy_dep.py").write_text("REPLY = 'lazy-ok'\n", encoding="utf-8")
+    (hermes_root / "agent" / "auxiliary_client.py").write_text(
+        "from types import SimpleNamespace\n"
+        "def call_llm(task, **kwargs):\n"
+        "    from agent.lazy_dep import REPLY\n"
+        "    message = SimpleNamespace(content=REPLY)\n"
+        "    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None, model='m')\n",
+        encoding="utf-8",
+    )
+    return hermes_root
+
+
+def test_import_scope_leaves_modules_the_host_already_loaded_alone(monkeypatch, tmp_path):
+    """Counterfactual: when Hermes is already importable in this process (the
+    host has the agent package loaded but has not yet imported
+    auxiliary_client), the scope must not delete what the call imports --
+    those are the host's modules, and dropping one makes the host's next
+    import re-execute it. Only a scope that mutated sys.path cleans up."""
+    import importlib
+    import sys
+
+    hermes_root = _write_fake_hermes_root(tmp_path)
+    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.syspath_prepend(str(hermes_root))
+    host_agent = importlib.import_module("agent")
+    path_before = list(sys.path)
+    _ok_provider_resolution(monkeypatch)
+    try:
+        result = low_clue_recall_module._call_hermes_runtime_model_result(
+            "hello", {"provider": "hermes_default"},
+        )
+        assert result.text == "lazy-ok"
+        assert sys.modules["agent"] is host_agent
+        assert "agent.auxiliary_client" in sys.modules
+        assert "agent.lazy_dep" in sys.modules
+        assert sys.path == path_before
+    finally:
+        for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+            del sys.modules[name]
+
+
+def test_non_numeric_call_limits_return_a_typed_failure_instead_of_raising(monkeypatch):
+    """The seam's contract is "never raises": a corrupted timeout_ms /
+    max_tokens (e.g. from a bad override) must come back as a typed failure
+    on both transports, not escape as ValueError and rely on each caller's
+    own defensive except."""
+    _ok_provider_resolution(monkeypatch)
+
+    def _must_not_run(task, **kwargs):
+        raise AssertionError("call_llm must not run with an invalid call config")
+
+    _install_fake_call_llm(monkeypatch, _must_not_run)
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "timeout_ms": "fast"},
+    )
+    assert result.failure_reason == "llm_exception"
+    assert result.detail.startswith("invalid_call_config")
+
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {
+            "ok": True,
+            "provider": "openai-codex",
+            "model": "gpt-5.6-luna",
+            "runtime": {"api_mode": "chat_completions", "model": "gpt-5.6-luna"},
+        },
+    )
+    legacy = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "llm_transport": "legacy_wire", "max_tokens": "many"},
+    )
+    assert legacy.transport == "legacy_wire"
+    assert legacy.failure_reason == "llm_exception"
+
+
+def test_call_hermes_runtime_model_result_runs_call_llm_inside_the_import_scope(monkeypatch, tmp_path):
+    """Counterfactual for the import scope: Hermes' real call_llm does
+    function-level imports (agent.*, hermes_cli.*, tools.*) at CALL time --
+    verified in production's agent/auxiliary_client.py. A fake Hermes root on
+    disk reproduces that: its call_llm lazily imports agent.lazy_dep. If the
+    helper restored sys.path before calling (the first draft's shape), every
+    call would fail with an ImportError. The fake modules in the tests above
+    are injected straight into sys.modules, so they never exercise this.
+    """
+    import sys
+
+    hermes_root = _write_fake_hermes_root(tmp_path)
+    _ok_provider_resolution(monkeypatch)
+    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setenv("HERMES_AGENT_ROOT", str(hermes_root))
+    path_before = list(sys.path)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+
+    assert result.failure_reason == "", result.detail
+    assert result.text == "lazy-ok"
+    # The scope still cleans up after itself.
+    assert sys.path == path_before
+    assert "agent.auxiliary_client" not in sys.modules
+    assert "agent.lazy_dep" not in sys.modules
+
+
+def test_call_hermes_runtime_model_result_missing_auxiliary_client_fails_closed(monkeypatch):
+    """Deliverable: import failure of agent.auxiliary_client is FAIL-CLOSED
+    to llm_transport_unavailable -- never a silent fallback to the legacy
+    wire (owner ruling 2026-09-10: no provider-specific adaptation lives in
+    Memory-OS; legacy_wire is reachable only via the explicit knob)."""
+    import sys
+
+    _ok_provider_resolution(monkeypatch)
+    for name in ("agent", "agent.auxiliary_client"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delenv("HERMES_AGENT_ROOT", raising=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("legacy wire must not be called on hermes_call_llm import failure")
+
+    monkeypatch.setattr(low_clue_recall_module, "_call_openai_chat", _boom)
+    monkeypatch.setattr(low_clue_recall_module, "_call_openai_responses", _boom)
+    monkeypatch.setattr(low_clue_recall_module, "_call_anthropic_messages", _boom)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert result.failure_reason == "llm_transport_unavailable"
+    assert result.text == ""
+
+
+def test_call_hermes_runtime_model_result_legacy_wire_knob_uses_old_wire(monkeypatch):
+    """The llm_transport="legacy_wire" knob reroutes to the pre-W2 wire
+    clients and always sets transport="legacy_wire" so it is visible."""
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {
+            "ok": True,
+            "provider": "openai-codex",
+            "model": "gpt-5.6-luna",
+            "runtime": {"api_mode": "chat_completions", "model": "gpt-5.6-luna"},
+        },
+    )
+    monkeypatch.setattr(
+        low_clue_recall_module, "_call_openai_chat",
+        lambda runtime, **kw: "legacy wire text",
+    )
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "llm_transport": "legacy_wire"},
+    )
+    assert result.text == "legacy wire text"
+    assert result.transport == "legacy_wire"
+    assert result.failure_reason == ""
+
+
+def test_llm_transport_knob_override_reroutes_a_lane_config_that_names_no_transport(monkeypatch, tmp_path):
+    """Counterfactual for the rollback switch: every migrated lane passes its
+    own config (fact_judge, session_fact_extraction, ...), and none of them
+    carries an ``llm_transport`` key. A knob consulted only through that
+    config would be registered in OVERRIDABLE_KNOBS yet read by nothing --
+    the owner could "roll back" and nothing would change. The override is
+    written by the real knob producer into the profile's store.
+    """
+    from plugins.memory.memory_os.knob_overrides import register_override
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    register_override(
+        "llm_transport", "legacy_wire", prior="hermes_call_llm",
+        proposed_by="test", approved_via="resolver", expires_at="",
+        roots=MemoryOSRoots.from_profile(),
+    )
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {
+            "ok": True,
+            "provider": "openai-codex",
+            "model": "gpt-5.6-luna",
+            "runtime": {"api_mode": "chat_completions", "model": "gpt-5.6-luna"},
+        },
+    )
+    monkeypatch.setattr(low_clue_recall_module, "_call_openai_chat", lambda runtime, **kw: "legacy wire text")
+
+    def _must_not_run(task, **kwargs):
+        raise AssertionError("hermes call_llm must not run while the rollback override is active")
+
+    _install_fake_call_llm(monkeypatch, _must_not_run)
+
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "timeout_ms": 15000, "max_tokens": 1024},
+    )
+    assert result.transport == "legacy_wire"
+    assert result.text == "legacy wire text"
+
+
+def test_call_hermes_runtime_model_thin_wrapper_still_returns_text(monkeypatch):
+    """The kept compatibility wrapper must still return just the text."""
+    _ok_provider_resolution(monkeypatch)
+
+    def _fake_call_llm(task, **kwargs):
+        return _FakeChatCompletion("wrapped text")
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+
+    text = low_clue_recall_module._call_hermes_runtime_model(
+        "hello", {"provider": "hermes_default"},
+    )
+    assert text == "wrapped text"
