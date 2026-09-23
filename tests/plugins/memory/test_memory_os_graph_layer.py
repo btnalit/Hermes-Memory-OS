@@ -1594,6 +1594,33 @@ def test_t2_1_18_backfill_invalidation_failure_is_counted_as_failed(tmp_path, mo
     assert record["details"]["edge_id"] == co_edge_id
 
 
+def test_t2_1_21_backfill_scan_failure_reports_scan_failed_outcome(tmp_path):
+    """Review follow-up: the candidate scan failing left every count at 0,
+    byte-identical to an idle run. Real failure: the edge table is gone."""
+    import sqlite3 as _sqlite3
+
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        UPDATES_BACKFILL_OUTCOMES,
+        run_structural_updates_backfill,
+    )
+
+    store, index, _ = _one_qualifying_co_occurs_pair(tmp_path)
+    healthy = run_structural_updates_backfill(str(index.roots.index_path), index=index, max_per_run=0)
+    assert healthy["backfill_outcome"] == "completed"
+
+    conn = _sqlite3.connect(str(index.roots.index_path))
+    conn.execute("drop table memory_edges")
+    conn.commit()
+    conn.close()
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_outcome"] == "scan_failed"
+    assert result["backfill_outcome"] in UPDATES_BACKFILL_OUTCOMES
+    assert result["backfill_scanned_count"] == 0
+    assert result["backfill_error_records"][0]["operation"] == "updates_backfill_scan"
+
+
 def test_t2_1_19_run_structural_proposer_carries_every_backfill_key(tmp_path):
     """Census: run_structural_proposer's summary hand-listed the backfill
     keys and dropped backfill_pass_complete, so every reader saw False."""

@@ -5033,7 +5033,7 @@ sannai-community 仓库 README。）
 
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
   新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿；审查后回填失败单独计数并 WARN、
-  补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins。全量 4170 passed / 13 skipped；五门全绿。**未部署**。
+  补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins、每个回填出口带封闭集结果码。全量 4172 passed / 13 skipped；五门全绿。**未部署**。
 - `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
   真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
 - `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
@@ -8605,9 +8605,14 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   - **SHOULD-FIX 4**：`updates` 加入 `_GRAPH_SEMANTIC_RELATIONS`——它唯一能渲染的方向是"已被以下内容取代"的提示，按 co_occurs 排序会被
     更重的共现边挤到探索位，只在轮转碰巧选中的日子出现。反事实：12 条 0.9 共现 + 1 条 0.6 `updates`，连续 30 个 day_ordinal 都必须注入。
   - **SHOULD-FIX 5**：回填游标假设 `created_at` 随写入单调，已在 docstring 写明；时间戳落在游标之后的边不会被重访，删除状态文件即从头重扫。
+  - **复审（同一审查者）**：以上全部确认解决；另指出一处同类遗漏——第一条候选扫描查询本身失败时各计数都是 0，与空闲的一轮逐字节相同，
+    新 WARN 也不会响。那一刻没有任何东西被扫到，塞一个假计数进 `backfill_failed_count` 不对，改为每个出口都带封闭集结果码
+    `backfill_outcome ∈ UPDATES_BACKFILL_OUTCOMES = {completed, no_roots, scan_failed, resolve_failed}`，monitor 对
+    `scan_failed` / `resolve_failed` 同样出 WARN（`STRUCTURAL_BACKFILL_FAILED_OUTCOMES`，守卫测试钉住它是生产者闭集的子集）。
+    反事实：删掉 `memory_edges` 表制造真实的扫描失败；四条破坏验证（缺结果码 / monitor 不看结果码 / 包装器与白名单漏透传）均先败后过。
 - **测试**：graph_replay +8、graph_layer +8（含 2 条既有测试的夹具相似度下调——其 Dice 本就 ≥0.85，现在应得 `updates`）、monitor 普查 +1；
   全量 4068 passed / 13 skipped；五门全绿（write-surface 为回填游标状态文件登记 `structural_updates_backfill_cursor_state`）。
-  审查修复后（链尾，已含 DP–DS）：graph_layer +5、cognitive_loop +1、monitor +1（另强化 1 条普查）、graph_replay +1；全量 4170 passed / 13 skipped；五门全绿。
+  审查修复后（链尾，已含 DP–DS）：graph_layer +6、cognitive_loop +1、monitor +2（另强化 1 条普查）、graph_replay +1；全量 4172 passed / 13 skipped；五门全绿。
 - **遗留**：`superseded_by_newer` / 回填量 / 新颖度尚未分级（主会话随后接）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界
   SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时；回填失败时"找回那一对"目前靠 error_record 人工处理，没有自动补边。
 - **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮

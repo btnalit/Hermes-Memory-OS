@@ -988,6 +988,7 @@ class CognitiveLoopRunner:
             "backfill_skipped_count": result.get("backfill_skipped_count", 0),
             "backfill_failed_count": result.get("backfill_failed_count", 0),
             "backfill_pass_complete": result.get("backfill_pass_complete", False),
+            "backfill_outcome": result.get("backfill_outcome", ""),
             "backfill_duration_ms": result.get("backfill_duration_ms", 0),
             "backfill_error_records": result.get("backfill_error_records", []),
         }

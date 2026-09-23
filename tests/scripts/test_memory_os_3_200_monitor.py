@@ -9630,6 +9630,35 @@ def test_structural_updates_backfill_failure_is_graded_warn():
             assert warn_codes[0]["backfill_failed_count"] == failed_count
 
 
+def test_structural_updates_backfill_scan_failure_is_graded_warn():
+    """Review follow-up counterfactual: when the candidate scan itself fails,
+    every count stays 0 and the run looks idle. The outcome code is what
+    separates the two, so it must be graded too — and only its failure
+    values, never the benign ones."""
+    from plugins.memory.memory_os.structural_edge_proposer import UPDATES_BACKFILL_OUTCOMES
+
+    assert monitor.STRUCTURAL_BACKFILL_FAILED_OUTCOMES <= UPDATES_BACKFILL_OUTCOMES
+    for outcome in sorted(UPDATES_BACKFILL_OUTCOMES):
+        evidence = {
+            "status": "ok",
+            "edge_step_results": {
+                "structural_edge_proposer": {
+                    "backfill_scanned_count": 0,
+                    "backfill_failed_count": 0,
+                    "backfill_outcome": outcome,
+                },
+            },
+        }
+        graded = monitor.classify_snapshot({
+            "monitor_profile": "live",
+            "cognitive_loop_step_evidence": evidence,
+        })
+        warned = any(
+            item["code"] == "graph_structural_updates_backfill_failed" for item in graded["warn"]
+        )
+        assert warned is (outcome in {"scan_failed", "resolve_failed"}), outcome
+
+
 def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).

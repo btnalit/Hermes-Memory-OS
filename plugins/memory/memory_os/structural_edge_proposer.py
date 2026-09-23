@@ -305,6 +305,9 @@ def _order_records_unedged_first(
 # scanning/rewriting unboundedly in one run.
 UPDATES_BACKFILL_MAX_PER_RUN = 200
 UPDATES_BACKFILL_STATE_FILENAME = "structural_updates_backfill_state.json"
+# Closed set for `backfill_outcome` (Completion Is Not Output): the two
+# *_failed values are the runs the monitor grades even when no count moved.
+UPDATES_BACKFILL_OUTCOMES = frozenset({"completed", "no_roots", "scan_failed", "resolve_failed"})
 
 
 def _backfill_state_path(roots: Any):
@@ -383,6 +386,7 @@ def run_structural_updates_backfill(
             "backfill_skipped_count": 0,
             "backfill_failed_count": 0,
             "backfill_pass_complete": False,
+            "backfill_outcome": "no_roots",
             "backfill_duration_ms": 0,
             "backfill_error_records": [],
         }
@@ -409,6 +413,10 @@ def run_structural_updates_backfill(
             "backfill_skipped_count": 0,
             "backfill_failed_count": 0,
             "backfill_pass_complete": False,
+            # Nothing could be scanned, so there is no count to put in
+            # backfill_failed_count; without this code the run reads exactly
+            # like an idle one (scanned=0).
+            "backfill_outcome": "scan_failed",
             "backfill_duration_ms": int(
                 (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
             ),
@@ -466,6 +474,7 @@ def run_structural_updates_backfill(
                 "backfill_skipped_count": 0,
                 "backfill_failed_count": scanned,
                 "backfill_pass_complete": False,
+                "backfill_outcome": "resolve_failed",
                 "backfill_duration_ms": int(
                     (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
                 ),
@@ -573,6 +582,7 @@ def run_structural_updates_backfill(
         "backfill_skipped_count": skipped,
         "backfill_failed_count": failed,
         "backfill_pass_complete": scanned < max_per_run,
+        "backfill_outcome": "completed",
         "backfill_duration_ms": int(
             (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         ),
