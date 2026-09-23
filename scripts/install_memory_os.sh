@@ -732,8 +732,21 @@ run_installer() {
     echo "  Detected gateway Python: ${TARGET_PYTHON}"
   fi
 
+  # The echoed command line ends up in logs: never print a raw owner id.
+  local -a display_args=()
+  local mask_next=0
+  local arg
+  for arg in "${args[@]}"; do
+    if [[ "${mask_next}" == "1" ]]; then
+      display_args+=("${arg%%:*}:<masked>")
+      mask_next=0
+      continue
+    fi
+    display_args+=("${arg}")
+    [[ "${arg}" == "--owner-identity" ]] && mask_next=1
+  done
   echo "Running installer:"
-  printf '  %q' "${args[@]}"
+  printf '  %q' "${display_args[@]}"
   echo
   local installer_rc=0
   "${args[@]}" || installer_rc=$?

@@ -1736,6 +1736,29 @@ def test_explicit_owner_identity_survives_a_later_install_without_the_flag(tmp_p
     assert config["principal"]["owner_identities"] == {"wecom": [_OTHER_ID]}
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_install_sh_echoed_command_line_masks_owner_identity():
+    """Counterfactual: install_memory_os.sh echoes the full installer command
+    line (printf '%q' of its argv) before running it, and that line lands in
+    deploy logs. The --owner-identity value must be masked there like every
+    other printed surface. Executes the script's own lines, not a grep."""
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "install_memory_os.sh").read_text(encoding="utf-8")
+    start = script.index("  # The echoed command line ends up in logs")
+    end = script.index("  local installer_rc=0")
+    program = (
+        "f() {\n"
+        f"  local -a args=(python3 installer.py --owner-identity 'telegram:{_OWNER_ID}' --hindsight off)\n"
+        + script[start:end]
+        + "}\nf\n"
+    )
+
+    out = subprocess.run(["bash", "-c", program], capture_output=True, text=True, check=True).stdout
+
+    assert _OWNER_ID not in out
+    assert "telegram:" in out and "masked" in out
+    assert "--hindsight" in out  # the rest of the command line is still shown
+
+
 def test_install_plugin_auto_discovers_from_real_env_file(tmp_path):
     """Fixture built via the real .env parsing path (a real file on disk),
     not a hand-shortcut dict -- exercises the same code the real installer

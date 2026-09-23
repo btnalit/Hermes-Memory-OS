@@ -5033,7 +5033,7 @@ sannai-community 仓库 README。）
 
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
-  身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 __FULL__。**未部署**。
+  身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
 - `d3adc7c..HEAD`：LLM 调用面迁移 L1（DN）——五条治理 LLM lane 与 low_clue 判官改走 Hermes 自己的 `call_llm`（显式 provider、
   `model=None`，`-900k` 等私有别名由 Hermes 自行归一，Memory-OS 不再做 provider 特例），失败闭集化、导入失败 fail-closed，旧 wire 只经
   `llm_transport` knob 回滚；主会话修掉"导入作用域先恢复再调用"（真 Hermes 惰性导入必然 ImportError）与"knob 登记却无人读"两处。全量 3966 passed。**未部署**。
@@ -8382,9 +8382,19 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   - **一次性显式绑定在下次部署被丢弃**：安装器每次整段重写 `principal`，每次部署都跑安装器，于是为"无宿主信号的平台"设计的
     `--owner-identity` 补法会在下一次常规部署后悄悄退回兼容态。`discover_owner_identity_bindings` 现在保留上次安装的显式绑定（报告状态
     `explicit_retained`），新的显式值照常替换。
-- **测试**：principal +45 个函数（参数化实跑 51）、ingress +4、turn_author +10（含 cron 反事实）、plugin_install +8（含保留反事实）、
-  deploy +7；全量 __FULL__；五门全绿。
-- **遗留**：`telegram_group` / `gateway` 等复合前缀被扫成伪平台候选（只会落 `unconfigured` / `allow_all_open`，报告噪音）；`.env` /
+- **独立审查（Sonnet）无阻塞**：安全面逐路径追踪，找不到让非主人得到 owner、或把主人锁在门外的路径（平台名 / id 格式不匹配只会
+  退回兼容态 `unknown`）。据其 SHOULD-FIX 修一处：`install_memory_os.sh` 在执行前用 `printf '%q'` 回显完整 argv，
+  `--owner-identity` 的明文 id 会进部署日志——回显改用打码副本（`<platform>:<masked>`），测试截取脚本自身的这段交给 bash 执行，
+  放回明文即失败。其余三条记为遗留（见下）。
+- **测试**：principal +45 个函数（参数化实跑 51）、ingress +4、turn_author +10（含 cron 反事实）、plugin_install +9（含保留与回显打码反事实）、
+  deploy +7；全量（整链末端）4048 passed / 13 skipped / 2 failed——两条失败是已知的 Windows 并发 flake
+  （`test_completion_append_and_sidecar_are_idempotent_under_concurrency`、`test_execution_gate_runner_serializes_parallel_sidecar_updates`，
+  `PermissionError` 于并发 sidecar 替换；整链未触及 execution_gate / runner / jsonl_io / store，G0 与 C0 两轮全量均通过，单独重跑
+  三次中两次全过），CI（Linux）为准；五门全绿。
+- **遗留**：显式绑定没有专门的撤销参数——换号用新的 `--owner-identity` 替换；要彻底移除，删 `config.json` 的
+  `principal.owner_identities.<platform>` 与 `principal.binding_sources.<platform>`（审查 SHOULD-FIX，待定是否加 `--forget-owner-identity`）；
+  发现结果的 `conflict` / `unverifiable` 只在一次性安装报告里，持久配置无法区分"信号冲突"与"没配置"（随 monitor 接线 PR 决定是否持久化）；
+  平台名无白名单，`telegram_group` / `gateway` 等复合前缀被扫成伪平台候选（只会落 `unconfigured` / `allow_all_open`，报告噪音）；`.env` /
   `config.yaml` 读取失败在发现报告里与"无信号"同貌；规划 Phase 2 的 P1（owner_actions 核心层自检）/ P2（事件 schema 带 author / principal）/
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
