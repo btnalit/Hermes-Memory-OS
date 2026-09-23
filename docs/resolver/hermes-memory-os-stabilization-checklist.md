@@ -5032,7 +5032,7 @@ sannai-community 仓库 README。）
 ## 一句话
 
 - `7c72f63..HEAD`：C2（DQ）——memory projection 压缩接成 tick-daily 治理 lane（六处清单），顺带修掉压缩器两个从未触发过的缺陷
-  （读改写不持锁会吞并发追加、坏行被静默永久丢弃），monitor 谓词从"跑过一次就永远 PASS"改为按最近一次结果与新鲜度 × 增长分级。全量 __FULL__。**未部署**。
+  （读改写不持锁会吞并发追加、坏行被静默永久丢弃），monitor 谓词从"跑过一次就永远 PASS"改为按最近一次结果与新鲜度 × 增长分级。全量 4061 passed。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8430,8 +8430,12 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   `memory_projection_retention_compaction_stale`（WARN）；超时但账本没长 → 照常 PASS（空闲不等于坏）；从未压缩 → 原有 `_missing`。
 - **反事实**（破坏即失败、恢复即通过）：子代理 4 条（并发追加串行化、坏行拒绝、写失败不毁数据、nothing_to_drop）以修复前版本验证全部失败；
   主会话 2 条（退回"跑过就过"的旧谓词、去掉失败分支）。另有一条由真实压缩器产出 retention 状态再分级的测试，钉住字段名。
+- **全量抓到的第七处**：首轮全量唯一失败是 `test_loop_members_partition_every_registered_lane_exactly_once`——新 lane 没放进
+  `loop_health_view.LOOP_MEMBERS`（归入 memory 环，与 working_cleanup / state_source_mirror 同类）。根因是 CLAUDE.md 的"加 lane 改六处"
+  清单没列出按 lane 双向普查的三张表（`LANE_LAST_RUN_EVIDENCE`、`LOOP_MEMBERS`、C0 的 `LANE_CONTRACTS`），子代理照清单做、定向测试全绿，
+  只有全量能抓到；清单已补上这三张表。
 - **测试**：projection +4、monitor +4，`test_active_closure_profile_installs_eight_hermes_cron_jobs` 按其 docstring 约定的方式把 lane 数 22→23；
-  全量 __FULL__；五门全绿。
+  全量 4061 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
 - **部署**：随规划全部落地后统一部署；**必须重新生成注册表快照**并核对 `memory_projection_compaction` 出现在 `tick_daily` 成员里。部署前的历史
   压缩记录不带 status / reason 且 `completed_at` 很旧，首个 00:05 之前 monitor 会报 `compaction_stale`（WARN，不是 FAIL），首轮之后消失。
   Windows 开发机上 `locked_jsonl_file` 退化为进程内锁，跨进程排他只在 Linux 生产主机上成立（正是需要的地方）。

@@ -52,6 +52,7 @@ LOOP_MEMBERS: dict[str, tuple[str, ...]] = {
         "working_cleanup",
         "state_source_mirror",
         "exposure_rollup",
+        "memory_projection_compaction",
     ),
     "cognition": (
         "clearance_cycle",
