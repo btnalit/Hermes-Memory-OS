@@ -1,8 +1,12 @@
 import json
+import threading
 
+import plugins.memory.memory_os.memory_projection as memory_projection_module
 from plugins.memory.memory_os.execution_gate import read_execution_gate_records, start_execution_gate_envelope
 from plugins.memory.memory_os.host_capability_probe import probe_host_capabilities
+from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
 from plugins.memory.memory_os.memory_projection import (
+    MEMORY_PROJECTION_COMPACTION_REASONS,
     compact_memory_projection_records,
     collect_and_project_signals,
     memory_projection_records_path,
@@ -162,6 +166,8 @@ def test_memory_projection_compaction_archives_short_lived_status_records(tmp_pa
     retention = memory_projection_retention_status(store.roots)
 
     assert report["status"] == "ok"
+    assert report["reason"] == "compacted"
+    assert report["reason"] in MEMORY_PROJECTION_COMPACTION_REASONS
     assert report["input_count"] == 4
     assert report["output_count"] == 2
     assert report["archived_count"] == 2
@@ -170,6 +176,170 @@ def test_memory_projection_compaction_archives_short_lived_status_records(tmp_pa
     assert (store.roots.memory_os_root / report["archive_path"]).is_file()
     assert retention["latest_archived_count"] == 2
     assert retention["latest_boundary_true_archived_count"] == 0
+    assert retention["latest_reason"] == "compacted"
+    assert retention["latest_completed_at"]
+
+
+def test_memory_projection_compaction_reports_nothing_to_drop(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [_projection_record("only", "gateway_status", "hash-only", retention_class="short_lived_status")]
+    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
+
+    report = compact_memory_projection_records(store.roots, keep_latest_status_per_source=3, apply=True)
+    remaining = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert report["status"] == "ok"
+    assert report["reason"] == "nothing_to_drop"
+    assert report["reason"] in MEMORY_PROJECTION_COMPACTION_REASONS
+    assert report["archived_count"] == 0
+    assert len(remaining) == 1
+
+
+def test_memory_projection_compaction_refuses_malformed_lines(tmp_path):
+    """Counterfactual for the pre-fix behavior: the old ``_read_jsonl`` helper
+    silently swallowed unparsable lines (``except json.JSONDecodeError:
+    continue``), so a rewrite computed from what parsed would permanently
+    delete a malformed line -- exactly the content nobody can reconstruct.
+    Without the fix this test fails: the malformed line disappears from the
+    live file and the report claims ``status == "ok"``.
+    """
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    good_records = [
+        _projection_record("old", "gateway_status", "hash-old", retention_class="short_lived_status"),
+        _projection_record("new", "gateway_status", "hash-new", retention_class="short_lived_status"),
+    ]
+    original_text = "\n".join(json.dumps(record, sort_keys=True) for record in good_records) + "\n{not-json}\n"
+    path.write_text(original_text, encoding="utf-8")
+
+    report = compact_memory_projection_records(store.roots, keep_latest_status_per_source=1, apply=True)
+    retention = memory_projection_retention_status(store.roots)
+
+    assert report["status"] == "refused"
+    assert report["reason"] == "malformed_lines_present"
+    assert report["reason"] in MEMORY_PROJECTION_COMPACTION_REASONS
+    assert report["archived_count"] == 0
+    assert report["malformed_line_count"] == 1
+    assert path.read_text(encoding="utf-8") == original_text, "refusal must leave the live file byte-for-byte untouched"
+    assert retention["latest_reason"] == "malformed_lines_present"
+    assert retention["latest_status"] == "refused"
+
+
+def test_memory_projection_compaction_write_failure_is_recorded_and_non_destructive(tmp_path, monkeypatch):
+    """Counterfactual: if a write failure during the live-file rewrite were
+    left unhandled, the OSError would propagate uncaught out of the cron
+    helper with no durable evidence of why nothing happened. With the fix,
+    the archive write (which happens first) has already landed, the live
+    file is left untouched (never overwritten with a partial/kept set), and
+    the report records reason="write_failed" rather than raising or silently
+    reporting success.
+    """
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        _projection_record("old", "gateway_status", "hash-old", retention_class="short_lived_status"),
+        _projection_record("new", "gateway_status", "hash-new", retention_class="short_lived_status"),
+    ]
+    original_text = "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n"
+    path.write_text(original_text, encoding="utf-8")
+
+    original_write = memory_projection_module._write_jsonl_atomic
+    call_count = {"n": 0}
+
+    def flaky_write(target_path, recs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("simulated disk failure on live-file rewrite")
+        return original_write(target_path, recs)
+
+    monkeypatch.setattr(memory_projection_module, "_write_jsonl_atomic", flaky_write)
+
+    report = compact_memory_projection_records(store.roots, keep_latest_status_per_source=1, apply=True)
+
+    assert report["status"] == "error"
+    assert report["reason"] == "write_failed"
+    assert report["reason"] in MEMORY_PROJECTION_COMPACTION_REASONS
+    # The archive write (call #1) succeeded before the failing live-file
+    # rewrite (call #2) -- archive-before-drop held even on failure.
+    assert report["archive_path"]
+    assert (store.roots.memory_os_root / report["archive_path"]).is_file()
+    # The live file must still contain every original record: the failed
+    # rewrite must never have partially applied.
+    assert path.read_text(encoding="utf-8") == original_text
+
+
+def test_memory_projection_compaction_serializes_with_concurrent_append(tmp_path, monkeypatch):
+    """Counterfactual for the pre-fix race: compaction used to read then
+    rewrite the live file with no lock at all, while ``append_governed_jsonl``
+    / ``append_jsonl_locked`` (the automatic collection lane's write path)
+    always acquired the sidecar flock on the same file. A concurrent append
+    landing between compaction's read and its whole-file overwrite would be
+    silently lost -- the overwrite is computed from a snapshot that predates
+    the append. With the fix, compaction holds the same sidecar lock for its
+    whole read-modify-write, so the append can only land strictly before or
+    strictly after compaction, never during it.
+    """
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        _projection_record(f"old-{i}", "gateway_status", f"hash-old-{i}", retention_class="short_lived_status")
+        for i in range(3)
+    ]
+    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
+
+    entered_live_write = threading.Event()
+    proceed = threading.Event()
+    order: list[str] = []
+    original_write = memory_projection_module._write_jsonl_atomic
+
+    def delayed_write(target_path, recs):
+        if target_path == path:
+            entered_live_write.set()
+            assert proceed.wait(timeout=5), "test setup: append thread never signalled proceed"
+        return original_write(target_path, recs)
+
+    monkeypatch.setattr(memory_projection_module, "_write_jsonl_atomic", delayed_write)
+
+    def run_compaction() -> None:
+        compact_memory_projection_records(store.roots, keep_latest_status_per_source=1, apply=True)
+        order.append("compaction_done")
+
+    compaction_thread = threading.Thread(target=run_compaction)
+    compaction_thread.start()
+    assert entered_live_write.wait(timeout=5), "compaction never reached its live-file rewrite"
+
+    def run_append() -> None:
+        append_jsonl_locked(
+            path,
+            _projection_record("concurrent", "gateway_status", "hash-concurrent", retention_class="short_lived_status"),
+        )
+        order.append("append_done")
+
+    append_thread = threading.Thread(target=run_append)
+    append_thread.start()
+    # The append must block behind compaction's held lock -- give it ample
+    # time to (wrongly) race in before releasing compaction.
+    append_thread.join(timeout=0.5)
+    assert order == [], "append completed while compaction still held the lock -- the two are not mutually exclusive"
+
+    proceed.set()
+    compaction_thread.join(timeout=5)
+    append_thread.join(timeout=5)
+
+    assert order == ["compaction_done", "append_done"], "append must only complete after compaction released the lock"
+    remaining_ids = {
+        json.loads(line)["projection_id"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    }
+    assert "concurrent" in remaining_ids, "the concurrent append must survive compaction's rewrite, not be clobbered"
 
 
 def test_memory_projection_compaction_preserves_boundary_and_safety_records(tmp_path):

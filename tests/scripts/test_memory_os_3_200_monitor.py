@@ -6458,6 +6458,73 @@ def _healthy_cognitive_loop_step_evidence() -> dict:
     }
 
 
+def _retention_snapshot(**retention_overrides):
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection_retention"].update(retention_overrides)
+    return snapshot
+
+
+def test_retention_compaction_that_ran_once_long_ago_is_stale_not_visible():
+    """Counterfactual for C2: the old predicate passed on "compaction_count
+    > 0", so one manual run months ago kept it green forever while the
+    ledger grew without bound. A pre-C2 record carries no status/reason."""
+    snapshot = _retention_snapshot(
+        latest_completed_at="2026-05-01T00:00:00Z", latest_status="", latest_reason=""
+    )
+    snapshot["memory_projection"]["projection_count"] = 400
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_stale" for item in graded["warn"])
+    assert not any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
+def test_retention_compaction_old_but_ledger_unchanged_is_idle_not_stale():
+    snapshot = _retention_snapshot(latest_completed_at="2026-05-01T00:00:00Z")
+    snapshot["memory_projection"]["projection_count"] = snapshot["memory_projection_retention"]["latest_output_count"]
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
+def test_retention_compaction_refused_run_fails_in_production_whatever_its_age():
+    snapshot = _retention_snapshot(latest_status="refused", latest_reason="malformed_lines_present",
+                                   latest_malformed_line_count=2)
+
+    live = classify_snapshot(snapshot)
+    assert any(item["code"] == "memory_projection_retention_compaction_failed_in_production" for item in live["fail"])
+
+    snapshot["monitor_profile"] = "clean-host"
+    clean = classify_snapshot(snapshot)
+    unclassified = {item.get("warn_code") for item in clean["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "memory_projection_retention_compaction_failed" not in unclassified
+
+
+def test_retention_status_from_the_real_compactor_grades_visible(tmp_path):
+    """Field names come from the real producer: run the compactor, read its
+    status, grade it -- a renamed field would drop into the stale branch."""
+    from plugins.memory.memory_os.memory_projection import (
+        compact_memory_projection_records,
+        memory_projection_retention_status,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    compact_memory_projection_records(roots, apply=True)
+    retention = memory_projection_retention_status(roots)
+    assert retention["latest_status"] == "ok" and retention["latest_completed_at"]
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection_retention"] = retention
+    snapshot["memory_projection"]["projection_count"] = 5
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_compaction_visible" for item in graded["pass"])
+
+
 def _healthy_snapshot() -> dict:
     return {
         "hostname": "debian",
@@ -6854,6 +6921,10 @@ def _healthy_memory_projection_retention() -> dict:
         "compaction_count": 1,
         "latest_compaction_id": "mproj_compact_test",
         "latest_dry_run": False,
+        "latest_completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "latest_status": "ok",
+        "latest_reason": "compacted",
+        "latest_malformed_line_count": 0,
         "latest_input_count": 30,
         "latest_output_count": 14,
         "latest_archived_count": 16,

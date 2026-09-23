@@ -5031,6 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：C2（DQ）——memory projection 压缩接成 tick-daily 治理 lane（六处清单），顺带修掉压缩器两个从未触发过的缺陷
+  （读改写不持锁会吞并发追加、坏行被静默永久丢弃），monitor 谓词从"跑过一次就永远 PASS"改为按最近一次结果与新鲜度 × 增长分级。全量 __FULL__。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8401,3 +8403,35 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DQ — C2：memory projection 压缩接入生产 + 压缩器两处潜伏缺陷 + 新鲜度谓词（2026-09-23）
+
+- **背景**：`memory_projection.compact_memory_projection_records` 已实现却没有任何 lane 调用（唯一的生产调用是一次手动 CLI），
+  `memory_projections.jsonl` 无界增长；monitor 的判据是 `compaction_count > 0`——手动跑过一次就永远 PASS。
+- **新 lane**（Sonnet 子代理，按六处清单）：① `cron_registry` 新增 `memory_projection_compaction`（`local_helper`，`due_interval_minutes=1440`，
+  不进 `LEGACY_PER_LANE_CRON_JOBS`）；② 加入 `tick_daily.member_keys`（第 7 个成员，调度不变）；③ 不加 knob（唯一可调量是模块常量，
+  沿用 G0 shadow 压缩的先例）；④ installer 的 `SOURCE_*` 与 `_write_operational_helper_scripts` 条目 + 新 helper
+  `scripts/memory_os_memory_projection_compaction_lane.py`（异常结果退出码 1，让包裹它的 ExecutionGate 完成记录为 `error`）；⑤ 无新发射点
+  （复用已登记的 `memory_projection` 组件）；⑥ 部署时必须重新生成已安装的注册表快照，否则新 lane 在已接入主机上**静默缺席**。另在 C0 的
+  `lane_contracts` 登记、`LANE_LAST_RUN_EVIDENCE` 记为 `dedicated_artifact`（压缩报告本身就是每轮证据）。CLAUDE.md 的 Cron Profile 同步为
+  24 lane / active-closure 23 lane。
+- **子代理读全函数（W 规则 1）查出的两处潜伏缺陷**（函数从未在生产跑过，所以一直没暴露）：
+  - **读改写不持锁**：先读全文件、再整文件覆盖，而认知循环的采集写路径 `append_governed_jsonl` 在同一文件上持 sidecar flock——两者之间
+    落下的并发追加会被静默覆盖掉。现在整个函数在 `jsonl_io.locked_jsonl_file` 内执行（锁内读不加锁、原子写不加锁、写的另一个账本是另一把锁，
+    同一路径无重入，Linux flock 不会自锁死；追加方都在持锁后才打开数据文件，替换后不会写进旧 inode）。
+  - **坏行被静默永久丢弃**：本地 `_read_jsonl` 遇解析失败 `continue`，重写只保留能解析的行。改用 `read_jsonl_result`，有坏行即拒绝并原样保留
+    活文件。封闭结果集 `MEMORY_PROJECTION_COMPACTION_REASONS = {compacted, nothing_to_drop, malformed_lines_present, write_failed}`；
+    写失败时 `status=error` 并附截断的 `write_error`（主会话补），归档先于删除仍成立。
+- **monitor 谓词**（主会话在本 PR 内实现，C2 语义归属本 PR）：`memory_projection_retention_status()` 新增 `latest_completed_at` / `latest_status`
+  / `latest_reason` / `latest_malformed_line_count`。分级：最近一次 `refused` / `error` → `memory_projection_retention_compaction_failed`
+  （生产 FAIL，不论新旧）；超过两个日间隔（48h，取自 lane 的 `due_interval_minutes`，不取 cron 表达式）**且**此后账本有增长 →
+  `memory_projection_retention_compaction_stale`（WARN）；超时但账本没长 → 照常 PASS（空闲不等于坏）；从未压缩 → 原有 `_missing`。
+- **反事实**（破坏即失败、恢复即通过）：子代理 4 条（并发追加串行化、坏行拒绝、写失败不毁数据、nothing_to_drop）以修复前版本验证全部失败；
+  主会话 2 条（退回"跑过就过"的旧谓词、去掉失败分支）。另有一条由真实压缩器产出 retention 状态再分级的测试，钉住字段名。
+- **测试**：projection +4、monitor +4，`test_active_closure_profile_installs_eight_hermes_cron_jobs` 按其 docstring 约定的方式把 lane 数 22→23；
+  全量 __FULL__；五门全绿。
+- **部署**：随规划全部落地后统一部署；**必须重新生成注册表快照**并核对 `memory_projection_compaction` 出现在 `tick_daily` 成员里。部署前的历史
+  压缩记录不带 status / reason 且 `completed_at` 很旧，首个 00:05 之前 monitor 会报 `compaction_stale`（WARN，不是 FAIL），首轮之后消失。
+  Windows 开发机上 `locked_jsonl_file` 退化为进程内锁，跨进程排他只在 Linux 生产主机上成立（正是需要的地方）。

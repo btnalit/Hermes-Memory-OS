@@ -124,6 +124,11 @@ APPEND_ONLY_LEDGER_RELATIVE_PATHS: dict[str, str] = {
 LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD = 5
 LLM_LANE_FAILURE_STREAK_TAIL_LIMIT = 50
 
+# C2: the memory_projection_compaction lane is daily (due_interval_minutes
+# 1440 in cron_registry); two intervals of silence while the ledger kept
+# growing is a stopped lane, not an idle one.
+MEMORY_PROJECTION_COMPACTION_STALE_SECONDS = 2 * 1440 * 60
+
 INDEX_CATCHUP_MAX_AGE_SECONDS = 900
 INDEX_CATCHUP_MAX_EVENT_BACKLOG = 1
 FULL_MONITOR_LIVE_TARGET_SECONDS = 180
@@ -517,6 +522,16 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "classification": "expected_clean_host",
         "reason": "clean-host compatibility smoke is not equivalent to 53 production live closure until a post-deploy projection cycle runs",
         "production_behavior": "fail_if_production",
+    },
+    "memory_projection_retention_compaction_failed": {
+        "classification": "expected_clean_host",
+        "reason": "the latest memory-projection compaction refused a malformed ledger or failed to write; the live ledger was left untouched and keeps growing",
+        "production_behavior": "fail_if_production",
+    },
+    "memory_projection_retention_compaction_stale": {
+        "classification": "expected_clean_host",
+        "reason": "the daily memory-projection compaction lane has not completed for over two intervals while the ledger kept growing",
+        "production_behavior": "warn_if_production",
     },
     "memory_projection_retention_compaction_missing": {
         "classification": "expected_clean_host",
@@ -4557,13 +4572,47 @@ def _classify_left_brain_signal_weaving(
                 }
             )
         elif int(projection_retention.get("compaction_count") or 0) > 0:
-            passed.append(
-                {
-                    "code": "memory_projection_retention_compaction_visible",
-                    "compaction_count": projection_retention.get("compaction_count"),
-                    "latest_archived_count": projection_retention.get("latest_archived_count"),
-                }
+            # C2: "has compaction ever run" passed forever after one manual
+            # run. Judge the latest attempt instead: a refused/failed run is a
+            # failure whatever its age; a run older than two daily intervals
+            # is stale only if the ledger grew since (idle is not broken).
+            latest_status = str(projection_retention.get("latest_status") or "")
+            completed_at = _parse_utc_timestamp(str(projection_retention.get("latest_completed_at") or ""))
+            age_seconds = (
+                (datetime.now(timezone.utc) - completed_at).total_seconds() if completed_at is not None else None
             )
+            growth = int(projection.get("projection_count") or 0) - int(
+                projection_retention.get("latest_output_count") or 0
+            )
+            latest = {
+                "latest_status": latest_status,
+                "latest_reason": projection_retention.get("latest_reason", ""),
+                "latest_completed_at": projection_retention.get("latest_completed_at", ""),
+                "age_seconds": age_seconds,
+                "growth_since_latest": growth,
+            }
+            if latest_status in {"refused", "error"}:
+                warn.append({
+                    "code": "memory_projection_retention_compaction_failed",
+                    "value": {
+                        **latest,
+                        "latest_malformed_line_count": projection_retention.get("latest_malformed_line_count", 0),
+                    },
+                })
+            elif growth > 0 and (age_seconds is None or age_seconds > MEMORY_PROJECTION_COMPACTION_STALE_SECONDS):
+                warn.append({
+                    "code": "memory_projection_retention_compaction_stale",
+                    "value": {**latest, "threshold_seconds": MEMORY_PROJECTION_COMPACTION_STALE_SECONDS},
+                })
+            else:
+                passed.append(
+                    {
+                        "code": "memory_projection_retention_compaction_visible",
+                        "compaction_count": projection_retention.get("compaction_count"),
+                        "latest_archived_count": projection_retention.get("latest_archived_count"),
+                        **latest,
+                    }
+                )
         elif int(projection.get("projection_count") or 0) > 0:
             target = warn if clean_host else fail
             target.append({"code": "memory_projection_retention_compaction_missing"})

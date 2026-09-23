@@ -154,17 +154,17 @@ Fast probe PASS is not a substitute for full live monitor PASS.
 
 `cron_registry.py` holds **two tables**, and the distinction is load-bearing:
 
-- **Lanes** (`MEMORY_OS_CRON_LANES`, 23) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
+- **Lanes** (`MEMORY_OS_CRON_LANES`, 24) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
 - **Groups** (`MEMORY_OS_CRON_GROUPS`, 9) — the Hermes scheduling surface: what `hermes cron create` actually creates.
 
-Default profile `active-closure` installs **8 Hermes cron jobs** covering 22 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` was activated and `state_source_mirror` registered on 2026-08-06 — the exclusion intent record is `cron_registry.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS`):
+Default profile `active-closure` installs **8 Hermes cron jobs** covering 23 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` was activated and `state_source_mirror` registered on 2026-08-06, `memory_projection_compaction` on 2026-09-23 — the exclusion intent record is `cron_registry.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS`):
 
 | Group job | Schedule | Members |
 |---|---|---|
 | `memory-os-tick-derived` | `2,17,32,47 * * * *` | event_stats_refresh, index_sync, state_overlay_refresh, entity_index_refresh |
 | `memory-os-tick-governance` | `7,37 * * * *` | proposal_followups_opsgate (+ clearance_cycle when enabled) |
 | `memory-os-tick-evidence` | `12 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering, session_fact_extraction |
-| `memory-os-tick-daily` | `5 0 * * *` | exposure_rollup, v3_seed_evidence, v3_journal_sweep, working_cleanup, hindsight_advisory_digest |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure_rollup, v3_seed_evidence, v3_journal_sweep, working_cleanup, hindsight_advisory_digest, memory_projection_compaction |
 | `memory-os-owner-review-digest` | `0 9 * * *` | owner_review_digest |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory_sources_feedback_request |
 | `memory-os-expression-feedback-request` | `0 5 * * 0` | expression_feedback_request |

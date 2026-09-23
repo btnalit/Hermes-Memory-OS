@@ -280,6 +280,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
             "working_cleanup",
             "state_source_mirror",
             "hindsight_advisory_digest",
+            "memory_projection_compaction",
         ),
     ),
     # ── Single-member groups: unchanged Hermes jobs ───────────────────
@@ -513,6 +514,21 @@ MEMORY_OS_CRON_LANES: tuple[MemoryOSCronLaneDef, ...] = (
         group_key="tick_daily",
         due_interval_minutes=10080,
     ),
+    # Retention compaction of memory_projections.jsonl -- the compactor
+    # (memory_projection.compact_memory_projection_records) predates this
+    # lane and was previously called only by hand via the CLI, so the ledger
+    # grew without bound. Born directly inside tick_daily (never had a
+    # standalone pre-consolidation job), matching state_source_mirror's
+    # precedent: local_helper risk, no boundary report required, no legacy
+    # per-lane job entry.
+    MemoryOSCronLaneDef(
+        key="memory_projection_compaction",
+        raw_script="memory_os_memory_projection_compaction_lane.py",
+        lane_id="memory_projection_compaction",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=1440,
+    ),
     # Single-member groups
     MemoryOSCronLaneDef(
         key="owner_review_digest",
@@ -596,6 +612,7 @@ LANE_LAST_RUN_EVIDENCE: dict[str, str] = {
     "working_cleanup": "lane_last_run",
     "state_source_mirror": "lane_last_run",
     "hindsight_advisory_digest": "lane_last_run",
+    "memory_projection_compaction": "dedicated_artifact",  # system/memory_projection_compactions.jsonl (reason per run)
     "owner_review_digest_render": "lane_last_run",
     "memory_sources_feedback_request": "lane_last_run",
     "expression_feedback_request": "lane_last_run",
