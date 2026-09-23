@@ -9023,6 +9023,16 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   发生过调用的出口 `routed_provider = provider`。诊断助手新增 `llm_expected_provider` / `llm_routed_provider`；WARN 附带 lane 的
   路由 provider。反事实（cp 备份法 2/2）：改回按模型名比较，`-900k` 别名用例转 FAIL；让 `routed_provider` 回落成请求 provider，
   "Hermes 未报告即未知"用例转 FAIL。已知限度：若 Hermes 的 `route_info` 从不带 provider，则该信号恒为 unknown（计数可见，不会误报）。
+- **独立审查（Sonnet）1 BLOCKER + 1 SHOULD-FIX + 2 NIT，主会话全部处理**：
+  - **BLOCKER（出自上一条主会话更正本身）**：WARN 的 `routed_provider` 取的是 lane 的 `llm_provider` / `llm_transport_provider`——
+    每次调用都覆盖的"最后一次"值，与触发 WARN 的那次错配无关。恰是 L1 要抓的场景会自相矛盾：一轮里第 1 次调用遇 429 被 Hermes
+    转到别的 provider，后 4 次恢复正常——`llm_route_unexpected_count=1`，而 WARN 报的"路由 provider"却是预期的那个。改为与模型样本
+    同一模式：五条 lane 都只在错配分支里记 `llm_route_unexpected_expected_provider` / `_routed_provider`，经包装器、`_edge_fields`、
+    两个采集器透传，WARN 读这两个样本。反事实（cp 备份 2/2）：一轮两次调用、先错配后正常，lane 样本必须是回退 provider 而
+    `llm_provider` 是预期 provider；WARN 改回读 `llm_provider` 即 FAIL，lane 不在错配分支记样本即 FAIL。审查者也以临时复现核实了原缺陷。
+  - **SHOULD-FIX**：更正后仍有 8 处写着"应答模型 ≠ 主模型"——`lane_contracts.py` 三处注释、monitor 五处，其中一处是 clean-host
+    归类里会出现在 monitor 输出中的 `reason` 字符串；全部改为"路由 provider ≠ 请求 provider"。
+  - NIT：legacy_wire 的 `no_model_resolved` 早退补 `expected_provider`；legacy 传输的成功路径补断言（路由已知、恒等于请求）。
 - **部署**：随规划全部落地后统一部署；纯只读接线 + 新增字段/计数器，未改任何写路径/生产者判定逻辑（`llm_edge_proposer._call_llm` 的
   判定逻辑/提示词未动），无需重启 gateway；部署后验收：`llm_route_unexpected` 在两个 profile 上默认应为 0（按 provider 比较，别名不会触发；若非零即 Hermes 真实跨 provider 回退，核对是否为
   别名字面量差异还是真实跨 provider 回退）；`graph_layer_updates` INFO 在 main 上 7 天内追踪 `superseded_by_newer_count_7d` 是否

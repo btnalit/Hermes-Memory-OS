@@ -1093,6 +1093,8 @@ class CognitiveLoopRunner:
             "llm_route_unknown_count": result.get("llm_route_unknown_count", 0),
             "llm_route_unexpected_expected_model": result.get("llm_route_unexpected_expected_model", ""),
             "llm_route_unexpected_actual_model": result.get("llm_route_unexpected_actual_model", ""),
+            "llm_route_unexpected_expected_provider": result.get("llm_route_unexpected_expected_provider", ""),
+            "llm_route_unexpected_routed_provider": result.get("llm_route_unexpected_routed_provider", ""),
         }
 
     def _vector_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:

@@ -1675,6 +1675,10 @@ def test_call_hermes_runtime_model_result_legacy_wire_knob_uses_old_wire(monkeyp
     assert result.text == "legacy wire text"
     assert result.transport == "legacy_wire"
     assert result.failure_reason == ""
+    # The legacy wire sends straight to the resolved provider: the route is
+    # known and cannot differ from the request.
+    assert result.routed_provider == result.expected_provider == "openai-codex"
+    assert result.route_unexpected is False and result.route_unknown is False
 
 
 def test_llm_transport_knob_override_reroutes_a_lane_config_that_names_no_transport(monkeypatch, tmp_path):

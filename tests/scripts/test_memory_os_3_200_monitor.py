@@ -7351,18 +7351,26 @@ def test_fact_judge_backend_fallback_all_is_warn_if_production_on_clean_host():
 
 
 def test_fact_judge_llm_route_unexpected_warns_when_count_positive():
-    """W4-A / plan row L1: fact_judge's latest run answered with a model
-    other than the pinned one -- recorded (never dropping the answer) as a
-    WARN, with expected/actual model names surfaced (names only)."""
+    """W4-A / plan row L1: Hermes routed one of fact_judge's calls to a
+    provider other than the one requested -- recorded (never dropping the
+    answer) as a WARN. #96 review BLOCKER counterfactual: the lane's
+    llm_provider is last-wins and here ends on the expected provider (a
+    later normal call); the WARN must report the mismatch samples."""
     snapshot = _fact_judge_backend_snapshot("hermes_default", 3, 0)
-    snapshot["lane_backend_transport"]["lanes"]["fact_judge"]["llm_route_unexpected_count"] = 2
-    snapshot["lane_backend_transport"]["lanes"]["fact_judge"]["llm_route_unexpected_expected_model"] = "pinned-model"
-    snapshot["lane_backend_transport"]["lanes"]["fact_judge"]["llm_route_unexpected_actual_model"] = "answering-model"
+    lane = snapshot["lane_backend_transport"]["lanes"]["fact_judge"]
+    lane["llm_route_unexpected_count"] = 2
+    lane["llm_provider"] = "openai-codex"
+    lane["llm_route_unexpected_expected_provider"] = "openai-codex"
+    lane["llm_route_unexpected_routed_provider"] = "fallback-provider"
+    lane["llm_route_unexpected_expected_model"] = "pinned-model"
+    lane["llm_route_unexpected_actual_model"] = "answering-model"
     graded = classify_snapshot(snapshot)
     warn_entries = [item for item in graded["warn"] if item["code"] == "llm_route_unexpected"]
     assert len(warn_entries) == 1
     assert warn_entries[0]["lane"] == "fact_judge"
     assert warn_entries[0]["llm_route_unexpected_count"] == 2
+    assert warn_entries[0]["expected_provider"] == "openai-codex"
+    assert warn_entries[0]["routed_provider"] == "fallback-provider"
     assert warn_entries[0]["expected_model"] == "pinned-model"
     assert warn_entries[0]["actual_model"] == "answering-model"
 
