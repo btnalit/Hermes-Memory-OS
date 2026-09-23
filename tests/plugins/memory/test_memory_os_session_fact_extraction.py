@@ -548,6 +548,58 @@ def test_state_db_absent_is_explicit_not_silent(tmp_path):
     assert report["candidates_written"] == 0
 
 
+def test_state_db_that_will_not_open_is_not_reported_absent(tmp_path):
+    """A state.db that exists but cannot be opened is "input existed but
+    could not be read", never "no input": the closed reasons must keep the
+    two apart without re-running anything."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    state_db_path(store.roots).mkdir(parents=True)  # exists, cannot open as a database
+
+    report = run_session_fact_extraction_lane(store, execution_gate_envelope_id="")
+
+    assert report["skipped"] is True
+    assert report["skipped_reason"] == "state_db_open_failed"
+
+
+def _candidate_provenance(candidate):
+    return candidate.provenance if hasattr(candidate, "provenance") else candidate["provenance"]
+
+
+def test_candidates_from_a_sender_ambiguous_session_carry_the_marker(tmp_path, monkeypatch):
+    """An unsplit group session's single user_id may not be the sender of
+    every message in it; an owner reviewing one candidate must see that on
+    the candidate itself, not only in the lane's aggregate counter."""
+    envelope_id = "xgate_test_sfe_shared_marker"
+    store = _store_with_gate(tmp_path, envelope_id)
+    now = time.time()
+    db_path = _create_state_db(store.roots.hermes_home)
+    _configure_owner_identity(store.roots.hermes_home, "telegram", "owner_uid")
+    _write_session(
+        db_path, session_id="sess_group_unsplit", source="telegram", user_id="owner_uid",
+        started_at=now - 20, chat_type="group", session_key="agent:main:telegram:group:-100",
+        messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
+    )
+    _write_session(
+        db_path, session_id="sess_dm", source="telegram", user_id="owner_uid",
+        started_at=now - 10, chat_type="dm", session_key="agent:main:telegram:dm:owner_uid",
+        messages=[{"role": "user", "content": _LONG_MARKER_TEXT + " dm"}],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
+        _fake_llm_always_durable,
+    )
+
+    run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
+
+    markers = {
+        _candidate_provenance(c)["session_id"]: _candidate_provenance(c)["shared_session_unsplit"]
+        for c in read_candidate_queue(store)
+    }
+    assert markers == {"sess_group_unsplit": True, "sess_dm": False}
+
+
 def test_sessions_table_missing_is_distinct_reason(tmp_path):
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
     store = MemoryOSStore(roots)

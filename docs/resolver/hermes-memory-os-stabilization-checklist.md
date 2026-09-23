@@ -8431,7 +8431,11 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   `state.db` 的 `COUNT(*)` 与 `MAX(COALESCE(last_activity_at, started_at))`，统计全部会话（问的是 state.db 是否还在被写，不是此刻是否有可抽取
   内容）；输出键名不变，分级不改。C0 的路径守卫测试改为经 `roots.state_db_path` 落库。
 - **反事实**：子代理 5 条（SQL 截断、角色过滤、system 不记指纹、已处理指纹、epoch-vs-ISO 窗口），主会话 1 条（机器会话饥饿）。
-- **测试**：SFE 测试文件重写为 35 条（真实 SQLite 夹具）、monitor 新鲜度 2 条改写；全量 4062 passed / 13 skipped；五门全绿。
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修两处（各有破坏即失败的反事实）：state.db 存在但打不开时原本也报 `state_db_absent`，
+  与"没有文件"同貌——新增封闭原因 `state_db_open_failed`；未按发送者拆分的群会话的风险原本只体现在 lane 汇总计数里，现在每条候选与其 provenance
+  事件都带 `shared_session_unsplit`（未拆分群会话，或 `chat_type=webhook`——其 user_id 指的是投递的集成而非某个人），主人单看一条候选即可知道
+  它可能不是自己说的。审查另提示 peer / other_human 会话同样占扫描窗口（当前每 30 天约 59 个非机器会话，远低于 500），记为遗留。
+- **测试**：SFE 测试文件重写为 37 条（真实 SQLite 夹具）、monitor 新鲜度 2 条改写；全量 4062 passed / 13 skipped（审查修复前）；五门全绿。
 - **遗留**：`tool` / `webhook` / `v3-*` 等少量自定义来源与未配置的 wecom / weixin 落兼容态 `unknown`，可进入抽取（30 天内均为 0～1 个会话）；
   monitor part 1 的主体普查仍手写 `state.db` 路径、本地定义机器源常量（与本分支并行），part 2 统一改用 `roots.state_db_path` 与
   `principal.MACHINE_SESSION_SOURCES`；另有三处既有代码仍手写 `state.db` 路径（session_mirror / owner_actions / seam owner_channel_adapter），

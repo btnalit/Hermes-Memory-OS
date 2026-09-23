@@ -342,6 +342,8 @@ FINGERPRINT_SCHEMA_VERSION = "memory-os.session_fact_extraction_fingerprint.v1"
 # apart from the persisted artifact alone, without re-running anything.
 SKIPPED_REASON_CODES = frozenset({
     "state_db_absent",           # (a) no eligible input existed: state.db file does not exist
+    "state_db_open_failed",      # (b) input existed but could not be read: the file is there, the
+                                  # read-only open raised (corrupt, locked, permission) -- see error_records
     "sessions_table_missing",    # (a) no eligible input existed: state.db exists but lacks sessions/messages tables
     "no_sessions_in_window",     # (a) no eligible input existed: zero rows matched the started_at window
     "no_actionable_sessions",    # rows existed, but none are currently processable (already terminal
@@ -674,6 +676,7 @@ def _build_provenance_event(
     platform: str,
     fingerprint: str,
     principal: str,
+    shared_session_unsplit: bool,
 ) -> EventEnvelope:
     """Build the per-session provenance event that extracted facts cite.
 
@@ -711,6 +714,7 @@ def _build_provenance_event(
             "candidate_allowed": False,
             "body_policy": "bounded_summary",
             "principal": str(principal or ""),
+            "shared_session_unsplit": bool(shared_session_unsplit),
         },
         tags=["session", "fact_extraction", str(platform or "unknown")],
         sensitivity="private",
@@ -730,6 +734,7 @@ def _build_candidate(
     fact_text: str,
     source_event_ids: list[str],
     principal: str,
+    shared_session_unsplit: bool,
 ) -> CrystallizedCandidate:
     # Identity material deliberately EXCLUDES the session fingerprint: the
     # fingerprint carries last_activity_at, so an appended-to session gets a
@@ -762,6 +767,11 @@ def _build_candidate(
             "message_index": int(message_index),
             "role": str(role or "unknown"),
             "principal": str(principal or ""),
+            # True when this session's single user_id may not be the sender of
+            # every message in it (see _session_sender_ambiguous) -- carried
+            # per candidate so an owner reviewing one fact in isolation can see
+            # it, not only the lane's aggregate tripwire counter.
+            "shared_session_unsplit": bool(shared_session_unsplit),
         },
     )
 
@@ -858,6 +868,13 @@ def _group_session_lacks_user_suffix(row: sqlite3.Row) -> bool:
     if not user_id or not session_key:
         return True
     return user_id not in session_key
+
+
+def _session_sender_ambiguous(row: sqlite3.Row) -> bool:
+    """True when the session's ``user_id`` may not be the sender of every
+    message in it: an unsplit group chat, or a webhook session (its user id
+    names the integration that posted, not a person)."""
+    return _group_session_lacks_user_suffix(row) or str(row["chat_type"] or "") == "webhook"
 
 
 # ── Lane entry point ─────────────────────────────────────────────────────
@@ -994,7 +1011,7 @@ def run_session_fact_extraction_lane(
         )
         report = _base_report()
         report["skipped"] = True
-        report["skipped_reason"] = "state_db_absent"
+        report["skipped_reason"] = "state_db_open_failed"
         report["error_records"] = error_records
         _append_run_report(store, report, execution_gate_envelope_id=execution_gate_envelope_id, error_records=error_records)
         report["error_records"] = error_records
@@ -1312,6 +1329,7 @@ def run_session_fact_extraction_lane(
                             platform=platform,
                             fingerprint=fingerprint,
                             principal=principal,
+                            shared_session_unsplit=_session_sender_ambiguous(row),
                         )
                         store.append_event(provenance_event)
                         provenance_event_id = provenance_event.id
@@ -1324,6 +1342,7 @@ def run_session_fact_extraction_lane(
                         fact_text=fact_text,
                         source_event_ids=[provenance_event_id],
                         principal=principal,
+                        shared_session_unsplit=_session_sender_ambiguous(row),
                     )
                     append_candidate_queue(store, candidate)
                     candidates_written += 1
