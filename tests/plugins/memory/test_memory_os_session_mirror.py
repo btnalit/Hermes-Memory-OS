@@ -14,7 +14,7 @@ from plugins.memory.memory_os.execution_gate import execution_gate_records_path,
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.read_model_paths import owner_actions_path
 from plugins.memory.memory_os.roots import MemoryOSRoots
-from plugins.memory.memory_os.schema import EventEnvelope
+from plugins.memory.memory_os.schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.session_mirror import (
     SessionMirror,
@@ -38,15 +38,23 @@ def _recent_iso(days: int = 1) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
-def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
+def _create_state_db(path, *, session_id="session-db-1", platform="telegram", user_id=None):
+    # `user_id=None` (the default every pre-P3 caller in this file uses) omits
+    # the column entirely -- this is what exercises SessionMirror's "user_id
+    # column absent" compatibility path (session_columns lacks "user_id",
+    # _first_existing returns "") on the same fixture the rest of this file
+    # already relies on, rather than silently switching every caller onto a
+    # schema shape production hasn't always had.
     with sqlite3.connect(path) as conn:
+        user_id_column_sql = ", user_id text" if user_id is not None else ""
         conn.execute(
-            """
+            f"""
             create table sessions (
                 id text primary key,
                 source text,
                 created_at text,
                 updated_at text
+                {user_id_column_sql}
             )
             """
         )
@@ -66,10 +74,16 @@ def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
         # testing an inadmissible session rather than a normal one.
         _started = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         _ended = (datetime.now(timezone.utc) - timedelta(days=1, seconds=-60)).isoformat()
-        conn.execute(
-            "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
-            (session_id, platform, _started, _ended),
-        )
+        if user_id is not None:
+            conn.execute(
+                "insert into sessions(id, source, created_at, updated_at, user_id) values (?, ?, ?, ?, ?)",
+                (session_id, platform, _started, _ended, user_id),
+            )
+        else:
+            conn.execute(
+                "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
+                (session_id, platform, _started, _ended),
+            )
         conn.executemany(
             "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
             [
@@ -1557,4 +1571,169 @@ def test_recent_first_is_off_so_the_never_imported_tail_still_drains():
     digest head clean, so recency is an owner knob, not the default.
     """
     assert DEFAULT_CONFIG["session_mirror"]["recent_first"] is False
+
+
+# ── P3: principal filter (2026-09-23) ─────────────────────────────────────
+# No peer_agent/other_human/system session may ever land in the mirror,
+# regardless of what the platform/source allow/deny lists above would
+# otherwise admit -- resolve_principal is an identity gate, not a
+# configuration knob.
+
+
+def test_scan_excludes_mailbox_sessions_as_peer_agent_even_when_platform_allowlisted(tmp_path):
+    """mailbox -> peer_agent unconditionally (owner ruling, principal.py) --
+    an explicit platform allowlist for "mailbox" must not override it."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-mailbox-1", platform="mailbox")
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["mailbox"])
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_principal_count"] == 1
+    assert report["sessions_skipped_by_principal"] == {"peer_agent": 1}
+
+
+def test_scan_excludes_subagent_sessions_as_system_principal(tmp_path):
+    """"subagent" is a MACHINE_SESSION_SOURCES source but, unlike "cron", is
+    NOT in the default session_mirror source_denylist -- this exercises the
+    NEW principal-based exclusion specifically, not the pre-existing
+    source_denylist floor (which would already remove a "cron" session
+    before the principal filter ever ran)."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-subagent-1", platform="subagent")
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_principal_count"] == 1
+    assert report["sessions_skipped_by_principal"] == {"system": 1}
+
+
+def test_scan_excludes_other_human_session_when_owner_identity_configured(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(
+        tmp_path / "state.db", session_id="session-other-human-1", platform="telegram", user_id="999"
+    )
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 0
+    assert report["skipped_by_principal_count"] == 1
+    assert report["sessions_skipped_by_principal"] == {"other_human": 1}
+
+
+def test_scan_admits_owner_session_when_owner_identity_matches(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-owner-1", platform="telegram", user_id="111")
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 1
+    assert report["skipped_by_principal_count"] == 0
+    assert report["selected_sessions"][0]["principal"] == "owner"
+
+
+def test_owner_session_is_not_starved_by_a_peer_agent_session_ahead_of_it_in_queue(tmp_path):
+    """Counterfactual for the starvation shape CLAUDE.md documents for this
+    lane's own backlog (Backlog 13): without removing peer/system sessions
+    from the candidate list BEFORE the `[:limit]` slice, a peer session
+    sorted ahead of the owner's in the queue (state.db orders sessions by
+    id) would consume the only slot a bounded batch (max_sessions=1) has to
+    offer, and the owner's own session would never be selected."""
+    store = _store(tmp_path)
+    db_path = tmp_path / "state.db"
+    _create_state_db(db_path, session_id="a-mailbox-session", platform="mailbox", user_id="unused")
+    started = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    ended = (datetime.now(timezone.utc) - timedelta(days=1, seconds=-60)).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "insert into sessions(id, source, created_at, updated_at, user_id) values (?, ?, ?, ?, ?)",
+            ("b-owner-session", "telegram", started, ended, "111"),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+            [
+                ("b-owner-session", "user", "owner's real question", "2026-05-21T08:00:01+00:00"),
+                ("b-owner-session", "assistant", "owner's real answer", "2026-05-21T08:00:02+00:00"),
+            ],
+        )
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+
+    report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+
+    assert report["selected_session_count"] == 1
+    assert report["selected_sessions"][0]["source_group_id"] == "b-owner-session"
+    assert report["selected_sessions"][0]["principal"] == "owner"
+    assert report["sessions_skipped_by_principal"] == {"peer_agent": 1}
+
+
+def test_scan_marks_non_owner_session_seen_so_it_is_not_rescanned_forever(tmp_path):
+    """Counterfactual for CLAUDE.md's "Completion Is Not Output": a skipped
+    session must count as processed (durable), or the same peer/other_human
+    session is rediscovered, re-filtered, and re-reported on every future
+    scan forever -- exactly the head-of-queue-starvation shape this lane has
+    already been fixed for once (Backlog 13). PRINCIPAL_SYSTEM is
+    deliberately excluded from this durability contract (see the
+    implementation comment); peer_agent/other_human are not."""
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="session-mailbox-1", platform="mailbox")
+    mirror = SessionMirror(store)
+
+    first = mirror.scan(dry_run=False, max_sessions=1)
+    second = mirror.scan(dry_run=False, max_sessions=1)
+
+    assert first["written_event_ids_count"] == 0
+    assert first["sessions_skipped_by_principal"] == {"peer_agent": 1}
+    assert second["written_event_ids_count"] == 0
+    assert second["sessions_skipped_by_principal"] == {}
+    assert second["candidate_session_count"] == 0
+
+
+def test_other_human_skip_is_rejudged_after_the_owner_binding_changes(tmp_path):
+    """#95 review counterfactual: other_human means "an identity is
+    configured here and this author is not it". A durable skip judged under
+    one binding must not outlive it -- the owner adding a second account
+    later would otherwise lose that account's sessions forever. While the
+    binding is unchanged the mark still drains the backlog."""
+    store = _store(tmp_path)
+    _enable_test_host_apply(store)
+    _create_state_db(tmp_path / "state.db", session_id="session-second-account", platform="telegram", user_id="222")
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+    mirror = SessionMirror(store)
+
+    first = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+    unchanged = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+    save_config({"principal": {"owner_identities": {"telegram": ["111", "222"]}}}, tmp_path)
+    pending_after_rebind = mirror.status()["pending_session_count"]
+    rebound = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+
+    assert first["sessions_skipped_by_principal"] == {"other_human": 1}
+    assert first["written_event_ids_count"] == 0
+    assert unchanged["candidate_session_count"] == 0
+    assert unchanged["principal_skip_marks_reevaluated_count"] == 0
+    assert pending_after_rebind == 1
+    assert rebound["principal_skip_marks_reevaluated_count"] == 1
+    assert rebound["written_event_ids_count"] == 1
+    assert store.read_events()[0].principal == "owner"
+
+
+def test_mirrored_event_carries_principal_and_era_marker(tmp_path):
+    """P2 on this producer: every event session_mirror writes must carry a
+    first-class principal plus the era marker."""
+    store = _store(tmp_path)
+    _enable_test_host_apply(store)
+    _create_state_db(tmp_path / "state.db", session_id="session-owner-2", platform="telegram", user_id="111")
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+    mirror = SessionMirror(store)
+
+    mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+
+    events = store.read_events()
+    assert len(events) == 1
+    event = events[0]
+    assert event.principal == "owner"
+    assert event.principal_schema_version == EVENT_PRINCIPAL_SCHEMA_VERSION
+    assert event.safe_ref["principal"] == "owner"
     assert session_mirror_scan_options({})["recent_first"] is False

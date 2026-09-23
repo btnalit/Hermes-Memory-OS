@@ -13,8 +13,9 @@ from typing import Any
 from .approval import approval_from_cw019_state
 from .audit import append_audit
 from .ids import new_event_id
+from .principal import PRINCIPAL_OWNER
 from .roots import MemoryOSRoots
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 from .working import WorkingMemoryService
 
@@ -386,6 +387,12 @@ def _event_for_source(source: dict[str, Any], profile: str) -> EventEnvelope:
             "body_policy": "summary_only",
             "hashes": {"source_sha256": source.get("sha256", "")},
             "promotion_state": "raw",
+            # P2: this imports the owner's OWN pre-Memory-OS files (SOUL.md,
+            # MEMORY.md, diary.md, ...) via an operator-invoked one-time
+            # migration -- the content is first-person owner history, not a
+            # machine or a third party.
+            "principal": PRINCIPAL_OWNER,
+            "principal_schema_version": EVENT_PRINCIPAL_SCHEMA_VERSION,
         }
     )
 

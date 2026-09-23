@@ -445,6 +445,21 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "a platform with more than one human user has no configured owner identity, so every non-owner turn there still drives the owner's foreground task and memory (compatibility mode); fix with deploy --owner-identity <platform>:<id> or by setting <PLATFORM>_HOME_CHANNEL in Hermes and redeploying",
         "production_behavior": "fail_if_production",
     },
+    # P2: unlike the neighbour above, this is never an environment
+    # difference -- a MARKED event (principal_schema_version set) with no
+    # principal means a producer under plugins/ forgot to call
+    # principal.resolve_principal (or hardcoded an empty/invalid value), on
+    # any host, clean or production. Registered (not left unclassified) so a
+    # clean-host run reports it as WARN rather than the coarser
+    # clean_host_warn_unclassified FAIL; fail_if_production still escalates
+    # it to FAIL where it matters, matching this table's own convention for
+    # a real defect that clean-host smoke testing should also be able to
+    # surface without failing the whole install outright.
+    "event_marked_without_principal": {
+        "classification": "producer_schema_defect",
+        "reason": "an event carrying the new principal_schema_version era marker has no principal in the closed set -- a producer bug (every producer writing the new schema version must call principal.resolve_principal), not an environment difference",
+        "production_behavior": "fail_if_production",
+    },
     # DU: monitor part 2. typesafe_jev is opt-in and default-off (J1 owner
     # ruling 2026-09-23) -- a clean host with no TYPESAFE_API_KEY configured
     # and no fact_judge_judge_backend override cannot select it, so this can
@@ -1546,6 +1561,71 @@ def _classify_principal_binding(
             info.append({"code": "principal_platform_unbound", "value": summary})
 
 
+# ── P2 (docs/plans/2026-09-23-memory-os-next-phase-plan.md Phase 2) ────────
+def _classify_event_principal_coverage(
+    raw: Any, warn: list[dict[str, Any]], info: list[dict[str, Any]]
+) -> None:
+    """P2: every MARKED event (principal_schema_version set) must carry a
+    principal in the closed set. An empty gated set (no marked events yet --
+    e.g. right after deploy, before any producer has run) reports
+    healthy_no_sample, never a bare PASS; legacy (unmarked) rows are counted
+    as debt and always INFO, never gated -- they can never satisfy this
+    retroactively (see CLAUDE.md's era-boundary paragraph). A key absent from
+    the snapshot entirely (older collector, or this section simply never
+    ran) is a silent no-op, matching _classify_principal_binding's own
+    precedent immediately above.
+    """
+    coverage = raw if isinstance(raw, dict) else {}
+    if not coverage:
+        return
+    if coverage.get("status") != "ok":
+        info.append({
+            "code": "event_principal_coverage_no_sample",
+            "value": {
+                "status": coverage.get("status"),
+                "collection_error": coverage.get("collection_error", ""),
+            },
+        })
+        return
+    marked_count = int(coverage.get("marked_event_count") or 0)
+    without_principal = int(coverage.get("marked_without_principal_count") or 0)
+    legacy_count = int(coverage.get("legacy_unattributed_event_count") or 0)
+    info.append({
+        "code": "event_principal_legacy_unattributed",
+        "value": {
+            "legacy_unattributed_event_count": legacy_count,
+            "recent_window": coverage.get("recent_window"),
+            "scanned_count": coverage.get("scanned_count"),
+        },
+    })
+    if marked_count <= 0:
+        info.append({
+            "code": "event_principal_coverage_healthy_no_sample",
+            "value": {"marked_event_count": marked_count},
+        })
+        return
+    if without_principal > 0:
+        warn.append({
+            "code": "event_marked_without_principal",
+            "value": {
+                "marked_event_count": marked_count,
+                "marked_without_principal_count": without_principal,
+                "sources_without_principal": coverage.get("sources_without_principal", {}),
+            },
+        })
+    else:
+        info.append({
+            "code": "event_principal_coverage_ok",
+            "value": {
+                "marked_event_count": marked_count,
+                "marked_with_principal_count": coverage.get("marked_with_principal_count"),
+                # A window of only system events has not sampled owner turns;
+                # this is what separates that from "owner turns all correct".
+                "marked_by_principal": coverage.get("marked_by_principal", {}),
+            },
+        })
+
+
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
@@ -1723,6 +1803,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             })
 
     _classify_principal_binding(snapshot.get("principal_binding"), warn, info)
+    _classify_event_principal_coverage(snapshot.get("event_principal_coverage"), warn, info)
 
     # G0 novelty: deliberately ungraded -- a lexical-disjointness proxy
     # rewards irrelevant neighbours if optimised alone; it is a baseline for
@@ -6984,6 +7065,73 @@ def principal_binding_summary(window_days=30):
         entry["binding_source"] = str(platform_status.get("binding_source") or "")
     return {"schema_version": schema, "status": "ok", "window_days": window_days, "platforms": platforms}
 
+# ── P2 (docs/plans/2026-09-23-memory-os-next-phase-plan.md Phase 2) ────────
+def event_principal_coverage_summary(recent_window=500):
+    # P2: every event a fixed producer writes carries EVENT_PRINCIPAL_SCHEMA_
+    # VERSION (the era marker) plus a principal from the closed set. A marked
+    # event with no principal is a producer bug, on any host -- never an
+    # environment difference -- so classify_snapshot grades it WARN/FAIL
+    # (see event_marked_without_principal in CLEAN_HOST_WARN_CLASSIFICATIONS).
+    # Legacy (unmarked) rows can never satisfy this retroactively (the turn
+    # happened; nobody captured who it was) -- they are counted as debt, only
+    # ever INFO. Counts only, no ids. Bounded to the last `recent_window`
+    # events (same count-based bounding as the neighbouring
+    # session_activity_stats(), not a per-row timestamp parse).
+    schema = "memory-os.event_principal_coverage.v0"
+    try:
+        from plugins.memory.memory_os.principal import PRINCIPALS
+        from plugins.memory.memory_os.schema import EVENT_PRINCIPAL_SCHEMA_VERSION
+    except Exception as exc:
+        return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__}
+    root = Path(_hermes_home) / "memory-os" / "events"
+    records = []
+    if root.exists():
+        try:
+            for path in sorted(root.glob("*/*.jsonl")):
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+        except OSError as exc:
+            return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__}
+    recent_records = records[-int(recent_window):]
+    marked_count = 0
+    marked_with_principal_count = 0
+    marked_without_principal_count = 0
+    legacy_unattributed_event_count = 0
+    sources_without_principal = Counter()
+    # Machine producers (system) can fill the whole window; the breakdown is
+    # what says whether owner turns were sampled at all this tick.
+    marked_by_principal = Counter()
+    for record in recent_records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("principal_schema_version") or "") != EVENT_PRINCIPAL_SCHEMA_VERSION:
+            legacy_unattributed_event_count += 1
+            continue
+        marked_count += 1
+        if str(record.get("principal") or "") in PRINCIPALS:
+            marked_with_principal_count += 1
+            marked_by_principal[str(record.get("principal"))] += 1
+        else:
+            marked_without_principal_count += 1
+            sources_without_principal[str(record.get("source") or "unknown")] += 1
+    return {
+        "schema_version": schema,
+        "status": "ok",
+        "recent_window": int(recent_window),
+        "scanned_count": len(recent_records),
+        "marked_event_count": marked_count,
+        "marked_with_principal_count": marked_with_principal_count,
+        "marked_without_principal_count": marked_without_principal_count,
+        "legacy_unattributed_event_count": legacy_unattributed_event_count,
+        "sources_without_principal": dict(sources_without_principal),
+        "marked_by_principal": dict(marked_by_principal),
+    }
+
 def graph_layer_novelty_summary(max_records=2000):
     # G0: what injected graph neighbours add beyond the anchors + query, from
     # the bounded tail of system/graph_layer_shadow.jsonl. Read-only.
@@ -10257,6 +10405,7 @@ print(json.dumps({
   "append_only_ledger_size": append_only_ledger_size_summary(),
   "llm_lane_failure_streak": llm_lane_failure_streak_summary(),
   "principal_binding": principal_binding_summary(),
+  "event_principal_coverage": event_principal_coverage_summary(),
   "graph_layer_novelty": graph_layer_novelty_summary(),
   "lane_backend_transport": lane_backend_transport_summary(),
   "disk_df": df,

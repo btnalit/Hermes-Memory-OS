@@ -21,12 +21,22 @@ from .execution_gate import (
 )
 from .ids import new_event_id
 from .jsonl_io import build_error_record, read_jsonl, write_json_atomic
+from .principal import (
+    FOREGROUND_CONTROL_PRINCIPALS,
+    MACHINE_SESSION_SOURCES,
+    PRINCIPAL_OTHER_HUMAN,
+    PRINCIPAL_SYSTEM,
+    PRINCIPAL_UNKNOWN,
+    owner_binding_fingerprint,
+    resolve_principal,
+)
 from .read_model_paths import (
     owner_actions_path,
     session_mirror_apply_records_path as _session_mirror_apply_records_path,
 )
 from .roots import MemoryOSRoots
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .roots import state_db_path as _hermes_state_db_path
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 from .timeutil import parse_utc
 
@@ -274,6 +284,7 @@ def _auto_apply_scan_counters(report: dict[str, Any]) -> dict[str, int]:
         # was simply empty.
         "eligible_session_count": int(report.get("eligible_session_count") or 0),
         "skipped_by_source_count": int(report.get("skipped_by_source_count") or 0),
+        "skipped_by_principal_count": int(report.get("skipped_by_principal_count") or 0),
         "skipped_by_completion_count": int(report.get("skipped_by_completion_count") or 0),
         "skipped_by_message_count": int(report.get("skipped_by_message_count") or 0),
         "skipped_by_age_count": int(report.get("skipped_by_age_count") or 0),
@@ -459,7 +470,11 @@ class SessionMirror:
 
     @property
     def state_db_path(self) -> Path:
-        return self.store.roots.hermes_home / "state.db"
+        # P3: was a rebuilt `hermes_home / "state.db"` literal -- exactly the
+        # "path literal repeated at each call site" pattern CLAUDE.md warns
+        # about (roots.state_db_path is the shared accessor, added for
+        # session_fact_extraction and documented there as unmigrated here).
+        return _hermes_state_db_path(self.store.roots)
 
     @property
     def sessions_root(self) -> Path:
@@ -474,10 +489,16 @@ class SessionMirror:
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         covered = self._provider_captured_session_ids()
+        # Same judgement as scan(): a stale other_human skip counts as pending.
+        config = load_config(self.store.roots.hermes_home)
+        seen = {
+            key for key, mark in state["seen_sessions"].items()
+            if not _binding_stale_skip_mark(mark, config)
+        }
         pending = [
             session
             for session in sessions
-            if session["session_id"] not in covered and session["dedup_key"] not in state["seen_sessions"]
+            if session["session_id"] not in covered and session["dedup_key"] not in seen
         ]
         return {
             "schema_version": "memory-os.session_mirror_status.v0",
@@ -570,9 +591,11 @@ class SessionMirror:
     ) -> dict[str, Any]:
         if not dry_run:
             self.store.initialize()
-        floor = session_mirror_scan_options(
-            load_config(self.store.roots.hermes_home).get("session_mirror", {})
-        )
+        # P3: loaded once here and reused for principal.resolve_principal
+        # below -- was previously only ever unpacked into `floor` and
+        # discarded.
+        memory_os_config = load_config(self.store.roots.hermes_home)
+        floor = session_mirror_scan_options(memory_os_config.get("session_mirror", {}))
         if isinstance(source_denylist, _FloorDefault):
             source_denylist = floor["source_denylist"]
         if isinstance(completed_only, _FloorDefault):
@@ -596,6 +619,15 @@ class SessionMirror:
             # config normalizer's `0 -> None` conversion.
             max_age_days = None
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
+        # An other_human skip judged under an owner binding that has since
+        # changed is dropped here, so the session is judged again below (and
+        # re-marked or mirrored) instead of staying excluded forever.
+        stale_skip_keys = [
+            key for key, mark in state["seen_sessions"].items()
+            if _binding_stale_skip_mark(mark, memory_os_config)
+        ]
+        for key in stale_skip_keys:
+            del state["seen_sessions"][key]
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         event_records = _read_event_records(self.store)
@@ -635,8 +667,54 @@ class SessionMirror:
             session for session in platform_filtered
             if str(session.get("platform") or "").lower().replace("-", "_") not in sources
         ]
+        # P3: route every remaining candidate through principal.resolve_principal
+        # before it can ever reach the mirror -- an identity gate, not a
+        # configuration knob, so no platform/source allow-list above can admit
+        # a peer_agent/other_human/system session. This runs before the
+        # `[:limit]` slice further down, so a page full of non-owner sessions
+        # can never crowd a genuine owner session out of a bounded batch (the
+        # same head-of-queue starvation shape CLAUDE.md documents for this
+        # lane's own backlog).
+        principal_filtered: list[dict[str, Any]] = []
+        principal_skip_marks: list[dict[str, Any]] = []
+        sessions_skipped_by_principal: dict[str, int] = {}
+        for session in source_filtered:
+            session_source = str(session.get("platform") or "").strip().lower()
+            decision = resolve_principal(
+                source=session_source,
+                author_id=session.get("user_id"),
+                # Not available at the session level (state.db carries no
+                # per-message author_class) -- mirrors session_fact_
+                # extraction's identical choice; see its module docstring.
+                author_class="",
+                config=memory_os_config,
+                # state.db session ids are date-hashes without the `cron_`
+                # prefix (SFE's production census), so non_primary_context
+                # via MACHINE_SESSION_SOURCES is what actually classifies
+                # them; session_id is still passed for the legacy
+                # session_json path, whose ids may carry that prefix.
+                session_id=str(session.get("session_id") or ""),
+                non_primary_context=session_source.replace("-", "_") in MACHINE_SESSION_SOURCES,
+            )
+            session["principal"] = decision.principal
+            if decision.principal in FOREGROUND_CONTROL_PRINCIPALS:
+                principal_filtered.append(session)
+                continue
+            sessions_skipped_by_principal[decision.principal] = (
+                sessions_skipped_by_principal.get(decision.principal, 0) + 1
+            )
+            # PRINCIPAL_SYSTEM is a pure function of source/session_id,
+            # recomputed cheaply on every scan -- durably fingerprinting it
+            # would turn state["seen_sessions"] into an unbounded ledger for
+            # the ~95% of session volume that is cron/subagent traffic (same
+            # lesson as session_fact_extraction's PRINCIPAL_SYSTEM handling,
+            # see its module docstring). Only peer_agent/other_human (rare,
+            # stable) are worth persisting so the backlog actually drains
+            # instead of being rediscovered and re-reported forever.
+            if decision.principal != PRINCIPAL_SYSTEM:
+                principal_skip_marks.append(session)
         completed_filtered = [
-            session for session in source_filtered
+            session for session in principal_filtered
             if not completed_only or bool(session.get("completed", True))
         ]
         min_messages = max(int(min_message_count or 0), 0)
@@ -690,7 +768,8 @@ class SessionMirror:
         selected_fingerprints = [str(item["fingerprint"]) for item in selected_safe_sessions]
         skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
         skipped_by_source_count = len(platform_filtered) - len(source_filtered)
-        skipped_by_completion_count = len(source_filtered) - len(completed_filtered)
+        skipped_by_principal_count = len(source_filtered) - len(principal_filtered)
+        skipped_by_completion_count = len(principal_filtered) - len(completed_filtered)
         skipped_by_message_count = len(completed_filtered) - len(message_filtered)
         skipped_by_limit_count = max(len(eligible_sessions) - len(selected_sessions), 0)
         # Every lane that produces nothing must say why in its own artifact
@@ -700,6 +779,9 @@ class SessionMirror:
         floor_counters = {
             "eligible_session_count": len(eligible_sessions),
             "skipped_by_source_count": skipped_by_source_count,
+            "skipped_by_principal_count": skipped_by_principal_count,
+            "sessions_skipped_by_principal": dict(sessions_skipped_by_principal),
+            "principal_skip_marks_reevaluated_count": len(stale_skip_keys),
             "skipped_by_completion_count": skipped_by_completion_count,
             "skipped_by_message_count": skipped_by_message_count,
             "skipped_by_age_count": skipped_by_age_count,
@@ -780,6 +862,30 @@ class SessionMirror:
                     "indexed_at": datetime.now(timezone.utc).isoformat(),
                 }
                 written_events.append(event.id)
+            # P3 (CLAUDE.md "Completion Is Not Output"): a peer_agent/
+            # other_human session that was filtered out above must count as
+            # PROCESSED, or `pending_sessions`'s `dedup_key not in
+            # state["seen_sessions"]` check keeps rediscovering, re-filtering,
+            # and re-reporting it on every future scan forever -- the exact
+            # head-of-queue-starvation shape this lane has already been
+            # fixed for once (backlog 13). No event_id: nothing was written
+            # for these, only a durable exclusion. setdefault, not [] =, so a
+            # session that is somehow already recorded (e.g. a governance
+            # rejection races this exact tick) is never overwritten.
+            for skipped_session in principal_skip_marks:
+                state["seen_sessions"].setdefault(
+                    skipped_session["dedup_key"],
+                    {
+                        "skipped_reason": f"principal:{skipped_session.get('principal', '')}",
+                        "indexed_at": datetime.now(timezone.utc).isoformat(),
+                        # The binding this was judged under: an other_human
+                        # mark is re-judged once it no longer matches.
+                        "platform": str(skipped_session.get("platform") or ""),
+                        "principal_binding": owner_binding_fingerprint(
+                            memory_os_config, str(skipped_session.get("platform") or "")
+                        ),
+                    },
+                )
             state["last_scan_at"] = datetime.now(timezone.utc).isoformat()
             self._write_state(state)
             append_audit(
@@ -871,6 +977,10 @@ class SessionMirror:
             message_columns = _table_columns(conn, "messages") if _table_exists(conn, "messages") else set()
             id_col = _first_existing(session_columns, ("id", "session_id", "uuid"))
             source_col = _first_existing(session_columns, ("source", "platform", "channel", "kind"))
+            # P3: verified column on both production profiles (session_fact_
+            # extraction census, 2026-09-23) -- not guessed, per CLAUDE.md's
+            # "honest gap" doctrine; absence is handled below, never assumed.
+            user_id_col = _first_existing(session_columns, ("user_id",))
             updated_cols = tuple(
                 column for column in (
                     "last_activity_at",
@@ -889,6 +999,7 @@ class SessionMirror:
             for row in rows:
                 session_id = str(row[id_col])
                 platform = str(row[source_col]) if source_col else "unknown"
+                user_id = str(row[user_id_col]) if user_id_col and _has_value(row[user_id_col]) else ""
                 updated_at = _row_timestamp(row, updated_cols)
                 completed = not ended_col or _has_value(row[ended_col])
                 messages = _read_messages_for_session(conn, message_columns, session_id)
@@ -897,6 +1008,7 @@ class SessionMirror:
                     source_ref=str(self.state_db_path.resolve()),
                     session_id=session_id,
                     platform=platform,
+                    user_id=user_id,
                     updated_at=updated_at,
                     completed=completed,
                     messages=messages,
@@ -1108,6 +1220,13 @@ class SessionMirror:
     def _event_for_session(self, session: dict[str, Any]) -> EventEnvelope:
         now = datetime.now(timezone.utc)
         unique = hashlib.sha256(str(session["dedup_key"]).encode("utf-8")).hexdigest()[:10]
+        # P3: every session reaching this point already passed the principal
+        # filter in scan() (owner/unknown only), which stamped `principal` on
+        # the session dict itself. The PRINCIPAL_UNKNOWN fallback is
+        # defensive only -- this is the sole caller and it always sets it --
+        # never a live trap: unknown is the least-privileged closed-set
+        # value, not a stand-in for owner.
+        principal = str(session.get("principal") or PRINCIPAL_UNKNOWN)
         return EventEnvelope(
             schema_version=EVENT_SCHEMA_VERSION,
             id=new_event_id(now, unique=unique),
@@ -1129,12 +1248,15 @@ class SessionMirror:
                 "drive_policy": session["drive_policy"],
                 "candidate_allowed": False,
                 "body_policy": "bounded_summary",
+                "principal": principal,
             },
             tags=["session", "mirror", session["source_kind"], session["platform"]],
             sensitivity="private",
             body_policy="bounded_summary",
             hashes={"content_sha256": session["content_sha256"]},
             promotion_state="raw",
+            principal=principal,
+            principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
         )
 
 
@@ -1173,6 +1295,11 @@ def _session_record(
     updated_at: str,
     messages: list[dict[str, Any]],
     completed: bool = True,
+    # P3: the state.db session-level author, used by scan() to route this
+    # session through principal.resolve_principal before it can ever be
+    # mirrored. "" (never guessed) for the session_json legacy path, which
+    # carries no verified author-id field.
+    user_id: str = "",
 ) -> dict[str, Any]:
     user_messages = [str(item.get("content", "")) for item in messages if str(item.get("role", "")).lower() == "user"]
     assistant_messages = [str(item.get("content", "")) for item in messages if str(item.get("role", "")).lower() == "assistant"]
@@ -1197,6 +1324,11 @@ def _session_record(
         "source_ref": source_ref,
         "session_id": session_id,
         "platform": platform,
+        "user_id": user_id,
+        # P3: filled in by scan()'s principal-filtering pass below, once for
+        # every candidate this session survives to. "" here means "not yet
+        # resolved" -- never a real principal value.
+        "principal": "",
         "updated_at": updated_at,
         "completed": bool(completed),
         "message_count": len(messages),
@@ -1341,6 +1473,9 @@ def _safe_pending_session(session: dict[str, Any]) -> dict[str, Any]:
     return {
         "fingerprint": str(session.get("fingerprint") or ""),
         "platform": str(session.get("platform") or ""),
+        # P3: a coarse classification (owner/unknown -- only these ever reach
+        # a selected/pending session), never the raw platform user id.
+        "principal": str(session.get("principal") or ""),
         "source_kind": str(session.get("source_kind") or ""),
         "source_group_id": str(session.get("session_id") or ""),
         "summary": _clip(str(session.get("summary") or ""), limit=180),
@@ -1916,6 +2051,16 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"id": id_, "code": id_, "severity": severity, "message": message, "details": details or {}}
+
+
+def _binding_stale_skip_mark(mark: Any, config: dict[str, Any] | None) -> bool:
+    """True for an other_human skip judged under an owner binding that has
+    since changed. Such a session must be judged again: the owner adding
+    their own id later has to bring it back, not lose it forever. peer_agent
+    (the mailbox source) is structural and never goes stale."""
+    if not isinstance(mark, dict) or mark.get("skipped_reason") != f"principal:{PRINCIPAL_OTHER_HUMAN}":
+        return False
+    return mark.get("principal_binding") != owner_binding_fingerprint(config, str(mark.get("platform") or ""))
 
 
 def _error_summary_from_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:

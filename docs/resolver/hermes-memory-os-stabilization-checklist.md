@@ -5031,6 +5031,9 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `33d674b..HEAD`：P2+P3（DW）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
+  `session_mirror` 加身份门（先于 `[:limit]` 切片，防饥饿）+ 持久排除非主人会话（防永远重扫）；monitor 新增 `event_principal_coverage`
+  自包含区块（空样本报 healthy_no_sample、legacy 恒 INFO、缺主体的已标记事件 WARN/生产 FAIL）。全量 4179 passed。**未部署**。
 - `33d674b..HEAD`：P1（DV）——owner action 核心层主体自检：`parse_owner_review_reply` 与 `owner_review_surface_report` 新增
   `principal` 形参并在模块内部自查 `OWNER_ACTION_PRINCIPALS`（owner/unknown 放行，peer_agent/other_human/system 拒绝且落审计），
   未传 principal 时按拒绝/脱敏处理而非放行；review surface 与每轮系统提示词注入的审阅摘要对非主人隐去 `oa_`/`ppmt_` token。
@@ -8784,3 +8787,104 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
   人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
   `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。
+
+---
+
+## DW — P2 + P3：事件带主体 + session_mirror 主体过滤（2026-09-23）
+
+- **背景**：规划 Phase 2 P2/P3。今天只有 `conversation_turn` 通过 `sync_turn` 在 `safe_ref.principal` 记录主体；`EventEnvelope` 本身没有
+  一等 `principal` 字段，其余 8 个生产者（`cron_mirror` / `state_source_mirror` / `shadow_journal` / `external_intake` /
+  `governance_feedback` / `migrator` / `on_memory_write` / `session_fact_extraction` 的顶层字段）都没有主体标记。`session_mirror` 把
+  state.db 里的每一个会话都当作可镜像候选，不问是谁的会话——mailbox（`peer_agent`）、subagent（`system`）、群里其他人类都可能被镜像进主人记忆。
+- **P2 改动**（`schema.py` + 9 处生产者）：
+  - `EventEnvelope` 新增 `principal: str = ""`、`principal_schema_version: str = ""` 两个一等字段，新增纪元常量
+    `EVENT_PRINCIPAL_SCHEMA_VERSION = "memory-os.event.principal.v1"`。`from_dict` 用 `.get()` 读取（非 `_require`），对没有这两个字段的
+    历史行保持无异常兼容；`to_dict` 恒写出。`conversation_turn` 仍然在 `safe_ref.principal` 写一份（不删除，消费方不受影响），新增的顶层
+    字段是叠加，不是替换。
+  - `__init__.py::_build_event` 的 `principal` 改成必填关键字参数（无默认值——Section W 规则 4：默认值会让"忘记传"变成"静默把主体记成
+    空字符串、同时又打上纪元戳"这一确切缺陷）；两个调用点（`sync_turn` 传已算好的 `principal`，`on_memory_write` 传 `self._turn_principal`）
+    都已补上。
+  - 8 个直接构造 `EventEnvelope(...)` / `EventEnvelope.from_dict(...)` 的生产者逐一补上 `principal=` / `principal_schema_version=`：
+    `cron_mirror.py`、`state_source_mirror.py`、`shadow_journal.py`、`external_intake.py`、
+    `plugins/modules/governance/feedback_bridge.py` 五处机械/机器产出一律 `PRINCIPAL_SYSTEM`；`migrator.py`（导入主人自己的历史
+    SOUL.md/MEMORY.md/diary.md）→ `PRINCIPAL_OWNER`；`plugins/modules/cognition/session_fact_extraction.py::_build_provenance_event`
+    已经在 `safe_ref.principal` 带 owner/unknown，本次只补顶层镜像。`session_mirror.py` 见 P3。
+  - **生产者普查**：`tests/plugins/memory/test_memory_os_schema.py::test_every_event_producer_sets_principal` 全仓正则扫描 `plugins/`
+    下每个 `EventEnvelope(` / `EventEnvelope.from_dict(` 调用点，要求其后 40 行窗口内出现 "principal" 字样；两处书面豁免——`store.py::
+    read_events()`（反序列化已写盘字节的读者，不是生产者）与 `benchmark.py`（合成压测语料，没有真实主人，来自 `fixtures.
+    generate_event_corpus`）。`eval/` 保持不动（越界清单）。
+- **P3 改动**（`session_mirror.py`）：
+  - `state_db_path` 属性改用 `roots.state_db_path` 共享 accessor（原为重复路径字面量，CLAUDE.md 点名的模式）；`roots.py` 的相关文档同步
+    （"三处未迁移"改为"两处"，仅剩 `owner_actions.py` 与 seam 的 `owner_channel_adapter.py`，两者都不在本次改动范围）。
+  - `_read_state_db_sessions` 探测并读取 `sessions.user_id`（生产已验证列名，缺失时安全退化为空——不是猜测的列名），随会话记录一起传给
+    `_session_record`；`_session_record` 新增 `user_id`（legacy JSON 路径无该字段，恒 `""`）与占位 `principal`（初值 `""`，由 `scan()` 填入）。
+  - `scan()` 在 `source_filtered` 之后、`completed_filtered` 之前插入身份门：对每个候选调用 `principal.resolve_principal(source=platform,
+    author_id=user_id, author_class="", config=..., session_id=..., non_primary_context=platform∈MACHINE_SESSION_SOURCES)`，只有
+    owner/unknown（`FOREGROUND_CONTROL_PRINCIPALS`）进入下一阶段——这是身份门，不是可配置项，平台白名单无法覆盖它。**该门先于
+    `[:limit]` 切片生效**，避免一批 peer/system 会话把有限名额占满、把主人自己的会话饿死（与本文件 Backlog 13 同类问题）。
+  - 新计数器：`skipped_by_principal_count`（并入 `_auto_apply_scan_counters` 的紧凑落盘计数）与 `sessions_skipped_by_principal`
+    （按主体分类的明细字典，随完整 scan/apply 报告一起返回，不进紧凑落盘 JSON）。
+  - **持久排除**（CLAUDE.md「Completion Is Not Output」）：`peer_agent` / `other_human` 会话在真实写入分支里被记入
+    `state["seen_sessions"]`（无 `event_id`，只有 `skipped_reason`），下一轮不再被重新发现 / 重新计数——否则同一条非主人会话会被永远重复
+    扫描、永远出现在计数里。`PRINCIPAL_SYSTEM` 刻意不做此持久化（cron/subagent 约占会话总量 95%，是 `source` 的纯函数，逐条落盘等于把
+    `seen_sessions` 变成无界账本——与 `session_fact_extraction` 对 `PRINCIPAL_SYSTEM` 的处理同一条道理）。治理阻塞
+    （`governance_validation` 返回 `blocked`）分支不执行这段持久化标记，见"遗留"。
+  - `_event_for_session` 现在把 `session["principal"]`（身份门已算好）写进事件顶层 `principal` / `principal_schema_version` 以及
+    `safe_ref.principal`；`_safe_pending_session` 也带上粗粒度 `principal`（不含任何原始 id）。
+- **Monitor 接线**（自包含区块，未触碰另一并行 agent 正在改的部分）：`event_principal_coverage_summary(recent_window=500)`（嵌入式探针
+  脚本内，紧邻 `principal_binding_summary`）只读扫描最近窗口内的事件，统计"带纪元戳的事件"里有效 principal / 无效 principal 的计数，以及
+  "没有纪元戳"的历史行计数——全程只出计数，不出任何 id。`_classify_event_principal_coverage` 紧邻 `_classify_principal_binding`：空网关
+  集合（`marked_event_count=0`）报 `event_principal_coverage_healthy_no_sample`（INFO，绝不伪装成 PASS）；历史债务恒 INFO
+  （`event_principal_legacy_unattributed`，不论是否有已标记事件）；带纪元戳但缺 principal 的事件 → WARN `event_marked_without_principal`，
+  `CLEAN_HOST_WARN_CLASSIFICATIONS` 里登记为 `fail_if_production`（生产 FAIL、clean-host 仍是 WARN 而非更粗的
+  `clean_host_warn_unclassified`）——与 `principal_platform_unbound_with_non_owner_sessions` 那条不同，这条的 reason 明确写"不是环境
+  差异，是生产者少调了 resolve_principal"，因为这类缺陷在任何主机上都该报。未在 `lane_contracts.py` 登记：与 `principal_binding_summary`
+  同类，是跨生产者的普查而非绑定到单条 lane/loop 步骤（两者都没有先例登记）。
+- **反事实**（sabotage：`cp` 备份 → 破坏 → 跑测试确认 FAIL → 从备份原样恢复 → 再跑测试确认 PASS，全程未用 `git checkout --` / `git
+  stash`）：
+  - `test_every_event_producer_sets_principal`：改动前该测试对 8 处生产者天然 FAIL（`__init__.py` / `cron_mirror.py` /
+    `external_intake.py` / `migrator.py` / `session_mirror.py` / `shadow_journal.py` / `state_source_mirror.py` /
+    `feedback_bridge.py`），逐一补上后只剩 `session_mirror.py`（P3 实现前），P3 完成后转全绿——这是在真实实现时间线上验证的反事实
+    （先跑真失败、再跑真通过），未额外做 cp 回退演练。
+  - P3 身份门：把 `if decision.principal in FOREGROUND_CONTROL_PRINCIPALS` 换成 `if True`（门失效）——7 条新 `session_mirror` 测试里
+    5 条转 FAIL（`mailbox→peer_agent` 排除、`subagent→system` 排除、`other_human` 排除、饥饿反例、持久化反例），恢复后全部转 PASS；
+    另外 2 条（放行 owner 会话、事件带主体）不依赖排除逻辑，本就不受影响。
+  - P3 持久化：单独把"记入 `seen_sessions`"的 for 循环体替换成空列表迭代（身份门本身不动）——只有
+    `test_scan_marks_non_owner_session_seen_so_it_is_not_rescanned_forever` 一条转 FAIL，证明该反事实精确定位到"持久化"这一半修复，
+    而不是整个身份门。
+  - monitor 分级：把 `_classify_event_principal_coverage(...)` 的调用整行注释掉——5 条新 classify 测试里 4 条转 FAIL（healthy_no_sample、
+    ok、WARN/FAIL 分级、collection_error no-sample），恢复后全部转 PASS（"absent key 静默跳过"一条不依赖调用本身，天然不受影响）。
+- **测试**：schema +2（含产出普查）；session_mirror +7（mailbox 排除、subagent 排除、owner_identity 排除/放行、饥饿反例、持久化反例、
+  事件带主体）；monitor +8（采集器 3、分级 5）；全量 4179 passed / 13 skipped / 0 failed（本分支基线，含以上 17 条新测试；两次独立全量
+  运行均未复现已知的 Windows 并发 flake）；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene `pass` /
+  public-checkout `--strict` `PASS` / `git diff --check` 无输出）。
+- **遗留**：`principal.py` 未改动（未加新 helper，`resolve_principal` 优先级原样，符合任务边界）；`owner_actions.py` 的 P1（核心层自检）
+  与 monitor 的其余在制品（`superseded_by_newer` / `judge_backend` / `response.model` 展示）不在本次范围内，由并行 agent 负责，未触碰；
+  `event_principal_coverage_summary` 用计数窗口（最近 500 条事件，同 `session_activity_stats` 的既有约定）而非时间窗口，与
+  `principal_binding_summary` 的 `window_days` 风格不同——两者衡量对象不同（会话 vs 事件），未强行统一；`sessions_skipped_by_principal`
+  的明细字典只进入完整 scan/apply 报告，不进 `session_mirror_auto_apply_last_run.json` 的紧凑落盘（该文件的 `counters` 类型约定为纯
+  int，只有聚合数 `skipped_by_principal_count` 落盘）；治理阻塞（`governance_validation` 返回 `blocked`）分支不会执行本次新增的持久化
+  标记——该分支本身是异常态，被阻塞的批次本来也不会写任何东西，留作已知边界而非缺陷。
+- **主会话集成审查**：核对了 P3 的持久化排除——`seen_sessions` 的全部读者（本文件两处扫描过滤、monitor 一处积压计数）都只做成员判断，
+  不把"在集合里"当"已导入"计数，所以把被排除的 peer / other_human 会话标记进去只会让积压正确排空，不会虚增导入数；标记只在 apply 路径
+  `_write_state` 之前写入，dry-run 保持只读；governance 判 blocked 的早退分支下一轮重试，不丢。未改动的一处命名：镜像准入沿用
+  `FOREGROUND_CONTROL_PRINCIPALS`（与 `sync_turn` 的记忆驱动门同一集合），若将来要让"谁能进记忆"与"谁能控前台"分开，应像 P1 的
+  `OWNER_ACTION_PRINCIPALS` 那样另起名字。本节字母由 DU 改为 DW，使链上节号单调（DU = monitor part 2，DV = P1）。
+- **独立审查（Sonnet）无阻塞**：生产者普查完整（`append_event` 只收 `EventEnvelope`，没有绕开的字典写入；全仓 9 处生产者都传闭集值）、
+  纪元边界诚实、P3 门在切片之前、会话级 `author_class=""` 是对的（传 `unknown` 会在读配置之前就短路成 unknown）。三条 SHOULD-FIX
+  全修，各有破坏即失败的反事实（cp 备份法 3/3）：
+  - **升级后的全量误报**：`to_dict()` 一律输出两个新键，而索引的 `record_hash` 是 `to_dict()` 的 sha256——部署后每条旧事件都会被
+    doctor / deploy postcheck 判 `index_content_mismatch`（FAIL），直到下一次 index_sync 重写哈希。改为两者皆空时不输出这两个键：
+    旧行逐字节原样往返、哈希不变；已打标记的行（哪怕主体为空）照常两键都写，monitor 仍能抓到生产者缺陷。从根上消除，不靠部署顺序。
+  - **`other_human` 永久排除**：`other_human` 的含义是"此平台配置了身份、而作者不是它"，是依赖绑定的判断；此前的持久跳过标记永不
+    失效，主人日后补上自己的第二个账号，那个账号此前的会话就永远不会被镜像——数据丢失。现在标记记下平台与
+    `principal.owner_binding_fingerprint`，每轮扫描先丢弃与当前绑定不符的 `other_human` 标记、当轮重新判定，`status()` 的待处理数用
+    同一判断；`peer_agent`（mailbox 结构性来源）不受影响。新计数 `principal_skip_marks_reevaluated_count`。已知限度：monitor 嵌入
+    采集器直接读状态文件，陈旧标记要等下一次 apply 写回后才从其积压数里消失（下一个心跳即可）。
+  - **覆盖窗口被机器事件占满**：最近 500 条可能全是 system 类事件，"没抽到主人轮"与"主人轮全都正确"无法区分。采集器与 INFO 加
+    `marked_by_principal` 分布。
+  - NIT 已处理：`on_memory_write` 注释原称与 `sync_turn` 的回退"相同"，实际它永远取缓存值且不记 `author_source`，注释改为如实说明
+    跨轮风险；镜像全量排除非主人会话、而 `sync_turn` 对同主体只做 index_only——前者是整段导入第三方会话，更强的隐私边界是有意的。
+- **部署**：随规划全部落地后统一部署；部署后验收：`event_principal_coverage` 在近窗口出现 `marked_event_count>0` 且
+  `marked_without_principal_count=0`；两 profile 的 `session_mirror` 若曾经镜像过 mailbox/群内他人会话，新版本上线后不再新增（历史已
+  写入的旧事件不回填，只影响新写入）。

@@ -7,6 +7,15 @@ from typing import Any
 
 
 EVENT_SCHEMA_VERSION = "memory-os.event.v0"
+# P2 (docs/plans/2026-09-23-memory-os-next-phase-plan.md Phase 2): the era
+# boundary for "this event's principal field is authoritative". A row without
+# this marker (or with any other value) is legacy/unattributed -- it was
+# written before every producer carried a principal, and it can never satisfy
+# the P2 contract retroactively (the turn happened; nobody captured who it
+# was). Legacy rows are counted as debt (monitor: legacy_unattributed_event_
+# count), never gated, never erased -- see CLAUDE.md's era-boundary
+# paragraph ("an empty gated set must report healthy_no_sample, never pass").
+EVENT_PRINCIPAL_SCHEMA_VERSION = "memory-os.event.principal.v1"
 WORKING_SCHEMA_VERSION = "memory-os.working.v1"
 WORKING_SCHEMA_VERSION_V0 = "memory-os.working.v0"  # read-compatible
 CRYSTALLIZED_SCHEMA_VERSION = "memory-os.crystallized.v0"
@@ -66,6 +75,17 @@ class EventEnvelope:
     # test pins that ("raw"-only across all producers); implementing real
     # promotion states means consciously updating producer + census together.
     promotion_state: str = "raw"
+    # P2: first-class principal on every event (owner | peer_agent |
+    # other_human | system | unknown, from principal.resolve_principal --
+    # see PRINCIPALS in principal.py). Both new fields default to "" so
+    # from_dict() stays backward-compatible with every pre-P2 row on disk
+    # (they simply have no opinion on principal, distinct from a modern row
+    # that resolved "unknown"). NOT `_require`d: a required field would raise
+    # ValidationError on every legacy row a reader touches. conversation_turn
+    # keeps writing safe_ref["principal"] too (existing consumers read that
+    # path) -- this field is additive, not a replacement.
+    principal: str = ""
+    principal_schema_version: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EventEnvelope":
@@ -86,10 +106,12 @@ class EventEnvelope:
             body_policy=str(data["body_policy"]),
             hashes=_dict_value(data, "hashes"),
             promotion_state=str(data["promotion_state"]),
+            principal=str(data.get("principal") or ""),
+            principal_schema_version=str(data.get("principal_schema_version") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "schema_version": self.schema_version,
             "id": self.id,
             "ts": self.ts,
@@ -104,6 +126,16 @@ class EventEnvelope:
             "hashes": dict(self.hashes),
             "promotion_state": self.promotion_state,
         }
+        # A legacy row (neither field set) must serialize exactly as it did
+        # before P2: the index's record_hash is sha256 of this dict, so adding
+        # empty keys would make every pre-P2 event read as an
+        # index_content_mismatch (doctor/deploy postcheck FAIL) until the next
+        # index_sync rewrote the hashes. A marked row always carries both,
+        # even an empty principal -- that is what the coverage monitor gates.
+        if self.principal or self.principal_schema_version:
+            data["principal"] = self.principal
+            data["principal_schema_version"] = self.principal_schema_version
+        return data
 
 
 @dataclass(frozen=True)

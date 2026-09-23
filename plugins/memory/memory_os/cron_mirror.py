@@ -10,7 +10,8 @@ from typing import Any
 
 from .audit import append_audit
 from .ids import new_event_id
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .principal import PRINCIPAL_SYSTEM
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 
 
@@ -263,6 +264,10 @@ class CronMirror:
             body_policy="summary_only",
             hashes={"output_sha256": item["output_sha256"]},
             promotion_state="raw",
+            # P2: cron output has no human author -- it is machine-produced,
+            # unconditionally.
+            principal=PRINCIPAL_SYSTEM,
+            principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
         )
 
 

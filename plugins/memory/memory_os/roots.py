@@ -214,12 +214,13 @@ def state_db_path(roots: "MemoryOSRoots") -> Path:
     (SFE, 2026-09-23), which reads it instead of the dead
     ``sessions/session_*.json`` files Hermes stopped writing around 2026-05/06.
 
-    Three call sites predate this accessor and still rebuild the path literal
-    ``hermes_home / "state.db"`` themselves (``session_mirror.py``'s
-    ``SessionMirror.state_db_path`` property, ``owner_actions.py``'s and
+    Two call sites predate this accessor and still rebuild the path literal
+    ``hermes_home / "state.db"`` themselves (``owner_actions.py``'s and
     ``plugins/seam/hermes_memory_os/owner_channel_adapter.py``'s
     ``_state_db_channel_candidates``) -- exactly the "path literal repeated at
     each call site" pattern CLAUDE.md warns about. They are left unmigrated
     here as an out-of-scope finding; new callers should use this accessor.
+    ``session_mirror.py``'s ``SessionMirror.state_db_path`` property was
+    migrated to this accessor as part of P3 (2026-09-23).
     """
     return roots.hermes_home / "state.db"

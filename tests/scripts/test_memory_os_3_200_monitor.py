@@ -6706,6 +6706,148 @@ def test_principal_binding_census_failure_is_no_sample_never_pass():
     assert not any(item["code"].startswith("principal_platform") for item in graded["pass"])
 
 
+def _append_real_event(store, *, principal="", principal_schema_version="", source="telegram"):
+    """Write one real event through MemoryOSStore/EventEnvelope -- the shard
+    directory shape (events/<date>/*.jsonl) is whatever the real producer
+    path creates, never guessed by the test (CLAUDE.md's fixture-drift
+    paragraph)."""
+    from datetime import datetime, timezone
+
+    from plugins.memory.memory_os.ids import new_event_id
+    from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
+
+    now = datetime.now(timezone.utc)
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=new_event_id(now, unique=os.urandom(4).hex()),
+        ts=now.isoformat(),
+        profile="default",
+        source=source,
+        kind="conversation_turn",
+        summary="test event",
+        principal=principal,
+        principal_schema_version=principal_schema_version,
+    )
+    store.append_event(event)
+
+
+def test_event_principal_coverage_summary_counts_marked_and_legacy_events(tmp_path):
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.schema import EVENT_PRINCIPAL_SCHEMA_VERSION
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="default"))
+    store.initialize()
+    _append_real_event(store, principal="owner", principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION)
+    _append_real_event(store, principal="system", principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION)
+    _append_real_event(store)  # legacy: no era marker at all
+
+    summary = _exec_embedded_probe_prefix(str(tmp_path))["event_principal_coverage_summary"]()
+
+    assert summary["status"] == "ok"
+    assert summary["marked_event_count"] == 2
+    assert summary["marked_with_principal_count"] == 2
+    assert summary["marked_without_principal_count"] == 0
+    assert summary["legacy_unattributed_event_count"] == 1
+    # #95 review: machine producers can fill the window, so the breakdown is
+    # what shows whether owner turns were sampled at all.
+    assert summary["marked_by_principal"] == {"owner": 1, "system": 1}
+    graded = monitor.classify_snapshot({"monitor_profile": "live", "event_principal_coverage": summary})
+    ok_entry = next(item for item in graded["info"] if item["code"] == "event_principal_coverage_ok")
+    assert ok_entry["value"]["marked_by_principal"] == {"owner": 1, "system": 1}
+
+
+def test_event_principal_coverage_summary_reports_marked_events_missing_principal(tmp_path):
+    """The one shape a real producer should never emit -- simulated by hand
+    (there is no real broken producer to build this from) to prove the
+    collector actually notices when principal is empty despite the era
+    marker being set."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.schema import EVENT_PRINCIPAL_SCHEMA_VERSION
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="default"))
+    store.initialize()
+    _append_real_event(store, principal="", principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION, source="broken_producer")
+
+    summary = _exec_embedded_probe_prefix(str(tmp_path))["event_principal_coverage_summary"]()
+
+    assert summary["marked_event_count"] == 1
+    assert summary["marked_without_principal_count"] == 1
+    assert summary["sources_without_principal"] == {"broken_producer": 1}
+
+
+def test_event_principal_coverage_summary_is_ok_and_healthy_with_no_events(tmp_path):
+    summary = _exec_embedded_probe_prefix(str(tmp_path))["event_principal_coverage_summary"]()
+    assert summary["status"] == "ok"
+    assert summary["marked_event_count"] == 0
+    assert summary["legacy_unattributed_event_count"] == 0
+
+
+def test_classify_event_principal_coverage_empty_marked_set_is_healthy_no_sample():
+    graded = classify_snapshot({
+        "monitor_profile": "live",
+        "event_principal_coverage": {
+            "status": "ok", "marked_event_count": 0, "marked_without_principal_count": 0,
+            "legacy_unattributed_event_count": 40, "recent_window": 500, "scanned_count": 40,
+        },
+    })
+    assert any(item["code"] == "event_principal_coverage_healthy_no_sample" for item in graded["info"])
+    assert any(item["code"] == "event_principal_legacy_unattributed" for item in graded["info"])
+    assert not any(item["code"].startswith("event_principal") for item in graded["pass"] + graded["warn"] + graded["fail"])
+
+
+def test_classify_event_principal_coverage_all_marked_valid_is_ok_info_only():
+    graded = classify_snapshot({
+        "monitor_profile": "live",
+        "event_principal_coverage": {
+            "status": "ok", "marked_event_count": 5, "marked_with_principal_count": 5,
+            "marked_without_principal_count": 0, "legacy_unattributed_event_count": 0,
+            "recent_window": 500, "scanned_count": 5,
+        },
+    })
+    assert any(item["code"] == "event_principal_coverage_ok" for item in graded["info"])
+    assert not any(item["code"] == "event_marked_without_principal" for item in graded["warn"])
+
+
+def test_classify_event_principal_coverage_marked_without_principal_fails_production_warns_clean_host():
+    """Counterfactual for the P2 gate: a marked event missing principal is a
+    producer bug, on any host -- registered (not left unclassified) so
+    clean-host reports the specific WARN rather than the coarser
+    clean_host_warn_unclassified FAIL, and production escalates to FAIL."""
+    snapshot = {
+        "monitor_profile": "live",
+        "event_principal_coverage": {
+            "status": "ok", "marked_event_count": 3, "marked_without_principal_count": 1,
+            "legacy_unattributed_event_count": 0, "sources_without_principal": {"broken_producer": 1},
+            "recent_window": 500, "scanned_count": 3,
+        },
+    }
+    live = classify_snapshot(snapshot)
+    assert any(item["code"] == "event_marked_without_principal_in_production" for item in live["fail"])
+
+    clean_snapshot = dict(snapshot, monitor_profile="clean-host")
+    clean = classify_snapshot(clean_snapshot)
+    assert any(item["code"] == "event_marked_without_principal" for item in clean["warn"])
+    unclassified = {item.get("warn_code") for item in clean["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "event_marked_without_principal" not in unclassified
+
+
+def test_classify_event_principal_coverage_collection_failure_is_no_sample_never_pass():
+    graded = classify_snapshot({
+        "monitor_profile": "live",
+        "event_principal_coverage": {"status": "collection_error", "collection_error": "ImportError"},
+    })
+    assert any(item["code"] == "event_principal_coverage_no_sample" for item in graded["info"])
+    assert not any(item["code"].startswith("event_principal") for item in graded["pass"])
+
+
+def test_classify_event_principal_coverage_absent_key_is_a_silent_noop():
+    graded = classify_snapshot({"monitor_profile": "live"})
+    assert not any(item["code"].startswith("event_principal") or item["code"] == "event_marked_without_principal"
+                   for item in graded["pass"] + graded["warn"] + graded["fail"] + graded["info"])
+
+
 def test_graph_layer_novelty_collector_reports_no_sample_without_a_ledger(tmp_path):
     namespace = _exec_embedded_probe_prefix(str(tmp_path))
     summary = namespace["graph_layer_novelty_summary"]()

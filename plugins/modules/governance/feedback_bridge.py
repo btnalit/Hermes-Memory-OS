@@ -12,8 +12,9 @@ from plugins.memory.memory_os.audit import append_audit, read_audit_entries
 from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import expression_feedback_ledger_path
 from plugins.modules.expression.speak_gate import SpeakGateModule
+from plugins.memory.memory_os.principal import PRINCIPAL_SYSTEM
 from plugins.memory.memory_os.roots import MemoryOSRoots
-from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from plugins.memory.memory_os.schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -593,6 +594,11 @@ class GovernanceFeedbackBridgeModule:
             body_policy="summary_only",
             hashes={"source_hash": str(record["state_hash"])},
             promotion_state="raw",
+            # P2: governance feedback summarizes internal module state
+            # (evidence scoring, ops_gate, proposals, self-evolution) -- never
+            # a human turn author.
+            principal=PRINCIPAL_SYSTEM,
+            principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
         )
 
     def _existing_keys(self, store: MemoryOSStore) -> set[str]:

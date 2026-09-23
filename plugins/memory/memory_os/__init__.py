@@ -61,7 +61,12 @@ from .roots import (
     last_session_anchor_archive_path,
     last_session_anchor_path,
 )
-from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
+from .schema import (
+    EVENT_PRINCIPAL_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION,
+    IDENTITY_MANIFEST_SCHEMA_VERSION,
+    EventEnvelope,
+)
 from .session_approval import build_session_review_block, build_session_feedback_block
 from .status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
@@ -659,6 +664,7 @@ class MemoryOSProvider(MemoryProvider):
                 "user_sha256": _sha256(user_content),
                 "assistant_sha256": _sha256(assistant_content),
             },
+            principal=principal,
         )
         self._enqueue(event, drop_action="sync_turn_dropped")
         # ── C1: capture operations from this turn's messages ──────────────
@@ -1265,6 +1271,14 @@ class MemoryOSProvider(MemoryProvider):
                 "action": action,
             },
             hashes={"content_sha256": _sha256(content)},
+            # No per-call author is available on this hook (Hermes' built-in
+            # memory tool does not pass one), so this is always the
+            # on_turn_start-cached principal. Unlike sync_turn -- which only
+            # falls back to it when the host sends no turn_author, and marks
+            # that fallback with author_source -- nothing here records that
+            # the value was cached; if Hermes ever fires this hook across a
+            # turn boundary the principal can belong to the next turn.
+            principal=self._turn_principal,
         )
         self._enqueue(event, drop_action="memory_write_dropped")
 
@@ -1337,7 +1351,15 @@ class MemoryOSProvider(MemoryProvider):
         session_id: str,
         safe_ref: dict[str, Any],
         hashes: dict[str, Any],
+        principal: str,
     ) -> EventEnvelope:
+        # P2: `principal` is a required keyword, not `principal: str = ""` --
+        # a default here would be exactly the trap Section W rule 4 forbids:
+        # a caller that forgets it would silently mark the event (era
+        # version below) with an empty principal, which is precisely the
+        # producer bug the monitor's WARN exists to catch. Forcing every
+        # call site to pass it explicitly catches the omission at import
+        # time instead of at a monitor cycle.
         now = datetime.now(timezone.utc)
         return EventEnvelope.from_dict(
             {
@@ -1354,6 +1376,8 @@ class MemoryOSProvider(MemoryProvider):
                 "body_policy": "summary_only",
                 "hashes": hashes,
                 "promotion_state": "raw",
+                "principal": principal,
+                "principal_schema_version": EVENT_PRINCIPAL_SCHEMA_VERSION,
             }
         )
 
