@@ -5031,6 +5031,10 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `ab9869c..HEAD`：full_monitor_refresh 忽略 HERMES_HOME（DK）——Hermes 以 no-agent 调用该脚本只设环境变量不传参，
+  写死的默认 home 让 sannai 的夜间监控六周都在监控 main、且覆盖 main 的 lane_last_run；默认值改为先读 `HERMES_HOME`。
+  +2 测试，全量 3786 passed / 13 skipped / 0 failed（上一版 3784）。**未部署**（owner 裁定：规划全部落地后统一部署）。
+
 - `bea1737..HEAD`：同行 agent 的话被当成主人指令（DJ）——群里三个 Hermes agent 辩论，Memory-OS 把
   "user 轮"等同"主人话语"：DG 后 33 条 cancelled 锚点 30 条误判（22 条 peer 发言，13 条取消词只在
   `[Replying to]` 引文里、多为本 agent 自己的道歉——道歉被引用再触发取消的回环）。修法：接收 Hermes
@@ -8193,3 +8197,23 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **反事实**：5 项逐项单独破坏，对应测试各自 FAIL、恢复后 PASS。
 - **测试**：+2（ingress 新增短引文含 `"]` 的夹具、turn_author 新增延期拒绝审计用例；其余断言并入既有测试）；全量 **3784 passed / 13 skipped / 0 failed**（上轮 3782，基线 3726，累计 +58）；五门全绿（public-checkout `--strict` PASS 4/0/0）。
 - **部署**：owner 裁定合并后不部署，等下一阶段规划全部落地后统一部署并执行 DJ.8 验收。
+
+## DK — full_monitor_refresh 忽略 HERMES_HOME：sannai 的夜间监控六周都在监控 main（2026-09-23）
+
+- **症状**（生产只读实测）：sannai 的 Hermes cron `memory-os-full-monitor-refresh` 每天 `ok`、输出为空，但 sannai 的
+  `monitor_artifacts/` 自 2026-08-12 起没有新文件，`lane_last_run/full_monitor_refresh.json` 不存在。
+- **根因（已验证）**：`scripts/memory_os_full_monitor_refresh.py::build_parser` 的 `--hermes-home` 默认值写死为
+  `Path.home() / ".hermes"`，不读 `HERMES_HOME`；而 Hermes 以 no-agent 方式调用该脚本时只设 `HERMES_HOME`、不传参数
+  （`hermes_cron_adapter.plan_hermes_cron_job_upsert` 生成的命令里没有 `--hermes-home`）。宿主上 `$HOME=/root`，于是两个
+  profile 的运行都监控 `/root/.hermes`。决定性证据：main 当天出现两份相隔 48 秒的 artifact，分别对应两个 job 的
+  `last_run_at`；main 的 `lane_last_run` 时间戳正是 sannai 那次运行写的。同目录的 `memory_os_cron_group_runner.py`
+  本就是 `os.environ.get("HERMES_HOME", …)`，所以只有这一个直连脚本出错。
+- **为什么没人发现**：脚本成功时按设计静默，Hermes 记 `ok`——"跑了"和"产出了"再次同貌（Completion Is Not Output）。
+- **修复**：默认值改为先读 `HERMES_HOME`。
+- **Rule 5**：全项目搜同一写法，lane 脚本都已是"命令行 → HERMES_HOME → 默认"；四个 owner 面脚本读 env；
+  `scripts/install_memory_os_monitor_dashboard_service.py` 的 `--hermes-home` 默认值**有意**不依赖调用 shell 的环境
+  （文档已写明，人工带参数执行），保持不变；`memory_os_overlay_data_probe.py` 为手动探针，登记不改。
+- **反事实**：还原默认值 → 两个新测试失败（端到端：按 Hermes 方式只设 `HERMES_HOME`、`HOME` 指向诱饵目录，artifact 必须写进
+  profile 目录且诱饵目录不被创建；以及 parser 级断言）；恢复 → 通过。
+- **测试**：+2；全量 3786 passed / 13 skipped / 0 failed（上一版 3784）。
+- **部署**：随下一阶段规划全部落地后统一部署；部署后 sannai 次日 02:35 应出现自己的 artifact，main 当天只应有一份。

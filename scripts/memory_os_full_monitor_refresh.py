@@ -37,7 +37,16 @@ from plugins.memory.memory_os.operational_truth import build_full_monitor_envelo
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hermes-home", type=Path, default=Path.home() / ".hermes")
+    parser.add_argument(
+        "--hermes-home",
+        type=Path,
+        # Hermes runs this no-agent cron script with HERMES_HOME set to the
+        # profile that owns the job and passes no --hermes-home. Ignoring the
+        # variable made every profile's run monitor the default home: from
+        # 2026-08-12 sannai's nightly run silently re-monitored main and
+        # overwrote main's lane_last_run, while sannai got no artifact at all.
+        default=Path(os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")),
+    )
     parser.add_argument("--monitor-script", type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     parser.add_argument("--keep-artifacts", type=int, default=14)

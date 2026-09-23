@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from plugins.memory.memory_os.operational_truth import read_operational_truth_snapshot
-from scripts.memory_os_full_monitor_refresh import _monitor_environment
+from scripts.memory_os_full_monitor_refresh import _monitor_environment, build_parser
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_full_monitor_refresh.py"
@@ -259,3 +259,51 @@ def test_real_monitor_refresh_reader_and_dashboard_contract_end_to_end(tmp_path)
     if full["status"] == "FAIL":
         assert rendered["status"] == "FAIL"
         assert rendered["fail"] >= 1
+
+
+def test_cron_run_monitors_the_profile_named_by_hermes_home(tmp_path):
+    """Counterfactual for 2026-09-23: Hermes runs this no-agent cron script
+    with HERMES_HOME set to the job's profile and no --hermes-home. The
+    default ignored the variable, so sannai's nightly run monitored the
+    default home (main) and sannai had no artifact for six weeks."""
+    profile_home = tmp_path / "profiles" / "sannai"
+    decoy_default_home = tmp_path / "user_home"
+    monitor = tmp_path / "fake_monitor.py"
+    _write_fake_monitor(monitor, write_snapshot=True, exit_code=0)
+    env = dict(os.environ)
+    env.update(
+        HERMES_HOME=str(profile_home),
+        HOME=str(decoy_default_home),
+        USERPROFILE=str(decoy_default_home),
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--monitor-script",
+            str(monitor),
+            "--timeout-seconds",
+            "10",
+            "--source-head",
+            "abc123",
+            "--runtime-digest",
+            "sha256:runtime-test",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    published = list((profile_home / "memory-os" / "system" / "monitor_artifacts").glob("monitor_*.json"))
+    assert len(published) == 1
+    assert not (decoy_default_home / ".hermes").exists()
+
+
+def test_parser_default_home_reads_hermes_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    assert build_parser().parse_args([]).hermes_home == tmp_path / "profile"
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert build_parser().parse_args([]).hermes_home == Path.home() / ".hermes"
