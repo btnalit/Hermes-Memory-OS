@@ -1455,6 +1455,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
             failure_reason="llm_empty_content",
             detail="no_model_resolved",
             provider=provider,
+            expected_provider=provider,
             transport=LLM_TRANSPORT_LEGACY_WIRE,
         )
     limits = _call_limits(config)

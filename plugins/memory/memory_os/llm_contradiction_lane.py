@@ -698,6 +698,8 @@ def run_contradiction_lane(
     llm_route_unknown_count = 0
     llm_route_unexpected_expected_model = ""
     llm_route_unexpected_actual_model = ""
+    llm_route_unexpected_expected_provider = ""
+    llm_route_unexpected_routed_provider = ""
 
     for pair in candidate_pairs[:max_pairs]:
         rec_a = pair["a"]
@@ -751,6 +753,8 @@ def run_contradiction_lane(
             llm_route_unexpected_count += 1
             llm_route_unexpected_expected_model = str(_diagnostics.get("llm_expected_model") or "")
             llm_route_unexpected_actual_model = str(_diagnostics.get("llm_actual_model") or "")
+            llm_route_unexpected_expected_provider = str(_diagnostics.get("llm_expected_provider") or "")
+            llm_route_unexpected_routed_provider = str(_diagnostics.get("llm_routed_provider") or "")
         if _diagnostics.get("llm_route_unknown"):
             llm_route_unknown_count += 1
         # ───────────────────────────────────────────────────────────────
@@ -894,4 +898,6 @@ def run_contradiction_lane(
         "llm_route_unknown_count": llm_route_unknown_count,
         "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
         "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
+        "llm_route_unexpected_expected_provider": llm_route_unexpected_expected_provider,
+        "llm_route_unexpected_routed_provider": llm_route_unexpected_routed_provider,
     }

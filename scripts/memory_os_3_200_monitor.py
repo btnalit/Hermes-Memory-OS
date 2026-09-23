@@ -385,12 +385,12 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host has no LLM-call history yet for these lanes to have failed",
         "production_behavior": "warn_if_production",
     },
-    # W4-A / plan row L1: fires only when an LLM lane actually answered with
-    # a model other than the one it was pinned to; clean-host has no live
-    # LLM-call traffic to have ever diverged.
+    # W4-A / plan row L1: fires only when Hermes actually routed an LLM
+    # lane's call to a provider other than the one requested; clean-host has
+    # no live LLM-call traffic to have ever been rerouted.
     "llm_route_unexpected": {
         "classification": "expected_clean_host",
-        "reason": "clean-host has no LLM-call history yet for the answering model to have diverged from the pinned one",
+        "reason": "clean-host has no LLM-call history yet for Hermes to have routed a call to a provider other than the one requested",
         "production_behavior": "warn_if_production",
     },
     "cron_registry_snapshot_member_drift": {
@@ -1650,7 +1650,11 @@ def _llm_route_unexpected_warn_entry(lane: str, summary: dict[str, Any]) -> dict
         "code": "llm_route_unexpected",
         "lane": lane,
         "llm_route_unexpected_count": count,
-        "routed_provider": str(summary.get("llm_provider") or summary.get("llm_transport_provider") or ""),
+        # Samples from the mismatched call itself, never the lane's last-wins
+        # llm_provider (a later normal call would overwrite it with the
+        # expected provider and the WARN would contradict itself).
+        "expected_provider": str(summary.get("llm_route_unexpected_expected_provider") or ""),
+        "routed_provider": str(summary.get("llm_route_unexpected_routed_provider") or ""),
         "expected_model": str(summary.get("llm_route_unexpected_expected_model") or ""),
         "actual_model": str(summary.get("llm_route_unexpected_actual_model") or ""),
     }
@@ -1912,8 +1916,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         ) or "",
                     },
                 })
-            # W4-A / plan row L1: answering model != pinned model -- recorded,
-            # never dropping the answer (see _llm_route_unexpected_warn_entry).
+            # W4-A / plan row L1: routed provider != requested provider --
+            # recorded, never dropping the answer (see _llm_route_unexpected_warn_entry).
             _fj_route_entry = _llm_route_unexpected_warn_entry("fact_judge", fact_judge_backend)
             if _fj_route_entry is not None:
                 warn.append(_fj_route_entry)
@@ -1943,8 +1947,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "llm_route_unknown_count": int(sfe_backend.get("llm_route_unknown_count") or 0),
                 },
             })
-            # W4-A / plan row L1: answering model != pinned model -- recorded,
-            # never dropping the answer (see _llm_route_unexpected_warn_entry).
+            # W4-A / plan row L1: routed provider != requested provider --
+            # recorded, never dropping the answer (see _llm_route_unexpected_warn_entry).
             _sfe_route_entry = _llm_route_unexpected_warn_entry("session_fact_extraction", sfe_backend)
             if _sfe_route_entry is not None:
                 warn.append(_sfe_route_entry)
@@ -2326,8 +2330,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "backfill_failed_count": _backfill_failed,
                         "backfill_outcome": _backfill_outcome,
                     })
-                # W4-A / plan row L1: llm_edge_proposer's answering model !=
-                # pinned model -- recorded, never dropping the answer (see
+                # W4-A / plan row L1: llm_edge_proposer's routed provider !=
+                # requested provider -- recorded, never dropping the answer (see
                 # _llm_route_unexpected_warn_entry).
                 _llm_edge_proposer_step = edge_step_results.get("llm_edge_proposer")
                 if not isinstance(_llm_edge_proposer_step, dict):
@@ -7419,6 +7423,12 @@ def lane_backend_transport_summary():
                 "llm_route_unexpected_actual_model": str(
                     fact_judge_result_summary.get("llm_route_unexpected_actual_model") or ""
                 ),
+                "llm_route_unexpected_expected_provider": str(
+                    fact_judge_result_summary.get("llm_route_unexpected_expected_provider") or ""
+                ),
+                "llm_route_unexpected_routed_provider": str(
+                    fact_judge_result_summary.get("llm_route_unexpected_routed_provider") or ""
+                ),
             }
 
     # session_fact_extraction: latest record from its own runs.jsonl, located
@@ -7455,6 +7465,12 @@ def lane_backend_transport_summary():
                 ),
                 "llm_route_unexpected_actual_model": str(
                     sfe_latest.get("llm_route_unexpected_actual_model") or ""
+                ),
+                "llm_route_unexpected_expected_provider": str(
+                    sfe_latest.get("llm_route_unexpected_expected_provider") or ""
+                ),
+                "llm_route_unexpected_routed_provider": str(
+                    sfe_latest.get("llm_route_unexpected_routed_provider") or ""
                 ),
             }
 
@@ -8666,12 +8682,13 @@ def cognitive_loop_step_evidence():
       "backfill_skipped_count", "backfill_failed_count", "backfill_pass_complete",
       "backfill_outcome", "backfill_duration_ms",
       # W4-A / plan row L1: llm_edge_proposer route-mismatch counters --
-      # when the answering model != the pinned model, recorded (never
-      # dropping the answer) rather than silently absorbed. See
-      # LlmCallResult's docstring (low_clue_recall.py) for the
-      # route_unexpected/route_unknown definition and alias-handling note.
+      # when Hermes routes to a provider other than the one requested,
+      # recorded (never dropping the answer) rather than silently absorbed.
+      # See LlmCallResult's docstring (low_clue_recall.py) for why providers,
+      # not model names, are compared.
       "llm_route_unexpected_count", "llm_route_unknown_count",
       "llm_route_unexpected_expected_model", "llm_route_unexpected_actual_model",
+      "llm_route_unexpected_expected_provider", "llm_route_unexpected_routed_provider",
     )
     edge_step_results = {}
     for step in steps:

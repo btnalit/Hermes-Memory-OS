@@ -616,6 +616,8 @@ def run_fact_judge_lane(
     llm_route_unknown_count = 0
     llm_route_unexpected_expected_model = ""
     llm_route_unexpected_actual_model = ""
+    llm_route_unexpected_expected_provider = ""
+    llm_route_unexpected_routed_provider = ""
     # J1: optional Jev backend diagnostics, aggregated across this tick.
     judge_confidence: float | None = None
     judge_backend_fallback_count = 0
@@ -672,6 +674,8 @@ def run_fact_judge_lane(
             llm_route_unexpected_count += 1
             llm_route_unexpected_expected_model = str(verdict.get("llm_expected_model") or "")
             llm_route_unexpected_actual_model = str(verdict.get("llm_actual_model") or "")
+            llm_route_unexpected_expected_provider = str(verdict.get("llm_expected_provider") or "")
+            llm_route_unexpected_routed_provider = str(verdict.get("llm_routed_provider") or "")
         if verdict.get("llm_route_unknown"):
             llm_route_unknown_count += 1
         # ─────────────────────────────────────────────────────────────────
@@ -731,6 +735,8 @@ def run_fact_judge_lane(
         "llm_route_unknown_count": llm_route_unknown_count,
         "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
         "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
+        "llm_route_unexpected_expected_provider": llm_route_unexpected_expected_provider,
+        "llm_route_unexpected_routed_provider": llm_route_unexpected_routed_provider,
         # J1: optional Jev judge-backend diagnostics (ADD-only). judge_backend
         # is the resolved backend for this tick ("hermes_default" unless the
         # fact_judge_judge_backend knob selects "typesafe_jev").

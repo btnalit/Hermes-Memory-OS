@@ -979,6 +979,8 @@ def run_session_fact_extraction_lane(
             "llm_route_unknown_count": 0,
             "llm_route_unexpected_expected_model": "",
             "llm_route_unexpected_actual_model": "",
+            "llm_route_unexpected_expected_provider": "",
+            "llm_route_unexpected_routed_provider": "",
             # Deferral visibility: without these, an LLM outage and a genuinely
             # fact-free batch both read as "0 facts extracted".
             "sessions_deferred_llm_failure": 0,
@@ -1221,6 +1223,8 @@ def run_session_fact_extraction_lane(
         llm_route_unknown_count = 0
         llm_route_unexpected_expected_model = ""
         llm_route_unexpected_actual_model = ""
+        llm_route_unexpected_expected_provider = ""
+        llm_route_unexpected_routed_provider = ""
         sessions_deferred_llm_failure = 0
         sessions_abandoned_after_max_attempts = 0
         deferral_attempts = read_session_deferral_attempts(store)
@@ -1327,6 +1331,8 @@ def run_session_fact_extraction_lane(
                     llm_route_unexpected_count += 1
                     llm_route_unexpected_expected_model = str(result.get("llm_expected_model") or "")
                     llm_route_unexpected_actual_model = str(result.get("llm_actual_model") or "")
+                    llm_route_unexpected_expected_provider = str(result.get("llm_expected_provider") or "")
+                    llm_route_unexpected_routed_provider = str(result.get("llm_routed_provider") or "")
                 if result.get("llm_route_unknown"):
                     llm_route_unknown_count += 1
                 # ─────────────────────────────────────────────────────────────
@@ -1433,6 +1439,8 @@ def run_session_fact_extraction_lane(
             "llm_route_unknown_count": llm_route_unknown_count,
             "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
             "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
+            "llm_route_unexpected_expected_provider": llm_route_unexpected_expected_provider,
+            "llm_route_unexpected_routed_provider": llm_route_unexpected_routed_provider,
             "sessions_deferred_llm_failure": sessions_deferred_llm_failure,
             "sessions_abandoned_after_max_attempts": sessions_abandoned_after_max_attempts,
             "skipped": False,

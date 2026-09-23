@@ -201,8 +201,8 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         # DU: monitor part 2 reads the ExecutionGate completion ledger's
         # result_summary for this lane_id (judge_backend / fallback / L1
         # transport diagnostics) -- see lane_backend_transport_summary().
-        # W4-A: llm_route_unexpected (plan row L1) -- answering model != the
-        # pinned model, read from that same result_summary.
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read from that same result_summary.
         monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
             "llm_lane_consecutive_failure_streak",
             "fact_judge_backend_state",
@@ -245,8 +245,8 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         # runs.jsonl's latest record for input_source / sessions_skipped_by_
         # principal / group_sessions_* / L1 transport diagnostics -- see
         # lane_backend_transport_summary().
-        # W4-A: llm_route_unexpected (plan row L1) -- answering model != the
-        # pinned model, read from that same runs.jsonl record.
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read from that same runs.jsonl record.
         monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
             "lane_input_stale",
             "llm_lane_consecutive_failure_streak",
@@ -555,8 +555,8 @@ _COGNITIVE_LOOP_STEP_CONTRACTS: dict[str, LaneContract] = {
         reads=("roots.index_path", "low_clue_recall._call_hermes_runtime_model_result (LLM edge judging via Hermes call_llm)"),
         produces=("active graph edges; born at 0.45 + 0.30 x confidence per CLAUDE.md",),
         consumers=("plugins.memory.memory_os.prefetch",),
-        # W4-A: llm_route_unexpected (plan row L1) -- answering model != the
-        # pinned model, read via cognitive_loop_step_evidence's edge_step_results
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read via cognitive_loop_step_evidence's edge_step_results
         # (see the monitor's _edge_fields whitelist).
         monitor_codes=("llm_lane_consecutive_failure_streak", "llm_route_unexpected"),
     ),

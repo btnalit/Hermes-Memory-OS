@@ -379,6 +379,8 @@ def run_llm_proposer(
     llm_route_unknown_count = 0
     llm_route_unexpected_expected_model = ""
     llm_route_unexpected_actual_model = ""
+    llm_route_unexpected_expected_provider = ""
+    llm_route_unexpected_routed_provider = ""
 
     for i in range(len(records)):
         if pairs >= _MAX_PAIRS:
@@ -424,6 +426,8 @@ def run_llm_proposer(
                 llm_route_unexpected_count += 1
                 llm_route_unexpected_expected_model = str(llm_result.get("llm_expected_model") or "")
                 llm_route_unexpected_actual_model = str(llm_result.get("llm_actual_model") or "")
+                llm_route_unexpected_expected_provider = str(llm_result.get("llm_expected_provider") or "")
+                llm_route_unexpected_routed_provider = str(llm_result.get("llm_routed_provider") or "")
             if llm_result.get("llm_route_unknown"):
                 llm_route_unknown_count += 1
             # ─────────────────────────────────────────────────────────────
@@ -514,6 +518,8 @@ def run_llm_proposer(
         "llm_route_unknown_count": llm_route_unknown_count,
         "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
         "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
+        "llm_route_unexpected_expected_provider": llm_route_unexpected_expected_provider,
+        "llm_route_unexpected_routed_provider": llm_route_unexpected_routed_provider,
     }
 
     if audit_path:

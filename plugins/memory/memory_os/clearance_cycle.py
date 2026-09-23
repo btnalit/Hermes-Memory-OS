@@ -299,6 +299,8 @@ def run_clearance_cycle(
     report["llm_route_unknown_count"] = llm_call_stats.get("route_unknown_count", 0)
     report["llm_route_unexpected_expected_model"] = llm_call_stats.get("route_unexpected_expected_model", "")
     report["llm_route_unexpected_actual_model"] = llm_call_stats.get("route_unexpected_actual_model", "")
+    report["llm_route_unexpected_expected_provider"] = llm_call_stats.get("route_unexpected_expected_provider", "")
+    report["llm_route_unexpected_routed_provider"] = llm_call_stats.get("route_unexpected_routed_provider", "")
 
     return report
 
@@ -514,6 +516,8 @@ def _judge_against_permanents(
                 llm_call_stats["route_unexpected_count"] = llm_call_stats.get("route_unexpected_count", 0) + 1
                 llm_call_stats["route_unexpected_expected_model"] = str(diagnostics.get("llm_expected_model") or "")
                 llm_call_stats["route_unexpected_actual_model"] = str(diagnostics.get("llm_actual_model") or "")
+                llm_call_stats["route_unexpected_expected_provider"] = str(diagnostics.get("llm_expected_provider") or "")
+                llm_call_stats["route_unexpected_routed_provider"] = str(diagnostics.get("llm_routed_provider") or "")
             if diagnostics.get("llm_route_unknown"):
                 llm_call_stats["route_unknown_count"] = llm_call_stats.get("route_unknown_count", 0) + 1
 
