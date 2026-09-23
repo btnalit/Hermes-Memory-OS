@@ -5031,6 +5031,9 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `e9a2c92..HEAD`：收敛冲刺 C0（DM）——lane 契约普查表 + 冻结门（23 条 lane 与全部认知循环步骤各有 reads / produces /
+  consumers-或-disposition / monitor_codes，缺项或陈旧即 FAIL）、monitor 三条新 WARN 分级（输入源陈旧 / 追加账本超限 / LLM lane
+  连续失败），按裁定删除 mailbox 与 symbolic_offloader；主会话补上监控码词表守卫与采集路径对生产者 accessor 的守卫。全量 3949 passed。**未部署**。
 - `3d9cb44..HEAD`：图谱卫生 G0（DL）——孤儿边按规范结晶文件判定存活后级联失效（规范视图不可信则整轮 fail-closed 跳过）、
   选槽前解析存活、shadow 账本限长、shadow 行新增 session_ref 与新颖度；主会话审查修掉"索引当权威 + 查询失败即全判孤儿"的清图风险，并补上新计数在两层白名单被丢弃的缺口。
   +18 测试（含两层白名单普查），全量 3803 passed。**未部署**。
@@ -8253,3 +8256,45 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **遗留**：novelty 的 monitor 分级待与 C0 的 monitor 改动一并接线（主会话负责）；`scripts/memory_os_graph_shadow_analyzer.py` 在压缩后
   只能看到保留窗口（归档仍在，未接入）；`MemoryOSIndex.transition_edge_state` 实例包装未透传 `reason`（当前无调用方需要）。
 - **部署**：随规划全部落地后统一部署；部署后首轮预计按 200 条/轮消化存量孤儿边（main 约 6800 条 → 约 34 轮），`target_inactive` 应降至 ≈0。
+
+---
+
+## DM — 收敛冲刺 C0：lane 契约普查 + 冻结门、三条生命周期分级、mailbox / symbolic_offloader 退役（2026-09-23）
+
+- **背景**：四个生命周期故障在生产上沉默了数月——`memory_projection` 的压缩实现了却没接任何 lane、monitor 仍要求已退役的
+  `wandering_mind_*` 源、sannai 的 `full_monitor_refresh` 六周零产出、`session_fact_extraction` 读的是 Hermes 早已不写的
+  `sessions/session_*.json`。顾问裁定"每张表加散文 contract 字段"会漂移，改为声明式小表 + 普查测试。
+- **改动**（Sonnet 子代理实现，主会话审查）：
+  - `lane_contracts.py`：每条 cron lane 与每个认知循环步骤（含三个遗留右脑条件步骤）一条 `LaneContract`——`reads` / `produces`
+    （尽量经 accessor 命名）、`consumers` 或封闭集 `disposition`（`report_only` / `watchdog` / `monitor_only`）、`monitor_codes`；
+    查不实的字段写 `UNVERIFIED`（9 处），绝不猜。`l3_probe_verification` 按裁定登记为 `watchdog`。
+  - 普查测试：真实 lane / 步骤缺条目、条目指向不存在的 lane / 步骤、consumer 模块导入失败、monitor 码在 monitor 中无发射点——任一即 FAIL，
+    这就是冻结门：新 lane 不登记就落不了地。
+  - monitor 三条 WARN（均有 no-sample INFO 分支，clean-host 已登记分类）：`lane_input_stale`（SFE 输入 7 天）、
+    `append_only_ledger_oversized`（shadow / candidate_triage 10MB、v3_seed_edges_daily / cognitive_loop reports 20MB）、
+    `llm_lane_consecutive_failure_streak`（fact_judge / SFE / llm_edge_proposer 连续 ≥5）。
+  - 退役（owner 裁定）：删除 `plugins/modules/messaging/mailbox.py`（连同 messaging 包）、`plugins/modules/context/symbolic_offloader.py`、
+    `eval/.../offload_integrity.py` 及其测试、CLI 模块条目、closure-matrix 行、write surface、monitor 推断与 V7 组件。
+- **主会话整合审查补的两道守卫**（均用真实生产者，破坏即失败、恢复即通过）：
+  - 两条 `monitor_codes` 写成了散文（`"lane_input_stale:session_fact_extraction (new, this task)"`、
+    `"llm_edge_proposer llm_call_failure_reasons (... not yet graded)"`），它们在 monitor 里没有任何发射点——正是"门控词表与生产者漂移"。
+    改为真实码并补齐 fact_judge / SFE / llm_edge_proposer / v3_seed_evidence 的新分级码；新测试要求每个声明码在 monitor 非注释行中以字面量出现。
+  - 远端嵌入式采集器把每个生产者路径重打成字面量，原测试也按同一批字面量造夹具，路径写错会永远互相同意。新测试按生产者自己的 accessor
+    （`v3_seed_edges_daily_path`、`crystallized_root / CANDIDATE_TRIAGE_FILE`、`CognitiveLoopRunner.reports_path`、`fact_judge._verdicts_path`、
+    `session_fact_extraction._runs_path`）落文件，要求真实采集器逐一找到；三种破坏（账本字面量漂移、SFE runs 路径漂移、散文码）各自失败。
+- **独立审查（Sonnet）无阻塞，据其 SHOULD-FIX 再修两处**（各有破坏即失败的反事实）：llm_edge_proposer 整步抛异常时，
+  `_run_step` 写的是 `status: error` 且无 `result`，连续失败采集只认 `outcome == llm_degraded`，每轮都崩的 lane 被判连续失败 0 →
+  PASS——现在 `status == error` 计入失败，原因记 `step_error`（测试用真实 `_run_step` 产出错误形态）；`sessions/` 有文件但一个都
+  stat 不了（`newest_age_seconds` 为 None）时改报 no-sample 而非 pass。审查另提示 5 条 `@requires_internal_docs` 测试仍引用
+  内部文档里的 Mailbox 行：本地与 CI 均无 `docs/internal-memory-os/`，这些测试恒跳过，记为遗留。
+- **测试**：lane 契约普查 145（含参数化）、monitor +15（含路径守卫与两条审查反事实）/ −2（V7 可选组件豁免的两条，唯一实例随 offloader 删除），
+  删除 mailbox / offloader / offload_integrity 相关测试；
+  全量 3949 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
+- **遗留**：
+  - `V7_OPTIONAL_COMPONENT_REASONS` 现为空（机制保留，暂无实例；原唯一实例的测试随 offloader 删除）。
+  - 契约表不含"退役路径"字段：按规划由退役 PR（C4/6/7/8）承担，普查只保证"生产者 → 消费者 → 监控"三项可查。
+  - 9 处 `UNVERIFIED` 读源待逐条核实。
+  - G0 审查 NIT：孤儿级联 SQL 只认 `crystallized_record`，prefetch 的 `_GRAPH_CRYSTALLIZED_TYPES` 另收 `crystallized` 别名（当前无生产者发出），应合并为一个常量。
+- **部署**：随规划全部落地后统一部署。部署后预期：main 上 `lane_input_stale`（SFE，session_*.json 最新 2026-05）与 shadow / candidate_triage /
+  v3_seed_edges / cognitive_loop reports 的 `append_only_ledger_oversized` 即刻报出（证明门是活的），shadow 一项在 G0 压缩生效后应消失；
+  核对主机上已删模块的旧文件与 `system-modules/mailbox`、`symbolic_offloader` 旧产物是否残留。

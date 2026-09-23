@@ -74,8 +74,8 @@ def test_closure_matrix_check_runs_when_internal_docs_are_missing(tmp_path: Path
     assert report["closure_status"] == "runtime_evidence_required"
     assert report["runtime_evidence_required"] is True
     assert set(report["missing_internal_docs"]) == {"closure_matrix", "active_roadmap"}
-    assert report["live_module_count"] == 32
-    assert report["matrix_module_count"] == 44
+    assert report["live_module_count"] == 30
+    assert report["matrix_module_count"] == 42
     assert report["unknown_live_modules"] == []
     assert report["missing_live_modules"] == []
     assert report["missing_contract_labels"] == []
@@ -370,8 +370,8 @@ def test_public_contract_rejects_invalid_classification(tmp_path: Path) -> None:
     shadow_repo = tmp_path / "repo"
     contract_path = _copy_public_contract(repo_root, shadow_repo)
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    mailbox = next(row for row in contract["modules"] if row["module"] == "Mailbox")
-    mailbox["cadence_class"] = "event_driven_fast with cooldown"
+    household_digest = next(row for row in contract["modules"] if row["module"] == "Household Digest")
+    household_digest["cadence_class"] = "daily_once with cooldown"
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
 
     report = build_report(shadow_repo)
@@ -380,7 +380,7 @@ def test_public_contract_rejects_invalid_classification(tmp_path: Path) -> None:
     assert report["invalid_row_count"] == 1
     assert any(
         finding["code"] == "invalid_closure_classification"
-        and finding["module"] == "Mailbox"
+        and finding["module"] == "Household Digest"
         and finding["errors"] == ["cadence_class"]
         for finding in report["findings"]
     )
@@ -394,8 +394,8 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
 
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
-    assert report["live_module_count"] == 32
-    assert report["matrix_module_count"] == 45
+    assert report["live_module_count"] == 30
+    assert report["matrix_module_count"] == 43
     assert report["active_work_item_count"] == 20
     assert report["active_work_mapping_count"] == 20
     assert report["missing_live_modules"] == []

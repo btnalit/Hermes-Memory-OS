@@ -3362,14 +3362,6 @@ def _module_definitions() -> list[dict[str, Any]]:
             "unavailable_reason": "migration_controller emits regime signals; autonomy flips remain external owner-reviewed gates",
         },
         {
-            "module": "symbolic_offloader",
-            "kind": "context",
-            "package": "plugins.modules.context.symbolic_offloader",
-            "factory": _symbolic_offloader_module,
-            "runner": "",
-            "unavailable_reason": "symbolic_offloader is task-local lossless offload and is not exposed through generic run-once",
-        },
-        {
             "module": "abstraction_distillation",
             "kind": "context",
             "package": "plugins.modules.context.abstraction_distillation",
@@ -3392,14 +3384,6 @@ def _module_definitions() -> list[dict[str, Any]]:
             "factory": _inner_drive_module,
             "runner": "",
             "unavailable_reason": "inner_drive run_once mutates working/candidates and is not exposed through generic dry-run",
-        },
-        {
-            "module": "mailbox",
-            "kind": "messaging",
-            "package": "plugins.modules.messaging.mailbox",
-            "factory": _mailbox_module,
-            "runner": "",
-            "unavailable_reason": "mailbox run_once is not commandized in v0.1",
         },
         {
             "module": "household_digest",
@@ -3623,12 +3607,6 @@ def _migration_controller_module(store: MemoryOSStore) -> Any:
     return MigrationControllerModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
-def _symbolic_offloader_module(store: MemoryOSStore) -> Any:
-    from plugins.modules.context.symbolic_offloader import SymbolicOffloaderModule
-
-    return SymbolicOffloaderModule(store.roots.hermes_home, profile=store.roots.profile or "default")
-
-
 def _abstraction_distillation_module(store: MemoryOSStore) -> Any:
     from plugins.modules.context.abstraction_distillation import AbstractionDistillationModule
 
@@ -3645,12 +3623,6 @@ def _inner_drive_module(store: MemoryOSStore) -> Any:
     from plugins.modules.cognition.inner_drive import InnerDriveRuntimeModule
 
     return InnerDriveRuntimeModule(store.roots.hermes_home, profile=store.roots.profile or "default")
-
-
-def _mailbox_module(store: MemoryOSStore) -> Any:
-    from plugins.modules.messaging.mailbox import MailboxNoSendModule
-
-    return MailboxNoSendModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _household_digest_module(store: MemoryOSStore) -> Any:

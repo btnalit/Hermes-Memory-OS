@@ -890,6 +890,375 @@ def test_classify_snapshot_without_lane_last_run_section_adds_no_entry():
     assert not any("lane_last_run" in item.get("code", "") for item in classification["info"])
 
 
+# ── W1-B: lane-contract freeze-gate gradings ────────────────────────────
+# (lane_input_freshness / append_only_ledger_size / llm_lane_failure_streak)
+
+
+def test_lane_input_freshness_summary_reads_real_sessions_directory(tmp_path):
+    """Exercises the real embedded collector against an actual sessions/
+    directory shaped the way hermes-media main looks in production
+    (verified 2026-09-23): session_*.json files with an old mtime, plus
+    other non-matching files that must not be counted."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    old_file = sessions_dir / "session_20260513_224454_41ffcf.json"
+    old_file.write_text("{}", encoding="utf-8")
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=133)).timestamp()
+    os.utime(old_file, (old_timestamp, old_timestamp))
+    # Non-matching file (real production also has bare-named .jsonl files
+    # here) must not be counted as a session_*.json input file.
+    (sessions_dir / "20260513_125515_532c4dab.jsonl").write_text("{}", encoding="utf-8")
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_input_freshness_summary"]()
+
+    lane = summary["lanes"]["session_fact_extraction"]
+    assert lane["directory_exists"] is True
+    assert lane["file_count"] == 1
+    assert lane["newest_age_seconds"] > 132 * 24 * 3600
+    assert lane["newest_age_seconds"] < 134 * 24 * 3600
+
+
+def test_lane_input_freshness_summary_missing_directory_reports_no_files(tmp_path):
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["lane_input_freshness_summary"]()
+
+    lane = summary["lanes"]["session_fact_extraction"]
+    assert lane["directory_exists"] is False
+    assert lane["file_count"] == 0
+    assert lane["newest_age_seconds"] is None
+
+
+def test_classify_snapshot_lane_input_stale_warns_past_threshold():
+    """This is the case that must fire on production per the task background:
+    session_fact_extraction's sessions/session_*.json input source has been
+    dead since ~2026-05/06 while the lane itself reports 'ok'/'skipped'
+    forever. Counterfactual: before classify_snapshot read
+    snapshot['lane_input_freshness'], this WARN could never be emitted no
+    matter how stale the real input was."""
+    snapshot = _healthy_snapshot()
+    snapshot["lane_input_freshness"] = {
+        "schema_version": "memory-os.lane_input_freshness.v0",
+        "lanes": {
+            "session_fact_extraction": {
+                "directory_exists": True,
+                "file_count": 141,
+                "newest_mtime_utc": "2026-05-13T22:44:54+00:00",
+                "newest_age_seconds": float(133 * 24 * 3600),
+            }
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    warns = [item for item in classification["warn"] if item["code"] == "lane_input_stale"]
+    assert warns, classification["warn"]
+    assert warns[0]["lane"] == "session_fact_extraction"
+    assert warns[0]["age_seconds"] == float(133 * 24 * 3600)
+    assert warns[0]["threshold_seconds"] == monitor.LANE_INPUT_STALE_THRESHOLD_SECONDS
+
+
+def test_classify_snapshot_lane_input_freshness_no_sample_when_no_files():
+    """A directory that exists but has never had a matching session_*.json
+    file (or does not exist at all) cannot be told apart from 'this profile
+    never had this input in the first place' -- must be no-sample, never a
+    guessed PASS or WARN."""
+    snapshot = _healthy_snapshot()
+    snapshot["lane_input_freshness"] = {
+        "schema_version": "memory-os.lane_input_freshness.v0",
+        "lanes": {
+            "session_fact_extraction": {
+                "directory_exists": False,
+                "file_count": 0,
+                "newest_mtime_utc": "",
+                "newest_age_seconds": None,
+            }
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "lane_input_freshness_no_sample" for item in classification["info"])
+    assert not any(item["code"] == "lane_input_stale" for item in classification["warn"])
+    assert not any(item["code"] == "lane_input_freshness_ok" for item in classification["pass"])
+
+
+def test_classify_snapshot_lane_input_freshness_ok_when_recent():
+    snapshot = _healthy_snapshot()
+    snapshot["lane_input_freshness"] = {
+        "schema_version": "memory-os.lane_input_freshness.v0",
+        "lanes": {
+            "session_fact_extraction": {
+                "directory_exists": True,
+                "file_count": 3,
+                "newest_mtime_utc": "2026-09-23T00:00:00+00:00",
+                "newest_age_seconds": 3600.0,
+            }
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "lane_input_freshness_ok" for item in classification["pass"])
+    assert not any(item["code"] == "lane_input_stale" for item in classification["warn"])
+
+
+def test_append_only_ledger_size_summary_reads_real_file_sizes(tmp_path):
+    (tmp_path / "memory-os" / "system").mkdir(parents=True)
+    (tmp_path / "memory-os" / "crystallized").mkdir(parents=True)
+    (tmp_path / "system-modules" / "cognitive_loop").mkdir(parents=True)
+    (tmp_path / "memory-os" / "system" / "graph_layer_shadow.jsonl").write_bytes(b"x" * 1234)
+    (tmp_path / "memory-os" / "crystallized" / "candidate_triage.jsonl").write_bytes(b"y" * 5678)
+    # v3_seed_edges_daily.jsonl intentionally left absent.
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["append_only_ledger_size_summary"]()
+
+    ledgers = summary["ledgers"]
+    assert ledgers["graph_layer_shadow"]["exists"] is True
+    assert ledgers["graph_layer_shadow"]["size_bytes"] == 1234
+    assert ledgers["candidate_triage"]["exists"] is True
+    assert ledgers["candidate_triage"]["size_bytes"] == 5678
+    assert ledgers["v3_seed_edges_daily"]["exists"] is False
+    assert ledgers["v3_seed_edges_daily"]["size_bytes"] is None
+    assert ledgers["cognitive_loop_reports"]["exists"] is False
+
+
+def test_classify_snapshot_append_only_ledger_oversized_warns_above_threshold():
+    """Sizes mirror hermes-media main production (verified 2026-09-23):
+    graph_layer_shadow ~15.1MB, candidate_triage ~13.9MB, v3_seed_edges_daily
+    ~28.2MB -- all already above their WARN thresholds, which is the point:
+    these ledgers grow forever with no compaction."""
+    snapshot = _healthy_snapshot()
+    snapshot["append_only_ledger_size"] = {
+        "schema_version": "memory-os.append_only_ledger_size.v0",
+        "ledgers": {
+            "graph_layer_shadow": {"path": "memory-os/system/graph_layer_shadow.jsonl", "exists": True, "size_bytes": 15134344},
+            "candidate_triage": {"path": "memory-os/crystallized/candidate_triage.jsonl", "exists": True, "size_bytes": 13873851},
+            "v3_seed_edges_daily": {"path": "memory-os/system/v3_seed_edges_daily.jsonl", "exists": True, "size_bytes": 28182874},
+            "cognitive_loop_reports": {"path": "system-modules/cognitive_loop/reports.jsonl", "exists": True, "size_bytes": 53971439},
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    warned_ledgers = {item["ledger"] for item in classification["warn"] if item["code"] == "append_only_ledger_oversized"}
+    assert warned_ledgers == {"graph_layer_shadow", "candidate_triage", "v3_seed_edges_daily", "cognitive_loop_reports"}
+
+
+def test_classify_snapshot_append_only_ledger_size_no_sample_when_missing():
+    snapshot = _healthy_snapshot()
+    snapshot["append_only_ledger_size"] = {
+        "schema_version": "memory-os.append_only_ledger_size.v0",
+        "ledgers": {
+            "graph_layer_shadow": {"path": "memory-os/system/graph_layer_shadow.jsonl", "exists": False, "size_bytes": None},
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "append_only_ledger_size_no_sample" for item in classification["info"])
+    assert not any(item["code"] == "append_only_ledger_oversized" for item in classification["warn"])
+
+
+def test_w1b_collector_paths_match_the_real_producers(tmp_path):
+    """Path-drift guard (CLAUDE.md: "a path literal repeated at each call
+    site is how a producer and its consumers drift onto different
+    directories -- silently, because exists() just returns False").
+
+    The embedded collectors re-type every producer path as a literal, and
+    the tests above build their fixtures from those same literals, so they
+    would agree with a wrong path forever. Here every file is placed where
+    the PRODUCER's own accessor puts it, and the real embedded collectors
+    must find each one.
+    """
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.crystallized import CANDIDATE_TRIAGE_FILE
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.v3_seed_evidence import v3_seed_edges_daily_path
+    from plugins.modules.cognition.session_fact_extraction import _runs_path
+    from plugins.modules.governance.fact_judge import _verdicts_path
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    reports_path = CognitiveLoopRunner(store).reports_path
+
+    ledger_paths = {
+        # graph_layer_shadow has no accessor; prefetch and edge_weight_feedback
+        # both build it from memory_os_root.
+        "graph_layer_shadow": roots.memory_os_root / "system" / "graph_layer_shadow.jsonl",
+        "candidate_triage": roots.crystallized_root / CANDIDATE_TRIAGE_FILE,
+        "v3_seed_edges_daily": v3_seed_edges_daily_path(store),
+        "cognitive_loop_reports": reports_path,
+    }
+    assert {
+        key: path.relative_to(tmp_path).as_posix() for key, path in ledger_paths.items()
+    } == monitor.APPEND_ONLY_LEDGER_RELATIVE_PATHS
+    for size, path in enumerate(ledger_paths.values(), start=11):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    ledgers = namespace["append_only_ledger_size_summary"]()["ledgers"]
+    assert {key: ledgers[key]["size_bytes"] for key in ledger_paths} == {
+        key: path.stat().st_size for key, path in ledger_paths.items()
+    }
+
+    # LLM-lane streak sources, one attempted-and-failed record each.
+    fact_judge_path = _verdicts_path(store)
+    fact_judge_path.parent.mkdir(parents=True, exist_ok=True)
+    fact_judge_path.write_text(json.dumps({"failure_reason": "llm_empty_content"}) + "\n", encoding="utf-8")
+    sfe_path = _runs_path(store)
+    sfe_path.parent.mkdir(parents=True, exist_ok=True)
+    sfe_path.write_text(
+        json.dumps({"llm_calls": 1, "llm_failures_by_reason": {"llm_empty_content": 1}}) + "\n",
+        encoding="utf-8",
+    )
+    reports_path.write_text(
+        json.dumps({"steps": [{"step": "llm_edge_proposer", "result": {"outcome": "llm_degraded"}}]}) + "\n",
+        encoding="utf-8",
+    )
+    streak_lanes = namespace["llm_lane_failure_streak_summary"]()["lanes"]
+    assert {lane: streak_lanes[lane]["consecutive_failure_streak"] for lane in streak_lanes} == {
+        "fact_judge": 1,
+        "session_fact_extraction": 1,
+        "llm_edge_proposer": 1,
+    }
+
+    # session_fact_extraction's input directory (session_fact_extraction.py
+    # builds it from roots.hermes_home).
+    sessions_root = roots.hermes_home / "sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+    (sessions_root / "session_x.json").write_text("{}", encoding="utf-8")
+    freshness = namespace["lane_input_freshness_summary"]()["lanes"]["session_fact_extraction"]
+    assert freshness["file_count"] == 1
+
+
+def test_llm_edge_proposer_step_that_raised_counts_toward_the_failure_streak(tmp_path):
+    """Counterfactual: a step that raises is recorded by the real
+    CognitiveLoopRunner._run_step as status "error" with no result. Reading
+    only result.outcome == "llm_degraded" scored a lane that crashes every
+    cycle as streak 0 -> llm_lane_failure_streak_ok, a PASS for the worst
+    failure the grading exists to catch."""
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    runner = CognitiveLoopRunner(MemoryOSStore(roots))
+
+    def _crash(context):
+        raise RuntimeError("proposer blew up")
+
+    error_step = runner._run_step("llm_edge_proposer", _crash, {})
+    assert error_step["status"] == "error" and "result" not in error_step, "sanity: the real producer's error shape"
+    runner.reports_path.parent.mkdir(parents=True, exist_ok=True)
+    runner.reports_path.write_text(
+        "".join(json.dumps({"steps": [error_step]}) + "\n" for _ in range(5)),
+        encoding="utf-8",
+    )
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["llm_lane_failure_streak_summary"]()
+    lane = summary["lanes"]["llm_edge_proposer"]
+    assert lane["consecutive_failure_streak"] == 5
+    assert lane["last_failure_reason"] == "step_error"
+
+    classification = classify_snapshot({"llm_lane_failure_streak": summary})
+    assert any(
+        item["code"] == "llm_lane_consecutive_failure_streak" and item["lane"] == "llm_edge_proposer"
+        for item in classification["warn"]
+    )
+
+
+def test_classify_snapshot_lane_input_freshness_no_sample_when_no_file_could_be_stat_ed():
+    """Files present but none stat-able leaves newest_age_seconds None; that
+    is no evidence either way and must read as no-sample, never a pass."""
+    snapshot = {
+        "lane_input_freshness": {
+            "lanes": {
+                "session_fact_extraction": {
+                    "directory_exists": True,
+                    "file_count": 3,
+                    "newest_mtime_utc": "",
+                    "newest_age_seconds": None,
+                }
+            }
+        }
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "lane_input_freshness_no_sample" for item in classification["info"])
+    assert not any(item["code"] == "lane_input_freshness_ok" for item in classification["pass"])
+
+
+def test_llm_lane_failure_streak_summary_reads_real_fact_judge_verdicts_ledger(tmp_path):
+    """Verdict shape mirrors the real fact_judge.py record (candidate_id/
+    durable_fact/failure_reason/judged_at/reason/schema_version) and the
+    values mirror hermes-media main production (verified 2026-09-23): the
+    last several verdicts are ALL failure_reason=llm_empty_content -- a live
+    incident, not a hypothetical."""
+    module_dir = tmp_path / "memory-os" / "system-modules" / "fact_judge"
+    module_dir.mkdir(parents=True)
+    verdicts_path = module_dir / "verdicts.jsonl"
+    lines = []
+    for index in range(3):
+        lines.append(json.dumps({
+            "schema_version": "memory-os.fact_judge_verdict.v0",
+            "candidate_id": f"cand_ok_{index}",
+            "durable_fact": True,
+            "reason": "heuristic_match",
+            "failure_reason": None,
+            "judged_at": "2026-09-20T00:00:00Z",
+        }))
+    for index in range(6):
+        lines.append(json.dumps({
+            "schema_version": "memory-os.fact_judge_verdict.v0",
+            "candidate_id": f"cand_fail_{index}",
+            "durable_fact": False,
+            "reason": "heuristic_fallback",
+            "failure_reason": "llm_empty_content",
+            "judged_at": "2026-09-23T00:00:00Z",
+        }))
+    verdicts_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["llm_lane_failure_streak_summary"]()
+
+    lane = summary["lanes"]["fact_judge"]
+    assert lane["sample_count"] == 9
+    assert lane["consecutive_failure_streak"] == 6
+    assert lane["last_failure_reason"] == "llm_empty_content"
+
+
+def test_classify_snapshot_llm_lane_consecutive_failure_streak_warns_at_threshold():
+    snapshot = _healthy_snapshot()
+    snapshot["llm_lane_failure_streak"] = {
+        "schema_version": "memory-os.llm_lane_failure_streak.v0",
+        "tail_limit": 50,
+        "lanes": {
+            "fact_judge": {"sample_count": 60, "consecutive_failure_streak": 60, "last_failure_reason": "llm_empty_content"},
+            "session_fact_extraction": {"sample_count": 0, "consecutive_failure_streak": 0, "last_failure_reason": ""},
+            "llm_edge_proposer": {"sample_count": 4, "consecutive_failure_streak": 1, "last_failure_reason": ""},
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    warned_lanes = {item["lane"] for item in classification["warn"] if item["code"] == "llm_lane_consecutive_failure_streak"}
+    assert warned_lanes == {"fact_judge"}
+    assert any(item["code"] == "llm_lane_failure_streak_no_sample" and item["value"]["lane"] == "session_fact_extraction" for item in classification["info"])
+    assert any(item["code"] == "llm_lane_failure_streak_ok" and item["value"]["lane"] == "llm_edge_proposer" for item in classification["pass"])
+
+
+def test_new_w1b_warn_codes_are_registered_for_clean_host():
+    for code in ("lane_input_stale", "append_only_ledger_oversized", "llm_lane_consecutive_failure_streak"):
+        assert code in monitor.CLEAN_HOST_WARN_CLASSIFICATIONS, code
+        assert monitor.CLEAN_HOST_WARN_CLASSIFICATIONS[code]["production_behavior"] == "warn_if_production"
+
+
 def test_continuity_freshness_summary_reads_real_ledger_and_counts_correctly(tmp_path):
     """Exercises the real embedded-script collector (continuity_freshness_summary(),
     added alongside the classify_snapshot wiring tested above) against an
@@ -1780,7 +2149,7 @@ def test_v7_governance_summary_defaults_to_missing_shadow_components():
     summary = summarize_v7_governance(snapshot)
 
     assert summary["schema_version"] == "memory-os.v7_governance_summary.v0"
-    assert summary["component_count"] == 18
+    assert summary["component_count"] == 17
     assert summary["shadow_live_component_count"] == 0
     assert summary["acting_component_count"] == 0
     assert summary["live_guard_registered_count"] == 0
@@ -1792,7 +2161,6 @@ def test_v7_governance_summary_defaults_to_missing_shadow_components():
     assert summary["confabulation_detection_status"] == "missing"
     assert summary["crystallized_revalidator_status"] == "missing"
     assert summary["cross_check_anchoring_status"] == "missing"
-    assert summary["component_status"]["symbolic_offloader"] == "missing"
     assert summary["component_status"]["judge_calibration"] == "missing"
     assert summary["component_status"]["candidate_review"] == "missing"
     assert summary["component_status"]["shadow_recall"] == "missing"
@@ -1802,7 +2170,7 @@ def test_v7_governance_summary_defaults_to_missing_shadow_components():
     assert summary["component_status"]["abstraction_distillation"] == "missing"
 
 
-def test_v7_governance_summary_reports_required_and_optional_component_policy():
+def test_v7_governance_summary_reports_required_component_policy():
     snapshot = _healthy_snapshot()
 
     summary = summarize_v7_governance(snapshot)
@@ -1810,10 +2178,7 @@ def test_v7_governance_summary_reports_required_and_optional_component_policy():
     assert summary["required_component_count"] == 17
     assert summary["present_required_component_count"] == 0
     assert "confidence_router" in summary["missing_required_components"]
-    assert "symbolic_offloader" not in summary["missing_required_components"]
-    assert summary["optional_components"]["symbolic_offloader"]["status"] == "missing"
-    assert summary["optional_components"]["symbolic_offloader"]["intentionally_absent"] is True
-    assert summary["optional_components"]["symbolic_offloader"]["absence_reason"] == "optional_audit_level_default_disabled"
+    assert summary["optional_components"] == {}
     assert summary["profile_expected_component_policy"] == "production"
 
 
@@ -1827,22 +2192,6 @@ def test_classify_snapshot_fails_live_profile_when_required_v7_component_missing
     assert any(
         item["code"] == "v7_required_components_missing" and item["components"] == ["confidence_router"]
         for item in classification["fail"]
-    )
-
-
-def test_classify_snapshot_warns_clean_host_when_optional_v7_component_is_absent_with_reason():
-    snapshot = _healthy_snapshot()
-    snapshot["monitor_profile"] = "clean_host"
-    snapshot["v7_governance"] = {"components": _v7_component_records(exclude={"symbolic_offloader"})}
-
-    classification = classify_snapshot(snapshot)
-
-    assert not any(item["code"] == "v7_required_components_missing" for item in classification["fail"])
-    assert any(
-        item["code"] == "clean_host_v7_optional_component_intentionally_absent"
-        and item["component"] == "symbolic_offloader"
-        and item["reason"] == "optional_audit_level_default_disabled"
-        for item in classification["warn"]
     )
 
 
@@ -2356,13 +2705,6 @@ def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
         "migration_live_applied": False,
         "actual_execute": False,
     }
-    snapshot["module_artifacts"]["symbolic_offloader"] = {
-        "status": "ok",
-        "report_count": 1,
-        "ref_count": 1,
-        "canonical_state_changed": False,
-        "actual_execute": False,
-    }
     snapshot["module_artifacts"]["abstraction_distillation"] = {
         "status": "ok",
         "item_count": 3,
@@ -2416,13 +2758,12 @@ def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
     assert summary["component_status"]["provisional"] == "live-shadow"
     assert summary["component_status"]["cascade_routing_policy"] == "live-shadow"
     assert summary["component_status"]["migration_controller"] == "live-shadow"
-    assert summary["component_status"]["symbolic_offloader"] == "live-shadow"
     assert summary["component_status"]["abstraction_distillation"] == "live-shadow"
     assert summary["simulation_coverage_status"] == "live-shadow"
     assert summary["confabulation_detection_status"] == "live-shadow"
     assert summary["crystallized_revalidator_status"] == "live-shadow"
     assert summary["cross_check_anchoring_status"] == "live-shadow"
-    assert summary["shadow_live_component_count"] >= 18
+    assert summary["shadow_live_component_count"] >= 17
     assert any(item["code"] == "v7_shadow_live_components_visible" for item in classification["pass"])
     assert any(item["code"] == "grounded_expression_verdict_distribution_visible" for item in classification["pass"])
     assert any(item["code"] == "grounded_expression_alternate_left_map_substrate_ready" for item in classification["pass"])
@@ -7066,7 +7407,6 @@ def _healthy_module_artifacts() -> dict:
             "latest_outcome_feedback_count": 0,
             "outcome_feedback_missing_count": 0,
         },
-        "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }
 
 

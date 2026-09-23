@@ -124,8 +124,6 @@ def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, 
     assert modules["provisional"]["status_available"] is True
     assert modules["cascade_routing_policy"]["status_available"] is True
     assert modules["migration_controller"]["status_available"] is True
-    assert modules["symbolic_offloader"]["status_available"] is True
-    assert modules["symbolic_offloader"]["commandized"] is False
     assert modules["abstraction_distillation"]["status_available"] is True
     assert modules["grounded_expression_judge"]["status_available"] is True
     assert modules["grounded_expression_judge"]["commandized"] is False

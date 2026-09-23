@@ -112,14 +112,6 @@
       "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
-      "module": "Symbolic Offloader",
-      "live_modules": ["symbolic_offloader"],
-      "delivery_class": "none",
-      "state_change_class": "context_projection",
-      "cadence_class": "on_demand",
-      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
-    },
-    {
       "module": "Abstraction Distillation",
       "live_modules": ["abstraction_distillation"],
       "delivery_class": "none",
@@ -141,14 +133,6 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "cycle_each",
-      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
-    },
-    {
-      "module": "Mailbox",
-      "live_modules": ["mailbox"],
-      "delivery_class": "hermes_mailbox_internal",
-      "state_change_class": "monitor_only",
-      "cadence_class": "event_driven_fast",
       "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
