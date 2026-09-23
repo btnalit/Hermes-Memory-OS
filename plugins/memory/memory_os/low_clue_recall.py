@@ -1243,6 +1243,16 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
     # imports agent.* / hermes_cli.* / tools.* at call time (verified on
     # production Hermes' auxiliary_client.py), so restoring sys.path before
     # calling would turn every call into an ImportError.
+    limits = _call_limits(config)
+    if limits is None:
+        return LlmCallResult(
+            failure_reason="llm_exception",
+            detail="invalid_call_config: timeout_ms/max_tokens",
+            provider=provider,
+            model=model,
+            transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+        )
+    timeout_s, max_tokens = limits
     with _hermes_call_llm_scope() as (call_llm, import_detail):
         if call_llm is None:
             return LlmCallResult(
@@ -1253,8 +1263,6 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
                 transport=LLM_TRANSPORT_HERMES_CALL_LLM,
             )
 
-        timeout_s = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
-        max_tokens = int(config.get("max_tokens") or 1024)
         temperature = config.get("temperature", 0)
         route_info: dict[str, Any] = {}
         latency_info: dict[str, Any] = {}
@@ -1348,8 +1356,16 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
             provider=provider,
             transport=LLM_TRANSPORT_LEGACY_WIRE,
         )
-    timeout = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
-    max_tokens = int(config.get("max_tokens") or 1024)
+    limits = _call_limits(config)
+    if limits is None:
+        return LlmCallResult(
+            failure_reason="llm_exception",
+            detail="invalid_call_config: timeout_ms/max_tokens",
+            provider=provider,
+            model=model,
+            transport=LLM_TRANSPORT_LEGACY_WIRE,
+        )
+    timeout, max_tokens = limits
     start = time.monotonic()
     text = ""
     try:
@@ -1391,6 +1407,17 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
         latency_ms=latency_ms,
         transport=LLM_TRANSPORT_LEGACY_WIRE,
     )
+
+
+def _call_limits(config: dict[str, Any]) -> tuple[float, int] | None:
+    """(timeout seconds, max_tokens) from a lane config, or None if either is
+    not numeric -- the transports must return a typed failure, never raise."""
+    try:
+        timeout = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
+        max_tokens = int(config.get("max_tokens") or 1024)
+    except (TypeError, ValueError):
+        return None
+    return timeout, max_tokens
 
 
 def _usage_to_dict(usage: Any) -> dict[str, int] | None:
@@ -1473,13 +1500,16 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
     ``sys.path``. Restoring the import state before the call -- the original
     shape of this helper -- turns every call into an ImportError.
 
-    Mirrors the defensive sys.path/sys.modules scope
-    :func:`_resolve_hermes_default_runtime` uses for ``hermes_cli`` (evict a
-    phantom namespace ``agent`` package, prepend HERMES_AGENT_ROOT or
-    ``/usr/local/lib/hermes-agent``, restore both on exit) but is
-    self-contained rather than shared with that function, since that
-    function's own restore-on-exception behavior is independently tested and
-    should not be disturbed by this migration.
+    When ``call_llm`` already imports on the process's own ``sys.path`` (the
+    host has Hermes loaded), the scope changes nothing and restores nothing:
+    those modules belong to the host, and deleting one it imported lazily
+    would make its next import re-execute the module. Only when the scope
+    itself prepends HERMES_AGENT_ROOT or ``/usr/local/lib/hermes-agent``
+    (evicting a phantom namespace ``agent`` package first, as
+    :func:`_resolve_hermes_default_runtime` does) does it restore ``sys.path``
+    on exit and drop the ``agent`` / ``hermes_cli`` / ``tools`` modules the
+    call pulled in from that root. Self-contained rather than shared with
+    that function, whose restore behaviour is independently tested.
 
     Yields (call_llm, "") on success, or (None, detail) on failure. Import
     failure here is FAIL-CLOSED for the hermes_call_llm transport -- it is
@@ -1488,12 +1518,12 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
     legacy wire stays reachable only via the explicit ``llm_transport`` knob).
     """
     original_sys_path = list(sys.path)
-    original_agent_modules = {
+    original_host_modules = {
         name: module
         for name, module in sys.modules.items()
-        if (name == "agent" or name.startswith("agent."))
-        and getattr(module, "__file__", None) is not None
+        if _is_hermes_host_module_name(name) and getattr(module, "__file__", None) is not None
     }
+    path_mutated = False
     try:
         call_llm: Any | None = None
         detail = ""
@@ -1503,6 +1533,7 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
             call_llm = None
 
         if call_llm is None:
+            path_mutated = True
             for _name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
                 _mod = sys.modules.get(_name)
                 if _mod is not None and getattr(_mod, "__file__", None) is None:
@@ -1529,13 +1560,17 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
                 detail = f"{type(exc).__name__}: {exc}"[:160]
         yield call_llm, detail
     finally:
-        sys.path[:] = original_sys_path
-        for name in list(sys.modules):
-            if name == "agent" or name.startswith("agent."):
-                if name not in original_agent_modules:
+        if path_mutated:
+            sys.path[:] = original_sys_path
+            for name in list(sys.modules):
+                if _is_hermes_host_module_name(name) and name not in original_host_modules:
                     del sys.modules[name]
-        for name, module in original_agent_modules.items():
-            sys.modules.setdefault(name, module)
+            for name, module in original_host_modules.items():
+                sys.modules.setdefault(name, module)
+
+
+def _is_hermes_host_module_name(name: str) -> bool:
+    return any(name == root or name.startswith(f"{root}.") for root in ("agent", "hermes_cli", "tools"))
 
 
 def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:

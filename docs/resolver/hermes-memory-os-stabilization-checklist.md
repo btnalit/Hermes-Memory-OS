@@ -5033,7 +5033,7 @@ sannai-community 仓库 README。）
 
 - `d3adc7c..HEAD`：LLM 调用面迁移 L1（DN）——五条治理 LLM lane 与 low_clue 判官改走 Hermes 自己的 `call_llm`（显式 provider、
   `model=None`，`-900k` 等私有别名由 Hermes 自行归一，Memory-OS 不再做 provider 特例），失败闭集化、导入失败 fail-closed，旧 wire 只经
-  `llm_transport` knob 回滚；主会话修掉"导入作用域先恢复再调用"（真 Hermes 惰性导入必然 ImportError）与"knob 登记却无人读"两处。全量 __FULL__。**未部署**。
+  `llm_transport` knob 回滚；主会话修掉"导入作用域先恢复再调用"（真 Hermes 惰性导入必然 ImportError）与"knob 登记却无人读"两处。全量 3966 passed。**未部署**。
 - `e9a2c92..HEAD`：收敛冲刺 C0（DM）——lane 契约普查表 + 冻结门（23 条 lane 与全部认知循环步骤各有 reads / produces /
   consumers-或-disposition / monitor_codes，缺项或陈旧即 FAIL）、monitor 三条新 WARN 分级（输入源陈旧 / 追加账本超限 / LLM lane
   连续失败），按裁定删除 mailbox 与 symbolic_offloader；主会话补上监控码词表守卫与采集路径对生产者 accessor 的守卫。全量 3949 passed。**未部署**。
@@ -8332,9 +8332,17 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
     `register_override` 写覆盖，验证不带 `llm_transport` 的 lane config 被切到 `legacy_wire`。
   - **monitor `_edge_fields` 丢键**：llm_edge_proposer 的六个传输诊断键过了 cognitive_loop 白名单，却在 monitor 采集层被丢弃；既有端到端
     测试补上普查断言（包装器全部键 ⊆ monitor 采集结果）。
-- **测试**：+16 个测试函数（low_clue_recall +11，含主会话两条反事实；knob_lane_switch +3；clearance_cycle +2；monitor 普查断言并入
+- **独立审查（Sonnet）无阻塞，据其 SHOULD-FIX 再修两处**（各有破坏即失败的反事实）：作用域只在自己改过 `sys.path` 时才恢复并清理
+  （首次导入即成功说明宿主已加载 Hermes，那些模块归宿主，删掉会让宿主下次导入重新执行模块），清理范围与导入面对齐为
+  `agent` / `hermes_cli` / `tools`；`timeout_ms` / `max_tokens` 非数值时两种传输都返回 `llm_exception`（`invalid_call_config`），
+  "永不抛出"在接缝处成立，而非靠五个调用方各自兜底。fact_judge / SFE / clearance 的 provider / model 尚无 monitor 读者（失败本身
+  已由 C0 连续失败分级覆盖），随 monitor 接线 PR。
+- **测试**：+18 个测试函数（low_clue_recall +13，含主会话四条反事实；knob_lane_switch +3；clearance_cycle +2；monitor 普查断言并入
   既有端到端测试）；7 个既有测试文件的 mock 目标改名；
-  全量 __FULL__；五门全绿。
+  全量 3966 passed / 13 skipped / 1 failed——失败的是 Windows 上的并发 flake
+  `test_completion_append_and_sidecar_are_idempotent_under_concurrency`（两线程并发完成同一信封，无 `fcntl` 进程锁时
+  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。单测对照采样：C0 末端 0/18、
+  L1 末端 2/18（Fisher p≈0.24，不显著），以 Linux CI 为准；若 CI 上也出现，再作为 L1 相关问题深挖。五门全绿。
 - **遗留**：每次调用都会重新导入 `agent.auxiliary_client`（作用域结束即清理，约 0.45s/次，cron lane 可接受）；`llm_route_unexpected`
   （实际 provider ≠ 请求 provider）的 monitor 分级与 `response.model` 展示待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署。部署后验收：fact_judge / SFE / llm_edge_proposer 的 `llm_transport=hermes_call_llm`、

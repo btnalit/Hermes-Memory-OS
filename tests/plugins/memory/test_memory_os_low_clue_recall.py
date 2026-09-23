@@ -1399,17 +1399,10 @@ def test_call_hermes_runtime_model_result_empty_content_maps_to_llm_empty_conten
     assert result.failure_reason == "llm_empty_content"
 
 
-def test_call_hermes_runtime_model_result_runs_call_llm_inside_the_import_scope(monkeypatch, tmp_path):
-    """Counterfactual for the import scope: Hermes' real call_llm does
-    function-level imports (agent.*, hermes_cli.*, tools.*) at CALL time --
-    verified in production's agent/auxiliary_client.py. A fake Hermes root on
-    disk reproduces that: its call_llm lazily imports agent.lazy_dep. If the
-    helper restored sys.path before calling (the first draft's shape), every
-    call would fail with an ImportError. The fake modules in the tests above
-    are injected straight into sys.modules, so they never exercise this.
-    """
-    import sys
-
+def _write_fake_hermes_root(tmp_path):
+    """A Hermes root on disk whose call_llm lazily imports agent.lazy_dep at
+    call time, the way the real auxiliary_client imports agent.* /
+    hermes_cli.* / tools.* inside the call."""
     hermes_root = tmp_path / "hermes-agent"
     (hermes_root / "agent").mkdir(parents=True)
     (hermes_root / "agent" / "__init__.py").write_text("", encoding="utf-8")
@@ -1422,6 +1415,85 @@ def test_call_hermes_runtime_model_result_runs_call_llm_inside_the_import_scope(
         "    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None, model='m')\n",
         encoding="utf-8",
     )
+    return hermes_root
+
+
+def test_import_scope_leaves_modules_the_host_already_loaded_alone(monkeypatch, tmp_path):
+    """Counterfactual: when Hermes is already importable in this process (the
+    host has the agent package loaded but has not yet imported
+    auxiliary_client), the scope must not delete what the call imports --
+    those are the host's modules, and dropping one makes the host's next
+    import re-execute it. Only a scope that mutated sys.path cleans up."""
+    import importlib
+    import sys
+
+    hermes_root = _write_fake_hermes_root(tmp_path)
+    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.syspath_prepend(str(hermes_root))
+    host_agent = importlib.import_module("agent")
+    path_before = list(sys.path)
+    _ok_provider_resolution(monkeypatch)
+    try:
+        result = low_clue_recall_module._call_hermes_runtime_model_result(
+            "hello", {"provider": "hermes_default"},
+        )
+        assert result.text == "lazy-ok"
+        assert sys.modules["agent"] is host_agent
+        assert "agent.auxiliary_client" in sys.modules
+        assert "agent.lazy_dep" in sys.modules
+        assert sys.path == path_before
+    finally:
+        for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+            del sys.modules[name]
+
+
+def test_non_numeric_call_limits_return_a_typed_failure_instead_of_raising(monkeypatch):
+    """The seam's contract is "never raises": a corrupted timeout_ms /
+    max_tokens (e.g. from a bad override) must come back as a typed failure
+    on both transports, not escape as ValueError and rely on each caller's
+    own defensive except."""
+    _ok_provider_resolution(monkeypatch)
+
+    def _must_not_run(task, **kwargs):
+        raise AssertionError("call_llm must not run with an invalid call config")
+
+    _install_fake_call_llm(monkeypatch, _must_not_run)
+    result = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "timeout_ms": "fast"},
+    )
+    assert result.failure_reason == "llm_exception"
+    assert result.detail.startswith("invalid_call_config")
+
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {
+            "ok": True,
+            "provider": "openai-codex",
+            "model": "gpt-5.6-luna",
+            "runtime": {"api_mode": "chat_completions", "model": "gpt-5.6-luna"},
+        },
+    )
+    legacy = low_clue_recall_module._call_hermes_runtime_model_result(
+        "hello", {"provider": "hermes_default", "llm_transport": "legacy_wire", "max_tokens": "many"},
+    )
+    assert legacy.transport == "legacy_wire"
+    assert legacy.failure_reason == "llm_exception"
+
+
+def test_call_hermes_runtime_model_result_runs_call_llm_inside_the_import_scope(monkeypatch, tmp_path):
+    """Counterfactual for the import scope: Hermes' real call_llm does
+    function-level imports (agent.*, hermes_cli.*, tools.*) at CALL time --
+    verified in production's agent/auxiliary_client.py. A fake Hermes root on
+    disk reproduces that: its call_llm lazily imports agent.lazy_dep. If the
+    helper restored sys.path before calling (the first draft's shape), every
+    call would fail with an ImportError. The fake modules in the tests above
+    are injected straight into sys.modules, so they never exercise this.
+    """
+    import sys
+
+    hermes_root = _write_fake_hermes_root(tmp_path)
     _ok_provider_resolution(monkeypatch)
     for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
         monkeypatch.delitem(sys.modules, name, raising=False)
