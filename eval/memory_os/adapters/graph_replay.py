@@ -57,6 +57,8 @@ def build_graph_replay_report(cases_path: str | Path | None = None) -> dict[str,
     injected_novelties: list[float] = []
     stale_version_injection_count = 0
     superseded_by_newer_count = 0
+    latest_wins_expected = 0
+    latest_wins_observed = 0
     emitted_case_count = 0
     edge_found_case_count = 0
 
@@ -97,7 +99,16 @@ def build_graph_replay_report(cases_path: str | Path | None = None) -> dict[str,
             outcome_distribution[outcome] = outcome_distribution.get(outcome, 0) + count
         injected_novelties.extend(case_detail["injected_novelties"])
         stale_version_injection_count += case_detail["stale_version_injection_count"]
-        superseded_by_newer_count += case_detail["outcome_counts"].get("superseded_by_newer", 0)
+        case_superseded = case_detail["outcome_counts"].get("superseded_by_newer", 0)
+        superseded_by_newer_count += case_superseded
+        # Anchored on the newer endpoint, the older one reaches the candidate
+        # set only through the updates edge itself — prefetch step 1b must
+        # suppress it. This is the injection half of PR-G1; without it the
+        # gate below measures only edge detection.
+        if actual_got_updates and case_detail["anchor_id"] == case_detail["actual_newer_id"]:
+            latest_wins_expected += 1
+            if case_superseded > 0:
+                latest_wins_observed += 1
 
         per_case.append({
             "case_id": case_id,
@@ -143,6 +154,12 @@ def build_graph_replay_report(cases_path: str | Path | None = None) -> dict[str,
         }
         if injected_novelties
         else {"status": "healthy_no_sample", "sample_count": 0, "mean_injected_novelty": None}
+    )
+
+    latest_wins_report = (
+        {"status": "sampled", "expected_count": latest_wins_expected, "observed_count": latest_wins_observed}
+        if latest_wins_expected > 0
+        else {"status": "healthy_no_sample", "expected_count": 0, "observed_count": 0}
     )
 
     coverage = (
@@ -191,6 +208,7 @@ def build_graph_replay_report(cases_path: str | Path | None = None) -> dict[str,
         "outcome_distribution": dict(sorted(outcome_distribution.items())),
         "stale_version_injection_count": stale_version_injection_count,
         "superseded_by_newer_count": superseded_by_newer_count,
+        "latest_wins_report": latest_wins_report,
         "case_results": per_case,
         "route_live_applied": False,
         "score_live_applied": False,
@@ -220,10 +238,23 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
                 return False
         return True
 
+    def _latest_wins_ok() -> bool:
+        # A sampled positive subset with no newer-anchored case would leave
+        # the injection half unmeasured, so that is a failure, not a pass.
+        latest = report["latest_wins_report"]
+        positive_sampled = any(
+            report["subset_reports"].get(subset, {}).get("status") == "sampled"
+            for subset in _POSITIVE_SUBSETS
+        )
+        if latest["status"] != "sampled":
+            return not positive_sampled
+        return latest["observed_count"] == latest["expected_count"]
+
     passed = (
         report["case_count"] > 0
         and _recall_ok()
         and _no_false_positives()
+        and _latest_wins_ok()
         and report["stale_version_injection_count"] == 0
         and report["boundary_true_count"] == 0
         and report["forbidden_field_count"] == 0
@@ -335,6 +366,7 @@ def _run_case(
                         injected_pair_ids.add(pair_key)
 
         return {
+            "anchor_id": anchor_id,
             "actual_relation": actual_relation,
             "actual_newer_id": actual_newer_id,
             "edge_found": edge_found,

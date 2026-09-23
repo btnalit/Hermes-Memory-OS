@@ -74,6 +74,37 @@ def test_graph_replay_no_stale_version_double_injection():
     assert report["stale_version_injection_count"] == 0
 
 
+def test_graph_replay_gate_fails_when_latest_wins_suppression_breaks(tmp_path, monkeypatch):
+    """Review SHOULD-FIX 3 counterfactual: stale_version_injection_count can
+    only move if one updates pair is injected twice inside a two-record case,
+    which cannot happen, so the gate never measured the injection half of
+    PR-G1. With suppression broken the eval must fail."""
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    healthy = run_rh31_eval(
+        fixture="synthetic", adapters=["graph_replay"],
+        report_root=tmp_path / "healthy", write_report=False,
+    )
+    latest = healthy["scores"][0]["details"]["latest_wins_report"]
+    assert latest["status"] == "sampled" and latest["expected_count"] > 0
+    assert latest["observed_count"] == latest["expected_count"]
+
+    original = MemoryOSIndex.query_edges
+
+    def _no_updates_lookup(self, anchor_ids, *args, relation_types=None, **kwargs):
+        if relation_types == ["updates"]:
+            return []
+        return original(self, anchor_ids, *args, relation_types=relation_types, **kwargs)
+
+    monkeypatch.setattr(MemoryOSIndex, "query_edges", _no_updates_lookup)
+    broken = run_rh31_eval(
+        fixture="synthetic", adapters=["graph_replay"],
+        report_root=tmp_path / "broken", write_report=False,
+    )
+    assert broken["scores"][0]["details"]["latest_wins_report"]["observed_count"] == 0
+    assert broken["status"] != "pass"
+
+
 def test_graph_replay_empty_corpus_reports_healthy_no_sample(tmp_path):
     from eval.memory_os.adapters.graph_replay import build_graph_replay_report
 

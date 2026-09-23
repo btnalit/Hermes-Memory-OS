@@ -1519,6 +1519,125 @@ def test_t2_1_15_injection_shows_only_newer_endpoint_of_updates_pair(tmp_path):
     assert outcomes_by_target["cry_ver_new"][1] is True
 
 
+def _one_qualifying_co_occurs_pair(tmp_path):
+    """A pre-PR-G1 co_occurs edge on a pair that now qualifies as updates."""
+    store, index = _store(tmp_path)
+    body = "待回填的近逐字重述内容,包含足够长的公共前缀文本用于命中阈值。"
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_fail_a", "kind": "note", "created_at": "2026-05-01T00:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body},
+        {"id": "cry_fail_b", "kind": "note", "created_at": "2026-06-01T00:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body + "补充说明一句。"},
+    ])
+    index.rebuild_from_store(store)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_fail_a",
+        to_record_type="crystallized_record", to_record_id="cry_fail_b",
+        relation_type="co_occurs", weight=0.45, proposed_by="structural", state="active",
+    )
+    assert edge and edge.get("edge_id")
+    return store, index, str(edge["edge_id"])
+
+
+def test_t2_1_17_backfill_write_failure_after_invalidation_is_not_a_skip(tmp_path, monkeypatch):
+    """Review BLOCKER counterfactual: the old co_occurs edge is invalidated
+    (one-way) before the updates edge is written. When that write fails the
+    pair has no active structural edge; the old code counted it as an
+    ordinary skip, indistinguishable from "does not qualify"."""
+    from plugins.memory.memory_os import index as index_module
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index, co_edge_id = _one_qualifying_co_occurs_pair(tmp_path)
+    monkeypatch.setattr(index_module, "write_governed_edge", lambda *a, **k: {})
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_failed_count"] == 1
+    assert result["backfill_skipped_count"] == 0
+    assert result["backfill_upgraded_count"] == 0
+    [record] = result["backfill_error_records"]
+    assert record["operation"] == "updates_backfill_write"
+    assert record["error_code"] == "edge_write_failed"
+    assert record["details"]["edge_id"] == co_edge_id
+    conn = _conn(index)
+    state = conn.execute(
+        "select state from memory_edges where edge_id = ?", (co_edge_id,)
+    ).fetchone()[0]
+    active = conn.execute(
+        "select count(*) from memory_edges where state = 'active'"
+    ).fetchone()[0]
+    conn.close()
+    # Proves the test reached the dangerous state it claims to report.
+    assert state == "invalidated"
+    assert active == 0
+
+
+def test_t2_1_18_backfill_invalidation_failure_is_counted_as_failed(tmp_path, monkeypatch):
+    """The other post-qualification branch: transition_edge_state returned {}
+    (canonical append or projection update failed). Also not a skip."""
+    from plugins.memory.memory_os import index as index_module
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index, co_edge_id = _one_qualifying_co_occurs_pair(tmp_path)
+    monkeypatch.setattr(index_module, "transition_edge_state", lambda *a, **k: {})
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_failed_count"] == 1
+    assert result["backfill_skipped_count"] == 0
+    [record] = result["backfill_error_records"]
+    assert record["operation"] == "updates_backfill_invalidate"
+    assert record["details"]["edge_id"] == co_edge_id
+
+
+def test_t2_1_19_run_structural_proposer_carries_every_backfill_key(tmp_path):
+    """Census: run_structural_proposer's summary hand-listed the backfill
+    keys and dropped backfill_pass_complete, so every reader saw False."""
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_proposer,
+        run_structural_updates_backfill,
+    )
+
+    store, index, _ = _one_qualifying_co_occurs_pair(tmp_path)
+    backfill_keys = set(
+        run_structural_updates_backfill(str(index.roots.index_path), index=index, max_per_run=0)
+    )
+    summary = run_structural_proposer(str(index.roots.index_path), index=index)
+
+    assert summary["backfill_pass_complete"] is True
+    missing = sorted(backfill_keys - set(summary))
+    assert not missing, f"backfill keys dropped by run_structural_proposer: {missing}"
+
+
+def test_t2_1_20_updates_precedes_explicit_reference(tmp_path):
+    """Review SHOULD-FIX 2, decided: when a near-verbatim newer record also
+    cites the older one's id, the pair is labelled updates, not depends_on.
+    prefetch's latest-wins suppression keys on relation_type == "updates", so
+    depends_on-first would switch latest-wins off for exactly the pairs with
+    the strongest supersession evidence."""
+    from plugins.memory.memory_os import structural_edge_proposer as sep
+
+    base = {"kind": "fact", "tags_json": "[]", "source_event_ids_json": "[]"}
+    shared = (
+        "客户的服务器机房在上海张江高科技园区,机柜编号是A区十二号,联系人是运维组的王工,"
+        "平时白天联系比较及时,夜间值班电话由物业统一转接,机柜钥匙放在前台登记领取。"
+    )
+    older = {**base, "id": "cry_ref_old", "created_at": "2026-05-01T09:00:00Z", "body": shared}
+    newer = {**base, "id": "cry_ref_new", "created_at": "2026-06-15T09:00:00Z",
+             "body": shared + "见 cry_ref_old"}
+    assert sep._dice_coefficient(older["body"], newer["body"]) >= sep._DICE_THRESHOLD_UPDATES
+    assert sep._contains_record_ref(newer["body"], "cry_ref_old"), "fixture sanity: explicit reference"
+
+    edges = sep._detect_relation(older, newer)
+
+    assert [e["relation_type"] for e in edges] == ["updates"]
+    assert edges[0]["from_record_id"] == "cry_ref_new"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Phase 2.2 — Crystallization Gate
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3309,6 +3428,27 @@ def test_semantic_edges_claim_exploit_slots_before_heavier_co_occurs(tmp_path):
     )
     joined = "\n".join(lines)
     assert "NEIGHBOR_MARK_8" in joined and "NEIGHBOR_MARK_9" in joined
+
+
+def test_updates_supersession_notice_claims_an_exploit_slot(tmp_path):
+    """Review SHOULD-FIX 4 counterfactual: an `updates` edge renders only as a
+    supersession notice (anchor = older endpoint). Treated as co_occurs it
+    sorted behind heavier co_occurs and reached injection only on the days
+    the explore rotation happened to pick it."""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+
+    store, anchor, neighbors = _slot_store(tmp_path, 13)
+    edges = [
+        _slot_edge(f"co-{i}", anchor, neighbors[i], "co_occurs", 0.90 - i * 0.01)
+        for i in range(12)
+    ] + [_slot_edge("upd", neighbors[12], anchor, "updates", 0.60)]
+
+    for day in range(30):
+        _, decisions = _render_graph_layer_lines(
+            store, edges, anchor_ids=[anchor], seen=set(), day_ordinal=day,
+        )
+        injected = {str(d["edge"]["edge_id"]) for d in decisions if d.get("injected")}
+        assert "upd" in injected, f"day {day}: supersession notice starved by co_occurs"
 
 
 def test_co_occurs_still_fills_when_semantic_edges_are_scarce(tmp_path):

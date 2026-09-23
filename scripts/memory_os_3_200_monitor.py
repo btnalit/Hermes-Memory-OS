@@ -2075,6 +2075,18 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "code": "v2_graph_governance_state",
                     "value": edge_step_results,
                 })
+                # PR-G1: unlike a skip, a failed updates-backfill upgrade can
+                # leave a pair with no active structural edge (invalidation is
+                # one-way), so it is graded rather than left in the INFO blob.
+                _structural = edge_step_results.get("structural_edge_proposer")
+                _backfill_failed = (
+                    _structural.get("backfill_failed_count") if isinstance(_structural, dict) else None
+                )
+                if isinstance(_backfill_failed, int) and _backfill_failed > 0:
+                    warn.append({
+                        "code": "graph_structural_updates_backfill_failed",
+                        "backfill_failed_count": _backfill_failed,
+                    })
         elif clean_host:
             warn.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
         else:
@@ -8063,7 +8075,8 @@ def cognitive_loop_step_evidence():
       # "Completion Is Not Output" evidence that the lane ran AND did
       # something, not just that its envelope closed clean.
       "backfill_scanned_count", "backfill_upgraded_count",
-      "backfill_skipped_count", "backfill_pass_complete", "backfill_duration_ms",
+      "backfill_skipped_count", "backfill_failed_count", "backfill_pass_complete",
+      "backfill_duration_ms",
     )
     edge_step_results = {}
     for step in steps:

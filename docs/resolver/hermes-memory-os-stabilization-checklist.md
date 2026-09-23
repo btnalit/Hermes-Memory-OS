@@ -5032,7 +5032,8 @@ sannai-community 仓库 README。）
 ## 一句话
 
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
-  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿。全量 4068 passed。**未部署**。
+  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿；审查后回填失败单独计数并 WARN、
+  补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins。全量 4170 passed / 13 skipped；五门全绿。**未部署**。
 - `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
   真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
 - `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
@@ -8584,9 +8585,30 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   而不是作为 co_occurs 注入；新旧同注入 0。
 - **反事实**：子代理 8 条（`updates` 优先级、跨 kind、低 Dice 改口、只注入较新者、`is_latest` 经索引重建仍成立、回填有界幂等、评测空集 no-sample 两条），
   主会话 1 条（回填游标）。
+- **独立审查（Sonnet）1 BLOCKER + 4 SHOULD-FIX，主会话全部处理**（每条都有破坏即失败的反事实，cp 备份法逐条验证 9/9）：
+  - **BLOCKER：回填"先失活旧边、再写新边"的第二步失败被计成普通 skip。** 失活是单向门（`EDGE_STATE_TRANSITIONS["invalidated"]` 为空），
+    按对去重又不允许先写新边，所以做不成原子；写失败时这一对可能**一条 active 结构边都没有**，却和"不合格"落在同一个计数里。失活本身返回
+    `{}` 的分支同类：canonical 追加失败时游标照样越过、这一对永远停在 co_occurs；canonical 已落而投影更新失败时下次 index_sync 就失活、新边
+    从未写。两支都改计新的 `backfill_failed_count`，各带一条 `error_record`（`updates_backfill_invalidate` / `updates_backfill_write`，details
+    带边 id 与两端记录 id，运维可据此找回这一对）；解析端点时的 sqlite 读失败原先也计 skip，一并改为 failed。monitor 对
+    `backfill_failed_count>0` 出 WARN `graph_structural_updates_backfill_failed`——边步骤计数原本整体是不分级的 INFO，但失败不是良性跳过。
+    不做原子化，理由见上：任何绕过按对去重或放开 `invalidated → active` 的做法都会改写写入边界的契约。
+  - **顺带查出的透传缺口（与 G0 同类，第三次）**：`run_structural_proposer` 的汇总手写列举回填键，**漏了 `backfill_pass_complete`**，
+    包装器与 monitor 读到的恒为默认 False。改为整体展开回填结果；并补上"生产者 → 包装器"的普查测试。既有的 monitor 端普查只追加记录、没建
+    索引，生产者一直走 `cannot_read_crystallized_records` 错误路径，而包装器用默认值把每个回填键都补齐了——"键存在"的健全性断言是空的；
+    现改为先重建索引并断言生产者 `status == "ok"`。
+  - **SHOULD-FIX 2（已裁定，不改顺序）**：`updates` 先于 `depends_on`。核对了注入侧：latest-wins 压制只认 `relation_type == "updates"`，
+    若改成 `depends_on` 优先，恰恰是"新记录显式引用旧记录 id"这种最强的取代证据会失去 latest-wins。用测试钉住并在 `_detect_relation` 注释说明。
+  - **SHOULD-FIX 3**：G4 通过门里的 `stale_version_injection_count` 在两记录隔离样本里结构上不可能非零，门从未衡量 PR-G1 的注入这一半。
+    新增 `latest_wins_report`（以较新端为锚点的正例数 vs 实际被压成 `superseded_by_newer` 的数，当前 7/7），纳入通过门；正例已采样却没有
+    较新端锚点样本时判失败而不是通过。反事实：让 `updates` 查询返回空，评测失败。
+  - **SHOULD-FIX 4**：`updates` 加入 `_GRAPH_SEMANTIC_RELATIONS`——它唯一能渲染的方向是"已被以下内容取代"的提示，按 co_occurs 排序会被
+    更重的共现边挤到探索位，只在轮转碰巧选中的日子出现。反事实：12 条 0.9 共现 + 1 条 0.6 `updates`，连续 30 个 day_ordinal 都必须注入。
+  - **SHOULD-FIX 5**：回填游标假设 `created_at` 随写入单调，已在 docstring 写明；时间戳落在游标之后的边不会被重访，删除状态文件即从头重扫。
 - **测试**：graph_replay +8、graph_layer +8（含 2 条既有测试的夹具相似度下调——其 Dice 本就 ≥0.85，现在应得 `updates`）、monitor 普查 +1；
   全量 4068 passed / 13 skipped；五门全绿（write-surface 为回填游标状态文件登记 `structural_updates_backfill_cursor_state`）。
-- **遗留**：`updates` 抢占 `depends_on`（显式 ID 引用）是子代理的判断，尚无两者同时成立的真实样本；`superseded_by_newer` / 回填量 / 新颖度尚未
-  分级（monitor part 2）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界 SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时。
+  审查修复后（链尾，已含 DP–DS）：graph_layer +5、cognitive_loop +1、monitor +1（另强化 1 条普查）、graph_replay +1；全量 4170 passed / 13 skipped；五门全绿。
+- **遗留**：`superseded_by_newer` / 回填量 / 新颖度尚未分级（主会话随后接）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界
+  SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时；回填失败时"找回那一对"目前靠 error_record 人工处理，没有自动补边。
 - **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮
   `backfill_upgraded_count>0`，7 天内 main `superseded_by_newer>0`（sannai 允许 no-sample）。
