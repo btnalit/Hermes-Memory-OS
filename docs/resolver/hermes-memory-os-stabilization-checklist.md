@@ -5031,6 +5031,10 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `33d674b..HEAD`：P1（DV）——owner action 核心层主体自检：`parse_owner_review_reply` 与 `owner_review_surface_report` 新增
+  `principal` 形参并在模块内部自查 `OWNER_ACTION_PRINCIPALS`（owner/unknown 放行，peer_agent/other_human/system 拒绝且落审计），
+  未传 principal 时按拒绝/脱敏处理而非放行；review surface 与每轮系统提示词注入的审阅摘要对非主人隐去 `oa_`/`ppmt_` token。
+  全量 4172 passed / 13 skipped / 0 failed。**未部署**。
 - `33d674b..HEAD`：monitor 接线 part 2（DU）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
   两个既有 accessor（不再手写路径/副本）；新增 `lane_backend_transport_summary` 展示 fact_judge 的 `judge_backend` / Jev 回落计数
   （全部回落时 WARN，默认关闭恒 INFO）与 SFE 的 `input_source` / `group_sessions_*` 计数（INFO only）；`llm_route_unexpected` 因跨两个
@@ -8689,3 +8693,94 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署**：随规划全部落地后统一部署，不改任何生产者/写路径，纯只读接线，无需重启 gateway；部署后验收：`fact_judge_backend_state` /
   `session_fact_extraction_backend_state` 两条 INFO 在 main / sannai 均能读到最近一次 tick 的 `llm_transport=hermes_call_llm`；若 owner 开启
   `fact_judge_judge_backend=typesafe_jev`，观察 `fact_judge_backend_fallback_all` 是否出现（预期不出现，出现即 Jev 生产环境静默失活）。
+
+---
+
+## DV — P1：owner action 核心层主体自检（2026-09-23）
+
+- **背景**：规划 §3 Phase 2 P1（`docs/plans/2026-09-23-memory-os-next-phase-plan.md`）：DO（P0-lite）已经让 `__init__.py` 的
+  owner-review ingress（`_process_owner_review_reply_ingress`）在调用 `parse_owner_review_reply` 之前先查 `self._turn_principal`，
+  但那只是**调用方**的自律——`owner_actions.py` 这个权威模块本身对principal一无所知，任何将来绕过该入口、直接拿到 store 就调用
+  `parse_owner_review_reply` / `owner_review_surface_report` 的路径都不会被拒绝。P1 要求权威判定进模块本身（"authority lives inside
+  the authority module"），并让只读的 review surface 对非主人隐去 `oa_` token（token 本身就足以在别处驱动一次 approve/reject）。
+- **根因**：两个函数原本都没有 `principal` 形参，调用方给什么、模块就信什么；`owner_review_surface_report` 把 `_render_review_item` /
+  `_attach_proposal_followup_apply_actions` 等生成的真实 `oa_`/`ppmt_` token 原样吐给任何调用者，包括 `system_prompt_block()` 每轮无条件
+  注入的 `session_approval.build_session_review_block` / `build_session_feedback_block`（不看是谁在说话）。
+- **修复**（主会话直接实现，未走子代理）：
+  - `principal.py` 新增 `OWNER_ACTION_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})`——与 `FOREGROUND_CONTROL_PRINCIPALS`
+    当前同值但**分开命名**（owner action 授权与前台控制资格是两个概念，今天恰好取值一致，不应该共用一个名字，以免未来单独收紧一个时误伤另一个）。
+    `unknown` 被保留是 owner 裁定的权衡：未配置身份的平台上主人自己的回复也会解析成 `unknown`，若拒绝 `unknown` 就会把主人自己锁在门外；
+    以 `unknown` 身份执行的批准仍然带着该 principal 落审计，对 monitor 可见，不是静默放行。
+  - `owner_actions.parse_owner_review_reply` 新增关键字参数 `principal: str = ""`，函数入口第一件事就是
+    `if principal not in OWNER_ACTION_PRINCIPALS`——先于任何解析 / digest 解析工作，拒绝时经既有 `append_audit` 写
+    `action=owner_action_principal_rejected, status=rejected`（记录 owner_id / 打码后的 channel / principal / apply，不含 token），
+    并返回 `_reply_result(status="rejected", reason="owner_action_principal_rejected", ...)`。**默认值 `""` 不在
+    `OWNER_ACTION_PRINCIPALS` 里，因此"忘记传 principal"与"显式传非主人 principal"结果完全一样——拒绝**，不是陷阱式放行（W 规则 4）。
+  - `owner_review_surface_report` 改造成一层薄包装：真正的实现搬到 `_owner_review_surface_report_impl`（签名不变），新的公开函数多一个
+    `principal: str = ""`，调用 impl 后若 `principal not in OWNER_ACTION_PRINCIPALS` 就跑 `_redact_owner_action_tokens`——一个递归遍历
+    dict/list/tuple/str 的通用脱敏器，用正则 `oa_[0-9a-f]{8,32}` / `ppmt_[A-Za-z0-9_-]+`（大小写不敏感）把命中的 token 替换成
+    `oa_[redacted]` / `ppmt_[redacted]`（保留前缀，呼应既有 `_redact_permanent_action_tokens` 的写法）。选递归遍历而非逐字段白名单，
+    是因为 token 出现在 `action_tokens` 字典值、`owner_utterance_examples` 文案、`agent_tool_calls` 参数、proposal-followup /
+    expression-feedback / memory-sources-feedback 各操作各自的形状里，字段名单必然漏掉没预见到的形状。owner/unknown 直接拿到 impl
+    的原始返回值，逐字节不变。
+  - **调用点普查**（每处按 W 规则 2 grep 确认）：
+    - `__init__.py`：`_process_owner_review_reply_ingress` 内 `parse_owner_review_reply` 调用改传 `principal=self._turn_principal`
+      （防御纵深——ingress 已经先挡过一次非主人，这里是模块自己再挡一次）；`handle_tool_call` 的 `memory_os_review_surface` 工具入口同样
+      传 `principal=self._turn_principal`；`system_prompt_block()` 里每轮注入的 `build_session_review_block(self._store)` /
+      `build_session_feedback_block(self._store)` 补上 `principal=self._turn_principal`——这是本次審查主动扩大的一处：不这么做的话，
+      即便工具入口被拒，非主人仍能在系统提示词里读到明文 token（这条路径从不经过 `owner_review_surface_report` 的显式工具调用）。
+    - `session_approval.py`：`build_session_review_block` / `build_session_feedback_block` 各加 `principal: str = ""` 并透传给
+      `owner_review_surface_report`；同文件的 `has_pending_approval_actions` / `get_digest_summary` 只读取计数字段（不含 token），
+      且在项目里没有生产调用方（仅被自己模块与测试引用），未改动。
+    - `cli.py`：`reply` 与 `surface` 两个子命令分别传 `principal=PRINCIPAL_OWNER`——本机 CLI 按 2026-09-23 裁定视为主人（能上本机 shell
+      的人权限本就高于对话层 owner-review 门要挡的对象），与 `principal.LOCAL_OWNER_SOURCES` 的既有裁定一致。`memory permanent
+      approve/reject/defer` 子命令（`cli.py:1907`）直接调 `apply_owner_action`，同样是本机 CLI，未改动（同一条裁定覆盖）。
+  - **同类缺陷排查（W 规则 5）**：全仓 grep `apply_owner_action(` 的生产调用方只有四处——`cli.py` 两处（本机 CLI，已如上）、
+    `owner_actions.py` 内 `parse_owner_review_reply` 与 `_parse_permanent_promotion_reply` 各一处（均在本次新增的 principal 门之后，
+    非主人到不了这里）。`route_approved_proposal_followup_to_ops_gate` / `apply_approved_proposal_execution_decision` /
+    `auto_route_safe_proposal_followups_to_ops_gate` / `route_pending_approved_proposal_followups_to_ops_gate` /
+    `acknowledge_owner_review_delivery_receipt` / `deliver_owner_review_digest_once` 的生产调用方也只有 `cli.py`（本机）——没有发现
+    第二条能被非主人对话触达的 owner-action 入口。
+- **反事实**（cp 备份 → 破坏 → 跑新测试确认 FAIL → 用备份恢复 → 确认 PASS，未用 `git checkout --`）：
+  - 把 `parse_owner_review_reply` 的门改成 `if False and principal not in OWNER_ACTION_PRINCIPALS` → 新增的 4 个拒绝类测试全部
+    FAIL（`assert 'ok' == 'rejected'`）；恢复后全部 PASS。
+  - 把 `owner_review_surface_report` 的分支改成 `if True or principal in OWNER_ACTION_PRINCIPALS` → 新增的 2 个脱敏类测试全部 FAIL
+    （真实 token 而非 `oa_[redacted]`）；恢复后全部 PASS。
+- **测试**：`tests/plugins/memory/test_memory_os_owner_actions.py` 新增 9 个（`parse_owner_review_reply` 对 peer_agent /
+  other_human / system 三种非主人 principal 的参数化拒绝测试 + 落审计断言、未传 principal 时的默认拒绝测试、owner / unknown 两种
+  principal 的放行测试、review surface 对非主人隐藏 token 的测试、未传 principal 时默认脱敏的测试、owner 与 unknown 两种 principal
+  输出逐字节相同的测试）；`tests/plugins/memory/test_memory_os_principal.py` 新增 1 个（钉死 `OWNER_ACTION_PRINCIPALS` 精确等于
+  `{owner, unknown}`）。改造 `owner_review_surface_report` 的默认拒绝行为后，5 个测试文件里原本假设"直接调用即视为主人"的 36 处
+  既有调用点补上了 `principal="owner"`（`test_memory_os_owner_actions.py` 17+10、`test_memory_os_candidate_clusters.py` 1、
+  `test_memory_os_external_evidence_owner_action.py` 1、`test_memory_os_living_memory_delivery.py` 1、
+  `test_memory_os_permanent_promotion_digest.py` 2；`test_memory_os_owner_digest_agenda.py` 的 4 处调用只读 `review_item_id` /
+  `target_id` / `next_offsets` 等非 token 字段，脱敏后逐字节仍然一致，未改动）。全量 4172 passed / 13 skipped / 0 failed
+  （857s，本轮未复现已知的 Windows 并发 flake）；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0`——本次改动只调用
+  既有的 `append_audit`，未新增裸写入面 / static-hygiene / public-checkout `--strict` PASS / `git diff --check` 干净）。
+- **假设与权衡（供 owner 复核）**：`unknown` 允许执行 owner action 是刻意沿用 DO 的兼容态设计，不是本次新引入的口子——但值得
+  owner 再次确认：这意味着"平台未配置主人身份"时，任何解析为 `unknown` 的作者（包括未配置身份的群聊场景）理论上仍可批准/拒绝
+  candidate、撤销结晶记录等——与 DO 的现状完全一致，P1 只是把同一权衡从"仅在 ingress 生效"扩展为"在权威模块内也生效"，未扩大也未
+  收窄这个口子。
+- **遗留**：`apply_owner_action`（CLAUDE.md 称为 OwnerActionProcessor 的核心）本身仍不做 principal 自检——本次核实过它没有可被非主人
+  对话触达的生产调用路径，但如果将来有人新增一条不经过 `parse_owner_review_reply` 的调用方，仍需要重复本次的普查；`session_approval.py`
+  的 `build_session_review_block` / `build_session_feedback_block` 读取的 `surface.get("action_required", [])` /
+  `surface.get("feedback", [])` 顶层键与 `owner_review_surface_report` 实际返回的 `sections["action_required"]` 结构不匹配（既有代码，
+  与本次改动无关，未修）；规划 Phase 2 的 P2（事件带 author/principal）、P3（session_mirror 主体过滤）仍未做。
+- **主会话集成审查**：`unknown` 可执行 owner action 这一取舍之所以能接受，前提是审计能把它与已核实的主人区分开——`OWNER_ACTION_PRINCIPALS`
+  的注释也这么写，并指向 `parse_owner_review_reply`。核对发现**这个前提不成立**：模块内部只在拒绝时写审计，成功路径不记主体；provider
+  入口 `owner_review_reply_ingress` 只在拒绝分支带 `principal`，成功分支没有。于是未配置平台上以 `unknown` 执行的审批，在审计里与主人
+  的审批逐字节相同。修复：入口成功审计补上 `principal`，注释改指真实位置；反事实（未配置平台、主人轮解析为 `unknown`、审计必须带
+  `principal=unknown`）cp 备份法先败后过。另记两处局限（未修）：系统提示词若被 Hermes 按会话缓存，其脱敏只反映构建那一刻的发言者
+  （与 P1 之前相比不更差，但不是逐轮关闭）；`apply_owner_action` 本身仍无主体自检，当前仅本地 CLI 可达。
+- **独立审查（Sonnet，安全向）无阻塞**：独立核对了两个令牌生成器（`oa_` 为 14 位小写 hex、`ppmt_` 为 urlsafe base64）均落在脱敏正则内、
+  拒绝审计不含令牌、`apply_owner_action` 四个生产调用点都在门后或本地 CLI、插件别名 CLI 是同一份 `cli.py` 进程内调用。据其两条
+  SHOULD-FIX 补两条测试（各有破坏即失败的反事实）：① 防火墙测试用 AST 扫描 `plugins/` 与 `scripts/`，把 `apply_owner_action(` 的调用点
+  钉成封闭集（CLI `_review_command` / `memory_os_command`，`parse_owner_review_reply` 与其内的 `_parse_permanent_promotion_reply`）——
+  它自己没有主体检查，新增一个绕过门的调用点即失败；② 端到端测试走真实 provider 的 `on_turn_start → system_prompt_block`：此前所有
+  P1 测试都显式传 `principal=`，没有任何测试证明 provider 在每轮注入的系统提示词里传的是本轮主体。只把 surface 主体替换成本块读取的
+  形状，真实的脱敏包装与 provider 生命周期照常运行；把 provider 的实参改成固定 `owner` 即令牌泄漏、测试失败。注：本块读取顶层
+  `action_required` 与 surface 实际的 `sections[...]` 形状不符（既有问题，上文已记），所以今天生产上它多半渲染为空——脱敏接线仍须
+  就位，否则修好读取路径的那一天就开始泄漏。
+- **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
+  人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
+  `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。

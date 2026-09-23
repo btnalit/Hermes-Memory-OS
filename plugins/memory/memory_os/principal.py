@@ -63,6 +63,27 @@ PRINCIPALS = frozenset(
 # ``tests/plugins/memory/test_memory_os_principal.py``.
 FOREGROUND_CONTROL_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})
 
+# Only these two may perform an owner action (approve / reject / feedback /
+# allow / bounded apply, via ``owner_actions.parse_owner_review_reply``) or see
+# a live ``oa_``/``ppmt_`` action token on the owner-review surface (Phase 2
+# P1, 2026-09-23 next-phase plan). Same value as ``FOREGROUND_CONTROL_PRINCIPALS``
+# today, but named and owned separately: owner-action authority and
+# foreground-control eligibility are different policy questions that happen to
+# agree right now, and giving them one shared name would make a future
+# deliberate divergence (e.g. tightening owner actions without touching
+# foreground control) silently move both.
+#
+# ``unknown`` is allowed for the same reason as everywhere else in this
+# module: on a platform the owner never configured an identity for, the
+# owner's own replies resolve to ``unknown`` (compatibility, not a stranger),
+# and rejecting it would lock the owner out of approving/rejecting their own
+# digest. This is a deliberate trade-off, not an oversight -- an action taken
+# under ``unknown`` is still recorded with that principal on the audit trail
+# (the ``owner_review_reply_ingress`` audit in the provider), so it stays
+# visible for a monitor to grade, rather than being silently
+# indistinguishable from a verified owner.
+OWNER_ACTION_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})
+
 # Sources whose author is the operator's own local shell/tool session.
 # 2026-09-23 owner ruling: anyone who can already reach a local shell has
 # higher privilege than the conversational owner gate exists to enforce, so

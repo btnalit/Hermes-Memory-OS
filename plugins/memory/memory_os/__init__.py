@@ -839,10 +839,10 @@ class MemoryOSProvider(MemoryProvider):
 
         # ── Inject session review block for pending approval items ──────
         if self._store is not None:
-            review_block = build_session_review_block(self._store)
+            review_block = build_session_review_block(self._store, principal=self._turn_principal)
             if review_block:
                 lines.append(review_block)
-            feedback_block = build_session_feedback_block(self._store)
+            feedback_block = build_session_feedback_block(self._store, principal=self._turn_principal)
             if feedback_block:
                 lines.append(feedback_block)
 
@@ -1017,6 +1017,7 @@ class MemoryOSProvider(MemoryProvider):
                 action_token=str(args.get("action_token") or ""),
                 offset=int(args.get("offset") or 0),
                 limit=int(args.get("limit") or 5),
+                principal=self._turn_principal,
             )
             return json.dumps(result, ensure_ascii=False, sort_keys=True)
         if tool_name == "memory_os_session_recall":
@@ -1178,6 +1179,7 @@ class MemoryOSProvider(MemoryProvider):
                 channel=candidate_channel,
                 apply=True,
                 require_recorded_digest=True,
+                principal=self._turn_principal,
             )
             result = candidate
             channel = candidate_channel
@@ -1207,6 +1209,9 @@ class MemoryOSProvider(MemoryProvider):
                 "anchor": (result.get("parsed") or {}).get("anchor", ""),
                 "action_token": (result.get("parsed") or {}).get("action_token", ""),
                 "action_type": (result.get("parsed") or {}).get("action_type", ""),
+                # An owner action taken under ``unknown`` (unconfigured
+                # platform) must stay distinguishable from a verified owner.
+                "principal": self._turn_principal,
             },
         )
         return result

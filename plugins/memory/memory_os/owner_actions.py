@@ -37,6 +37,7 @@ from .memory_sources import (
     read_memory_source_feedback_records,
     read_memory_source_records,
 )
+from .principal import OWNER_ACTION_PRINCIPALS
 from .owner_write_authority import (
     OWNER_CANONICAL_WRITE_ACTION_TYPES,
     owner_action_context_consumptions_path,
@@ -714,12 +715,88 @@ def owner_review_surface_report(
     action_token: str = "",
     offset: int = 0,
     limit: int = 5,
+    principal: str = "",
+) -> dict[str, Any]:
+    """Read-only owner review surface for Hermes agent pagination/detail, gated by principal.
+
+    OwnerGate self-check (Phase 2 P1, 2026-09-23 next-phase plan): a live
+    ``oa_``/``ppmt_`` action token is itself enough to drive a state change
+    through ``parse_owner_review_reply``, so this read-only surface must not
+    hand one to a caller whose principal is not ``owner``/``unknown`` -- the
+    same allowed set as that action entry point (``OWNER_ACTION_PRINCIPALS``),
+    so a token hidden here can never be the one a non-owner later replays
+    there. No default is allowed to silently reveal a token: an unset
+    ``principal`` ("") is not in ``OWNER_ACTION_PRINCIPALS``, so an
+    unspecified principal redacts -- the same fail-closed default as
+    ``parse_owner_review_reply``. Owner/unknown output is the real report,
+    untouched.
+    """
+    report = _owner_review_surface_report_impl(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        operation=operation,
+        section=section,
+        anchor=anchor,
+        action_token=action_token,
+        offset=offset,
+        limit=limit,
+    )
+    if principal in OWNER_ACTION_PRINCIPALS:
+        return report
+    return _redact_owner_action_tokens(report)
+
+
+_OWNER_ACTION_TOKEN_PATTERN = re.compile(r"(?i)\b(oa_[0-9a-f]{8,32}|ppmt_[A-Za-z0-9_-]+)\b")
+
+
+def _redact_owner_action_token_match(match: "re.Match[str]") -> str:
+    token = match.group(0)
+    return "ppmt_[redacted]" if token.lower().startswith("ppmt_") else "oa_[redacted]"
+
+
+def _redact_owner_action_tokens(value: Any) -> Any:
+    """Recursively strip live oa_/ppmt_ action tokens from a review-surface payload.
+
+    Only used by ``owner_review_surface_report`` for a non-owner/non-unknown
+    principal (P1). Walks the whole structure instead of naming individual
+    fields: the surface renders tokens into several different shapes across
+    its operations (``action_tokens`` maps, ``owner_utterance_examples``
+    strings, ``agent_tool_calls`` argument dicts, feedback-context tokens),
+    and a field-name allowlist would silently miss a shape not anticipated
+    here.
+    """
+    if isinstance(value, str):
+        return _OWNER_ACTION_TOKEN_PATTERN.sub(_redact_owner_action_token_match, value)
+    if isinstance(value, dict):
+        return {key: _redact_owner_action_tokens(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_owner_action_tokens(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_owner_action_tokens(item) for item in value)
+    return value
+
+
+def _owner_review_surface_report_impl(
+    store: MemoryOSStore,
+    *,
+    owner_id: str = "",
+    channel: str = "agent",
+    operation: str = "overview",
+    section: str = "all",
+    anchor: str = "",
+    action_token: str = "",
+    offset: int = 0,
+    limit: int = 5,
 ) -> dict[str, Any]:
     """Read-only owner review surface for Hermes agent pagination/detail.
 
     Hermes owns owner-facing conversation. This report gives Hermes bounded
     data for "next page", "expand R3", and approved-proposal follow-up
     questions without applying any owner action.
+
+    Internal implementation -- call ``owner_review_surface_report`` instead,
+    which applies the principal-based token redaction above this function.
     """
 
     resolved_owner = str(owner_id or "owner")
@@ -2159,7 +2236,43 @@ def parse_owner_review_reply(
     max_action_required: int | None = None,
     max_review_suggested: int | None = None,
     max_fyi: int | None = None,
+    principal: str = "",
 ) -> dict[str, Any]:
+    # OwnerGate self-check (Phase 2 P1, 2026-09-23 next-phase plan): the
+    # ingress in __init__.py already gates on principal before ever calling
+    # this function, but that is a *caller's* discipline, not this module's.
+    # This is the authority module for owner actions, so it must refuse for
+    # itself -- any other or future caller that forgets (or deliberately
+    # skips) the ingress-side check must still be unable to drive an owner
+    # action here. No default is allowed to silently pass this check: an
+    # unset ``principal`` ("") is not in ``OWNER_ACTION_PRINCIPALS`` and is
+    # rejected exactly like a resolved non-owner principal, so a caller must
+    # consciously choose a principal rather than inherit a permissive
+    # default. Checked before any parsing/digest-resolution work so a
+    # rejected caller can never observe review content through this path.
+    if principal not in OWNER_ACTION_PRINCIPALS:
+        append_audit(
+            store.roots.audit_path,
+            action="owner_action_principal_rejected",
+            status="rejected",
+            target=f"owner_review_reply:{_safe_channel(channel)}",
+            details={
+                "owner_id": owner_id,
+                "channel": _safe_channel(channel),
+                "principal": principal or "unspecified",
+                "apply": apply,
+            },
+        )
+        return _reply_result(
+            status="rejected",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason="owner_action_principal_rejected",
+            rendered={"profile": store.roots.profile or "default"},
+            binding="principal_self_check",
+        )
     parsed = _parse_owner_reply_text(reply_text)
     anchor = str(parsed.get("anchor") or "").upper() if parsed.get("status") == "ok" else ""
     action_token = str(parsed.get("action_token") or "") if parsed.get("status") == "ok" else ""

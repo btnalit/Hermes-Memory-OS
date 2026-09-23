@@ -111,6 +111,7 @@ def _approve_external_via_recorded_digest(
         apply=True,
         digest_id=str(rendered["digest_id"]),
         require_recorded_digest=True,
+        principal="owner",
     )
     assert parsed["status"] == "ok", parsed
     return dict(parsed["owner_action_result"])
