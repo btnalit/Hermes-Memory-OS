@@ -5031,7 +5031,7 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
-- `33d674b..HEAD`：monitor 接线 part 2（DW）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
+- `33d674b..HEAD`：monitor 接线 part 2（DU）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
   两个既有 accessor（不再手写路径/副本）；新增 `lane_backend_transport_summary` 展示 fact_judge 的 `judge_backend` / Jev 回落计数
   （全部回落时 WARN，默认关闭恒 INFO）与 SFE 的 `input_source` / `group_sessions_*` 计数（INFO only）；`llm_route_unexpected` 因跨两个
   越界文件才能落地而不实现，记为遗留。全量 4179 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
@@ -8624,7 +8624,7 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 
 ---
 
-## DW — monitor 接线 part 2：主体普查统一 accessor、J1 回落、L1 路由、SFE 计数（2026-09-23）
+## DU — monitor 接线 part 2：主体普查统一 accessor、J1 回落、L1 路由、SFE 计数（2026-09-23）
 
 - **背景**：monitor part 1（DP）接了 C3/P0 主体普查/G0 三项，明确留下四项给 part 2：P0 嵌入式采集器仍手写 `state.db` 路径与本地
   `PRINCIPAL_MACHINE_SESSION_SOURCES` 副本（DP 遗留）；J1 的 `judge_backend` / 回落计数 / 回落详情样本尚无 monitor 读者（DS 遗留）；L1 的
@@ -8681,6 +8681,11 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   只读用于核实字段来源；monitor 里 `execution_gate_envelopes.jsonl` 路径字面量已有 ≥3 处手写副本（`_records_path` /
   `_execution_gate_helper_completion_summary` / `session_mirror_auto_apply_permit_integrity`），本次新增的 `lane_backend_transport_summary`
   改用了真正的 `execution_gate_records_path` accessor，但未回头统一那三处既有副本（超出本次派工单范围，记为技术债）。
+- **主会话集成审查**：子代理在同一个采集器里又手写了 `memory-os/system-modules/session_fact_extraction/runs.jsonl` 字面量——恰是本节
+  第 1 项要消灭的那一类；同文件 C0 的连续失败采集器还各有一份 `runs.jsonl` 与 `fact_judge/verdicts.jsonl` 字面量（规则 5 同类）。三处全部
+  改走生产者 accessor（`session_fact_extraction._runs_path` / `fact_judge._verdicts_path`，私有跨模块导入按 CLAUDE.md 的既有先例）；
+  C0 采集器导入失败时报 `path_accessor_import_failed`，不静默。反事实：把两个 accessor 同时挪到别的目录，两个采集器都必须跟着读到——
+  三处字面量逐一改回，测试逐一失败（cp 备份法 3/3）。本节字母由 DW 改为 DU，使链上节号单调（P1 = DV，P2+P3 = DW）。
 - **部署**：随规划全部落地后统一部署，不改任何生产者/写路径，纯只读接线，无需重启 gateway；部署后验收：`fact_judge_backend_state` /
   `session_fact_extraction_backend_state` 两条 INFO 在 main / sannai 均能读到最近一次 tick 的 `llm_transport=hermes_call_llm`；若 owner 开启
   `fact_judge_judge_backend=typesafe_jev`，观察 `fact_judge_backend_fallback_all` 是否出现（预期不出现，出现即 Jev 生产环境静默失活）。

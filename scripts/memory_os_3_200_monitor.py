@@ -125,7 +125,7 @@ LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD = 5
 LLM_LANE_FAILURE_STREAK_TAIL_LIMIT = 50
 
 # P0-lite principal binding grading. Machine session sources (cron, subagent)
-# are read live from principal.MACHINE_SESSION_SOURCES (DW: monitor part 2) --
+# are read live from principal.MACHINE_SESSION_SOURCES (DU: monitor part 2) --
 # not re-typed here, matching how LOCAL_OWNER_SOURCES / API_SELF_DECLARED_SOURCES
 # / MAILBOX_SOURCE below are already imported from principal.py rather than
 # copied. local / mailbox / api sources resolve by rule in
@@ -445,7 +445,7 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "a platform with more than one human user has no configured owner identity, so every non-owner turn there still drives the owner's foreground task and memory (compatibility mode); fix with deploy --owner-identity <platform>:<id> or by setting <PLATFORM>_HOME_CHANNEL in Hermes and redeploying",
         "production_behavior": "fail_if_production",
     },
-    # DW: monitor part 2. typesafe_jev is opt-in and default-off (J1 owner
+    # DU: monitor part 2. typesafe_jev is opt-in and default-off (J1 owner
     # ruling 2026-09-23) -- a clean host with no TYPESAFE_API_KEY configured
     # and no fact_judge_judge_backend override cannot select it, so this can
     # only fire when an operator has deliberately opted in.
@@ -1735,7 +1735,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             "value": raw_novelty,
         })
 
-    # ── DW: monitor part 2 -- J1 backend fallback + L1 transport visibility
+    # ── DU: monitor part 2 -- J1 backend fallback + L1 transport visibility
     # (fact_judge, session_fact_extraction). See lane_backend_transport_summary()
     # in the embedded probe script for the producer side.
     raw_lane_backend_transport = snapshot.get("lane_backend_transport")
@@ -1808,7 +1808,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             })
         else:
             info.append({"code": "session_fact_extraction_backend_no_sample", "value": sfe_backend})
-    # ── end DW grading block ────────────────────────────────────────────────
+    # ── end DU grading block ────────────────────────────────────────────────
 
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
@@ -6913,7 +6913,7 @@ def principal_binding_summary(window_days=30):
     # P0-lite: per-platform session census from Hermes state.db -- counts
     # only, never an id. classify_snapshot() decides what is graded; the
     # window default mirrors PRINCIPAL_BINDING_WINDOW_DAYS in the local module.
-    # DW (monitor part 2): db_path is resolved through roots.state_db_path
+    # DU (monitor part 2): db_path is resolved through roots.state_db_path
     # (SFE, 2026-09-23), the same accessor lane_input_freshness_summary above
     # already uses, instead of rebuilding the "state.db" path literal here --
     # CLAUDE.md's "path literal repeated at each call site" class of drift.
@@ -6999,7 +6999,7 @@ def graph_layer_novelty_summary(max_records=2000):
     summary["error_record_count"] = len(errors)
     return summary
 
-# ─── DW: monitor part 2 -- J1 backend fallback + L1 transport/provider/model
+# ─── DU: monitor part 2 -- J1 backend fallback + L1 transport/provider/model
 # visibility for fact_judge and session_fact_extraction (2026-09-23) ────────
 #
 # fact_judge has no dedicated per-tick ledger of its own (only the per-
@@ -7018,6 +7018,8 @@ def lane_backend_transport_summary():
         from plugins.memory.memory_os.execution_gate import execution_gate_records_path
         from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
         from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.modules.cognition.session_fact_extraction import _runs_path as _sfe_runs_path
     except Exception as exc:
         return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__, "lanes": {}}
 
@@ -7069,9 +7071,10 @@ def lane_backend_transport_summary():
                 "llm_model": str(fact_judge_result_summary.get("llm_model") or ""),
             }
 
-    # session_fact_extraction: latest record from its own runs.jsonl.
-    sfe_path = os.path.join(_hermes_home, "memory-os/system-modules/session_fact_extraction/runs.jsonl")
+    # session_fact_extraction: latest record from its own runs.jsonl, located
+    # through the producer's accessor (never a rebuilt path literal).
     try:
+        sfe_path = _sfe_runs_path(MemoryOSStore(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")))
         sfe_result = read_jsonl_tail(sfe_path, max_records=20, max_bytes=1048576)
         sfe_latest = next((r for r in reversed(sfe_result.records) if isinstance(r, dict)), None)
     except Exception as exc:
@@ -7095,7 +7098,7 @@ def lane_backend_transport_summary():
             }
 
     return {"schema_version": schema, "lanes": lanes}
-# ─── end DW block ───────────────────────────────────────────────────────────
+# ─── end DU block ───────────────────────────────────────────────────────────
 
 def append_only_ledger_size_summary():
     # W1-B: raw sizes only -- classify_snapshot() applies
@@ -7139,6 +7142,16 @@ def llm_lane_failure_streak_summary(tail_limit=50):
         from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
     except Exception:
         return {"schema_version": "memory-os.llm_lane_failure_streak.v0", "lanes": {}, "collection_error": "jsonl_io_import_failed"}
+    # Both ledgers are located through their producers' accessors, never a
+    # rebuilt path literal (CLAUDE.md path-drift paragraph).
+    try:
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.modules.cognition.session_fact_extraction import _runs_path as _sfe_runs_path
+        from plugins.modules.governance.fact_judge import _verdicts_path as _fact_judge_verdicts_path
+        _lane_store = MemoryOSStore(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+    except Exception:
+        return {"schema_version": "memory-os.llm_lane_failure_streak.v0", "lanes": {}, "collection_error": "path_accessor_import_failed"}
 
     def _tail(path, limit, max_bytes=1048576):
         try:
@@ -7161,7 +7174,7 @@ def llm_lane_failure_streak_summary(tail_limit=50):
     # fact_judge: one verdict record per judged candidate; failure_reason is
     # set (e.g. "llm_empty_content") whenever the LLM path did not produce a
     # usable verdict and the heuristic fallback had to answer instead.
-    fact_judge_path = os.path.join(_hermes_home, "memory-os/system-modules/fact_judge/verdicts.jsonl")
+    fact_judge_path = _fact_judge_verdicts_path(_lane_store)
     fact_judge_records = _tail(fact_judge_path, tail_limit)
     lanes["fact_judge"] = {
         "sample_count": len(fact_judge_records),
@@ -7175,7 +7188,7 @@ def llm_lane_failure_streak_summary(tail_limit=50):
     # llm_failures_by_reason) -- a run that skipped because there was
     # nothing eligible (the current production steady state) is not a
     # failure, it is the separate lane_input_stale signal's job to say so.
-    sfe_path = os.path.join(_hermes_home, "memory-os/system-modules/session_fact_extraction/runs.jsonl")
+    sfe_path = _sfe_runs_path(_lane_store)
     sfe_records = _tail(sfe_path, tail_limit)
     def _sfe_run_failed(record):
         llm_calls = int(record.get("llm_calls") or 0)

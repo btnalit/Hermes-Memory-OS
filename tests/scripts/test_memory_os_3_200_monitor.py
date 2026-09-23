@@ -6591,7 +6591,7 @@ def test_principal_binding_summary_reports_no_state_db(tmp_path):
 
 
 def test_principal_binding_summary_uses_state_db_path_accessor_not_a_rebuilt_literal(tmp_path, monkeypatch):
-    """DW counterfactual: principal_binding_summary must resolve state.db
+    """DU counterfactual: principal_binding_summary must resolve state.db
     through roots.state_db_path (SFE's accessor), not by rebuilding
     os.path.join(hermes_home, "state.db") itself -- CLAUDE.md's "path literal
     repeated at each call site" class of drift.
@@ -6675,7 +6675,7 @@ def test_bound_single_user_and_ruled_sources_are_info_only():
 
 
 def test_classify_principal_binding_ruled_sources_track_principal_machine_session_sources_live(monkeypatch):
-    """DW counterfactual: _classify_principal_binding's ruled_sources must read
+    """DU counterfactual: _classify_principal_binding's ruled_sources must read
     principal.MACHINE_SESSION_SOURCES live at classification time, not a frozen
     copy hardcoded inside the monitor module. Removing "subagent" from the
     accessor's set must make an otherwise machine-exempted unconfigured
@@ -6727,7 +6727,7 @@ def test_graph_layer_novelty_is_info_only_never_graded():
             assert not any(item["code"].startswith("graph_layer_novelty") for item in graded[bucket])
 
 
-# ─── DW: monitor part 2 -- lane_backend_transport_summary() collector +
+# ─── DU: monitor part 2 -- lane_backend_transport_summary() collector +
 # J1/L1/SFE grading (2026-09-23) ─────────────────────────────────────────────
 
 def test_fact_judge_lane_report_contains_the_keys_the_monitor_reads(tmp_path):
@@ -6775,6 +6775,33 @@ def test_lane_backend_transport_summary_no_sample_without_any_ledgers(tmp_path):
     summary = namespace["lane_backend_transport_summary"]()
     assert summary["lanes"]["fact_judge"]["status"] == "no_sample"
     assert summary["lanes"]["session_fact_extraction"]["status"] == "no_sample"
+
+
+def test_lane_ledger_collectors_follow_the_producer_path_accessors(tmp_path, monkeypatch):
+    """Counterfactual (path drift): the monitor rebuilt runs.jsonl and
+    verdicts.jsonl as literals in two collectors. If a producer moves its
+    ledger, a literal reader just finds nothing — no error, no counter. Moving
+    both accessors must move both readers."""
+    from plugins.modules.cognition import session_fact_extraction as sfe_module
+    from plugins.modules.governance import fact_judge as fact_judge_module
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    runs = elsewhere / "runs.jsonl"
+    verdicts = elsewhere / "verdicts.jsonl"
+    # llm_calls > 0: the streak collector counts only runs that attempted a call.
+    runs.write_text(json.dumps({"input_source": "state_db", "llm_calls": 1}) + "\n", encoding="utf-8")
+    verdicts.write_text(json.dumps({"failure_reason": ""}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sfe_module, "_runs_path", lambda store: runs)
+    monkeypatch.setattr(fact_judge_module, "_verdicts_path", lambda store: verdicts)
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    transport = namespace["lane_backend_transport_summary"]()["lanes"]["session_fact_extraction"]
+    streak = namespace["llm_lane_failure_streak_summary"]()["lanes"]
+
+    assert transport["status"] == "ok" and transport["input_source"] == "state_db"
+    assert streak["session_fact_extraction"]["sample_count"] == 1
+    assert streak["fact_judge"]["sample_count"] == 1
 
 
 def _add_gate_envelope(store, envelope_id: str, *, lane_id: str, risk_class: str) -> None:
@@ -6963,7 +6990,7 @@ def test_fact_judge_backend_state_is_always_info():
 
 
 def test_fact_judge_backend_fallback_all_warns_when_every_jev_attempt_falls_back():
-    """DS/DW: Jev is opt-in; a tick that selected it but had every judged
+    """DS/DU: Jev is opt-in; a tick that selected it but had every judged
     candidate fall back to hermes_default means it is silently dead, not
     merely degraded once."""
     snapshot = _fact_judge_backend_snapshot(
@@ -7060,7 +7087,7 @@ def test_lane_backend_transport_missing_key_adds_nothing():
         code.startswith("fact_judge_backend") or code.startswith("session_fact_extraction_backend")
         for code in codes
     )
-# ─── end DW test block ──────────────────────────────────────────────────────
+# ─── end DU test block ──────────────────────────────────────────────────────
 
 
 def _retention_snapshot(**retention_overrides):
