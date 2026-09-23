@@ -8344,8 +8344,10 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   既有端到端测试）；7 个既有测试文件的 mock 目标改名；
   全量 3966 passed / 13 skipped / 1 failed——失败的是 Windows 上的并发 flake
   `test_completion_append_and_sidecar_are_idempotent_under_concurrency`（两线程并发完成同一信封，无 `fcntl` 进程锁时
-  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。单测对照采样：C0 末端 0/18、
-  L1 末端 2/18（Fisher p≈0.24，不显著），以 Linux CI 为准；若 CI 上也出现，再作为 L1 相关问题深挖。五门全绿。
+  `os.replace` 竞争得 `PermissionError`；本 PR 未触及 execution_gate / jsonl_io / store）。与 L1 **相关但未证实因果**：
+  不含 L1 的四轮全量（G0 ×2、C0 ×2）0 失败，含 L1 的两轮全量（L1、P0 末端）共 3 次失败；单测对照 C0 末端 0/18、L1 末端 2/18。
+  可能的机制是 L1 的测试在磁盘上造假 Hermes 根、`_resolve_llm_transport` 每次调用读一次 knob 存储，加重了 Windows 上的 I/O 争用，
+  而竞争本身早已存在于 execution_gate。决定性证据：#86 / #87 的 Linux CI 各两轮全绿，生产也是 Linux。五门全绿。
 - **遗留**：每次调用都会重新导入 `agent.auxiliary_client`（作用域结束即清理，约 0.45s/次，cron lane 可接受）；`llm_route_unexpected`
   （实际 provider ≠ 请求 provider）的 monitor 分级与 `response.model` 展示待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署。部署后验收：fact_judge / SFE / llm_edge_proposer 的 `llm_transport=hermes_call_llm`、
@@ -8386,7 +8388,7 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   退回兼容态 `unknown`）。据其 SHOULD-FIX 修一处：`install_memory_os.sh` 在执行前用 `printf '%q'` 回显完整 argv，
   `--owner-identity` 的明文 id 会进部署日志——回显改用打码副本（`<platform>:<masked>`），测试截取脚本自身的这段交给 bash 执行，
   放回明文即失败。其余三条记为遗留（见下）。
-- **测试**：principal +45 个函数（参数化实跑 51）、ingress +4、turn_author +10（含 cron 反事实）、plugin_install +9（含保留与回显打码反事实）、
+- **测试**：principal +45 个函数（参数化实跑 51）、ingress +4、turn_author +11（含 cron 与 subagent 两条反事实）、plugin_install +9（含保留与回显打码反事实）、
   deploy +7；全量（整链末端）4048 passed / 13 skipped / 2 failed——两条失败是已知的 Windows 并发 flake
   （`test_completion_append_and_sidecar_are_idempotent_under_concurrency`、`test_execution_gate_runner_serializes_parallel_sidecar_updates`，
   `PermissionError` 于并发 sidecar 替换；整链未触及 execution_gate / runner / jsonl_io / store，G0 与 C0 两轮全量均通过，单独重跑

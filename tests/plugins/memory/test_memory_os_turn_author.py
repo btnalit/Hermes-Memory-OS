@@ -445,3 +445,23 @@ def test_cron_session_turn_keeps_its_pre_principal_handling(tmp_path):
     assert event.safe_ref["principal"] == "system"
     assert "drive_policy" not in event.safe_ref
     assert "non_driving_reason" not in event.safe_ref
+
+
+def test_subagent_context_turn_keeps_its_pre_principal_handling(tmp_path):
+    """The other path to principal "system": a non-primary Hermes context
+    (subagent, ~360 sessions a month on production main) with an ordinary
+    session id. sync_turn does not short-circuit non-primary contexts, so its
+    turns reach the foreground gate too and must keep the pre-principal
+    handling, exactly as cron turns do."""
+    session_id = "20260923_subagent_session"
+    _seed_owner_identity(tmp_path, "telegram", _OWNER_ID)
+    provider = _provider(tmp_path, session_id, worker_autostart=False, agent_context="subagent")
+    try:
+        provider.on_turn_start(1, "summarise the build log")
+        provider.sync_turn("summarise the build log", "summary", session_id=session_id)
+        event = _queued_event(provider)
+    finally:
+        provider.shutdown()
+    assert event.safe_ref["principal"] == "system"
+    assert "drive_policy" not in event.safe_ref
+    assert "non_driving_reason" not in event.safe_ref

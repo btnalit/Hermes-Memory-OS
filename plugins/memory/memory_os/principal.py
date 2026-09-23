@@ -464,7 +464,7 @@ def discover_owner_identity_bindings(
     previous_sources = previous.get("binding_sources") if isinstance(previous.get("binding_sources"), dict) else {}
     for platform, source in previous_sources.items():
         key = _normalize_source(platform)
-        ids = previous_ids.get(platform)
+        ids = previous_ids.get(platform, previous_ids.get(key))
         if source != "explicit_owner_identity" or not key or key in bindings or not isinstance(ids, list):
             continue
         normalized_ids = [str(item).strip() for item in ids if str(item or "").strip()]

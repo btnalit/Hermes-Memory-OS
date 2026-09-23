@@ -212,11 +212,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # P0-lite principal model (docs/plans/2026-09-23-memory-os-next-phase-plan.md
     # S2/S3). ``owner_identities``: per-platform list of ids that resolve to
     # ``principal.PRINCIPAL_OWNER`` (see ``principal.resolve_principal``).
-    # ``binding_sources``: per-platform provenance string for that list
-    # (installer-written -- "explicit_owner_identity" / "home_channel_dm_shape"
-    # / "allowed_users_single_entry+home_channel" / "conflict" /
-    # "unverifiable" / "allow_all_open" / "unconfigured"), read by
+    # ``binding_sources``: per-platform provenance of a *bound* list
+    # (installer-written -- "explicit_owner_identity", also kept for an
+    # explicit binding retained from an earlier install; "home_channel_dm_shape";
+    # or the agreeing signal sources joined by "+", e.g.
+    # "allowed_users_single_entry+home_channel"), read by
     # ``principal.principal_binding_status`` for a future monitor grading.
+    # Unbound discovery outcomes (conflict / unverifiable / allow_all_open /
+    # unconfigured) and the explicit_retained status exist only in the
+    # install report, never here.
     # A platform absent from ``owner_identities`` is compatibility mode
     # (``principal.PRINCIPAL_UNKNOWN``, today's pre-P0-lite behaviour).
     "principal": {
