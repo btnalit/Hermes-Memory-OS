@@ -349,6 +349,23 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # J1: optional structured-judge backend for fact_judge (owner ruling
+    # 2026-09-23, next-phase plan row J1). Default "hermes_default" keeps
+    # fact_judge's existing free-text LLM judge path byte-identical; the
+    # "typesafe_jev" alternative routes the durable-fact question through
+    # jev_backend.py's native noul primitive instead. Same shape as
+    # llm_transport (string-enum lane_switch): the knob override is the
+    # rollback/rollout switch, always owner-gated (never auto-approvable --
+    # see knob_override_auto_approvable's kind=="lane_switch" exclusion).
+    "fact_judge_judge_backend": {
+        "module": "fact_judge",
+        "default": "hermes_default",
+        "kind": "lane_switch",
+        "allowed": ["hermes_default", "typesafe_jev"],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── session_fact_extraction lane knobs (offline, INV-5-safe) ─────────
     "session_fact_extraction_max_sessions_per_tick": {
         "module": "session_fact_extraction",
@@ -357,6 +374,36 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "meta": False,
         "scope": "upper_layer",
         "ab_metric": "sessions_processed_per_tick",
+    },
+    # SFE (2026-09-23): state.db has no per-file directory listing, so the
+    # sessions query needs its own scan bound distinct from
+    # max_sessions_per_tick (the LLM-extraction budget). Production's session
+    # mix is ~95% cron/subagent (machine, principal=system) interleaved by
+    # recency with the small owner-conversation minority; without a scan cap
+    # well above the extraction budget, a tight cap combined with newest-first
+    # ordering would let machine-session noise starve owner sessions out of
+    # every tick's window (the same head-of-queue class of bug
+    # session_mirror.scan already hit, just via source-mix instead of
+    # lexicographic sort).
+    "session_fact_extraction_max_sessions_scanned_per_tick": {
+        "module": "session_fact_extraction",
+        "default": 500,
+        "bounds": [10, 5000],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    # SFE (2026-09-23): bounds the `sessions.started_at` (epoch-seconds REAL)
+    # query window. 180 days comfortably covers the full backlog since
+    # Hermes switched to state.db (~2026-05), while keeping the query bounded
+    # rather than an unbounded full-table scan as the table grows.
+    "session_fact_extraction_lookback_days": {
+        "module": "session_fact_extraction",
+        "default": 180,
+        "bounds": [1, 720],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
     },
     "session_fact_extraction_max_messages_per_session": {
         "module": "session_fact_extraction",

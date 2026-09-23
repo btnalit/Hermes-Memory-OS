@@ -5033,6 +5033,14 @@ sannai-community 仓库 README。）
 
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
   新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿。全量 4068 passed。**未部署**。
+- `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
+  真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
+- `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
+  非主人；主会话修掉"机器会话占满扫描窗口导致积压永不排空"，monitor 输入新鲜度改看 state.db。全量 4062 passed。**未部署**。
+- `7c72f63..HEAD`：C2（DQ）——memory projection 压缩接成 tick-daily 治理 lane（六处清单），顺带修掉压缩器两个从未触发过的缺陷
+  （读改写不持锁会吞并发追加、坏行被静默永久丢弃），monitor 谓词从"跑过一次就永远 PASS"改为按最近一次结果与新鲜度 × 增长分级。全量 4061 passed。**未部署**。
+- `7c72f63..HEAD`：monitor 接线 part 1（DP）——C3 右脑退役源的 55C/55G 豁免（显式 INFO，绝不靠历史残留过关）、P0 主体普查
+  （未配置平台近 30 天 ≥2 个不同用户 → 生产 FAIL / clean-host WARN，只出计数不出 id）、G0 新颖度 INFO（刻意不分级）。全量 4059 passed。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8403,6 +8411,149 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DP — monitor 接线 part 1：C3 退役源豁免、P0 主体普查分级、G0 新颖度（2026-09-23）
+
+- **背景**：规划本波把 monitor 归主会话独占（四个 Sonnet 并行，只允许它们登记 `ERROR_RECORD_EMITTING_COMPONENTS`）。part 1 接三项已落地
+  改动的 monitor 面；SFE 输入源新鲜度、C2 压缩新鲜度、J1 / L1 的 backend / provider / model 展示、G1 的 `superseded_by_newer` 留待
+  各自交付后的 part 2（fact_judge 的 `verdicts.jsonl` 不含 provider / model，诊断只在 lane 运行报告里，而 J1 / SFE 正在改这两处）。
+- **C3**：55C 的 `wandering_mind_state`、55G 的 `wandering_mind_cadence` 是右脑源；右脑 archive lifecycle 为 `retirement_pending` /
+  `retired` 时这两项要求豁免，报 INFO `memory_projection_retired_source_exempt`（列出源与 lifecycle）——既不 FAIL，也不因历史残留字段而
+  算作通过；未退役时照旧缺字段 FAIL。`RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES` 由测试钉死必须是真实的 55C/55G 源。退役判定抽成
+  `_legacy_right_brain_retired(snapshot)`，`classify_snapshot` 与 `_classify_left_brain_signal_weaving`（新增 `info` 参数）共用。
+- **P0 主体普查**：嵌入式采集器 `principal_binding_summary` 只读打开 `state.db`（`mode=ro`），按 `started_at`（epoch 数值）取近 30 天，
+  按平台汇总会话数 / 不同用户数 / 无 user 会话数 / 已配置平台的非主人会话数，配置与绑定状态走 `config.load_config` +
+  `principal.principal_binding_status`——只出计数，任何 id 不出主机。分级：机器源（cron / subagent）、本地源、mailbox、api 按规则排除；
+  已绑定 → INFO；未绑定且 ≥2 个不同用户（没有主人名单就无法判断谁是主人，但两个不同用户不可能都是）→ WARN
+  `principal_platform_unbound_with_non_owner_sessions`，clean-host 分类表登记为 `fail_if_production`，生产即 FAIL，提示写明两种补法；
+  其余 INFO；采集失败 / 无 `state.db` → INFO no-sample，绝不 PASS。`principal_binding_status` 的 docstring 从"未接线"改为指向采集器。
+- **G0 新颖度**：`graph_layer_novelty_summary` 调 `prefetch.graph_layer_shadow_novelty_summary`（有界尾读），`error_records` 只出计数；
+  分级刻意只出 INFO（新颖度是词面不相交的代理量，单独优化会奖励无关邻居），作 G1 / G4 的基线。
+- **反事实**（破坏即失败、恢复即通过）：去掉 55C 豁免；把"≥2 用户"门槛放宽；把分类表的 `fail_if_production` 改掉（生产不再升级 FAIL）。
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修一处：采集器原本写死 `sessions.user_id`，仓库里另两处读同一张表时会在多个列名间
+  探测，一个测试夹具的表甚至没有这一列。先只读核实生产（2026-09-23，两个 profile 均有 `user_id TEXT` / `started_at REAL`，main 3494 个会话中
+  475 个带 user_id），再按开源兼容处理：用 `PRAGMA table_info` 探测，缺列时报封闭状态 `state_db_without_user_id` 并列出缺失列，
+  其它异常附截断的 `collection_error_detail`——不再以一个裸 `OperationalError` 永久静默成 INFO。另补 NIT：`lifecycle: disabled`
+  （sannai 现状）不豁免。审查另指出：群聊若不按发送者分会话，多人会落进 `unattributed_session_count` 而不计入不同用户数——这是
+  P0 设计沿袭的假设，记为遗留（`sessions` 表另有 `chat_type` / `chat_id` 可供 Phase 2 细化）。
+- **测试**：+11（C3 豁免、词表守卫与 disabled 3，P0 采集器与分级 6，新颖度 2）；monitor + principal + lane_contracts 493 passed；全量 4059 passed / 13 skipped / 1 failed
+  （已知 Windows 并发 flake `test_completion_append_and_sidecar_are_idempotent_under_concurrency`，见 DN）；五门全绿。
+- **部署**：随规划全部落地后统一部署。部署后预期：main / sannai 的 Telegram 为 `principal_platform_bound`，无 `_unbound_with_non_owner_sessions`；
+  若部署早于 principal 配置写入，Telegram 会报该 FAIL——那正是它要抓的状态。
+
+---
+
+## DQ — C2：memory projection 压缩接入生产 + 压缩器两处潜伏缺陷 + 新鲜度谓词（2026-09-23）
+
+- **背景**：`memory_projection.compact_memory_projection_records` 已实现却没有任何 lane 调用（唯一的生产调用是一次手动 CLI），
+  `memory_projections.jsonl` 无界增长；monitor 的判据是 `compaction_count > 0`——手动跑过一次就永远 PASS。
+- **新 lane**（Sonnet 子代理，按六处清单）：① `cron_registry` 新增 `memory_projection_compaction`（`local_helper`，`due_interval_minutes=1440`，
+  不进 `LEGACY_PER_LANE_CRON_JOBS`）；② 加入 `tick_daily.member_keys`（第 7 个成员，调度不变）；③ 不加 knob（唯一可调量是模块常量，
+  沿用 G0 shadow 压缩的先例）；④ installer 的 `SOURCE_*` 与 `_write_operational_helper_scripts` 条目 + 新 helper
+  `scripts/memory_os_memory_projection_compaction_lane.py`（异常结果退出码 1，让包裹它的 ExecutionGate 完成记录为 `error`）；⑤ 无新发射点
+  （复用已登记的 `memory_projection` 组件）；⑥ 部署时必须重新生成已安装的注册表快照，否则新 lane 在已接入主机上**静默缺席**。另在 C0 的
+  `lane_contracts` 登记、`LANE_LAST_RUN_EVIDENCE` 记为 `dedicated_artifact`（压缩报告本身就是每轮证据）。CLAUDE.md 的 Cron Profile 同步为
+  24 lane / active-closure 23 lane。
+- **子代理读全函数（W 规则 1）查出的两处潜伏缺陷**（函数从未在生产跑过，所以一直没暴露）：
+  - **读改写不持锁**：先读全文件、再整文件覆盖，而认知循环的采集写路径 `append_governed_jsonl` 在同一文件上持 sidecar flock——两者之间
+    落下的并发追加会被静默覆盖掉。现在整个函数在 `jsonl_io.locked_jsonl_file` 内执行（锁内读不加锁、原子写不加锁、写的另一个账本是另一把锁，
+    同一路径无重入，Linux flock 不会自锁死；追加方都在持锁后才打开数据文件，替换后不会写进旧 inode）。
+  - **坏行被静默永久丢弃**：本地 `_read_jsonl` 遇解析失败 `continue`，重写只保留能解析的行。改用 `read_jsonl_result`，有坏行即拒绝并原样保留
+    活文件。封闭结果集 `MEMORY_PROJECTION_COMPACTION_REASONS = {compacted, nothing_to_drop, malformed_lines_present, write_failed}`；
+    写失败时 `status=error` 并附截断的 `write_error`（主会话补），归档先于删除仍成立。
+- **monitor 谓词**（主会话在本 PR 内实现，C2 语义归属本 PR）：`memory_projection_retention_status()` 新增 `latest_completed_at` / `latest_status`
+  / `latest_reason` / `latest_malformed_line_count`。分级：最近一次 `refused` / `error` → `memory_projection_retention_compaction_failed`
+  （生产 FAIL，不论新旧）；超过两个日间隔（48h，取自 lane 的 `due_interval_minutes`，不取 cron 表达式）**且**此后账本有增长 →
+  `memory_projection_retention_compaction_stale`（WARN）；超时但账本没长 → 照常 PASS（空闲不等于坏）；从未压缩 → 原有 `_missing`。
+- **反事实**（破坏即失败、恢复即通过）：子代理 4 条（并发追加串行化、坏行拒绝、写失败不毁数据、nothing_to_drop）以修复前版本验证全部失败；
+  主会话 2 条（退回"跑过就过"的旧谓词、去掉失败分支）。另有一条由真实压缩器产出 retention 状态再分级的测试，钉住字段名。
+- **全量抓到的第七处**：首轮全量唯一失败是 `test_loop_members_partition_every_registered_lane_exactly_once`——新 lane 没放进
+  `loop_health_view.LOOP_MEMBERS`（归入 memory 环，与 working_cleanup / state_source_mirror 同类）。根因是 CLAUDE.md 的"加 lane 改六处"
+  清单没列出按 lane 双向普查的三张表（`LANE_LAST_RUN_EVIDENCE`、`LOOP_MEMBERS`、C0 的 `LANE_CONTRACTS`），子代理照清单做、定向测试全绿，
+  只有全量能抓到；清单已补上这三张表。
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修两处：lane 契约的 `monitor_codes` 漏登记本 PR 新增的 `_failed` / `_stale`（C0 普查只查
+  "声明 ⊆ 发射"，反方向靠人）；`write_failed` 报告里的 `output_count` / `archived_count` 报的是计划拆分而非磁盘现状——活文件其实原样未动，
+  现改为 `output_count = input_count`、`archived_count = 0`（破坏即失败的反事实已验证）。
+- **测试**：projection +4、monitor +4，`test_active_closure_profile_installs_eight_hermes_cron_jobs` 按其 docstring 约定的方式把 lane 数 22→23；
+  全量 4061 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
+- **部署**：随规划全部落地后统一部署；**必须重新生成注册表快照**并核对 `memory_projection_compaction` 出现在 `tick_daily` 成员里。部署前的历史
+  压缩记录不带 status / reason 且 `completed_at` 很旧，首个 00:05 之前 monitor 会报 `compaction_stale`（WARN，不是 FAIL），首轮之后消失。
+  Windows 开发机上 `locked_jsonl_file` 退化为进程内锁，跨进程排他只在 Linux 生产主机上成立（正是需要的地方）。
+
+---
+
+## DR — SFE：session_fact_extraction 改读 state.db + 主体过滤（2026-09-23）
+
+- **背景**：Hermes 自 2026-05/06 起不再写 `sessions/session_*.json`，SFE 从那以后零产出（sannai 自 8/26 起零入库）；C0 的 `lane_input_stale`
+  正是为它而设。规划要求改读 `state.db`、经主体模型过滤非主人、`started_at` 按 epoch 数值比较（与 ISO 字符串比较会静默返回空）。
+- **子代理只读核实生产表结构**（两个 profile）：`sessions`（`source` / `user_id` / `started_at REAL` / `last_activity_at REAL` / `message_count`
+  / `chat_type` ∈ {None, dm, group, webhook} / `session_key`）、`messages`（`session_id` / `role` ∈ {user, assistant, tool, session_meta} /
+  `content` / `timestamp REAL`）。**纠正了一个既有假设**：state.db 里 cron / subagent 会话的 id 是日期哈希，不带 provider 运行时看到的 `cron_`
+  前缀，`is_scheduled_session_id` 抓不到它们——改为按 `source` 映射到 `non_primary_context`，判定仍只在 `resolve_principal`。群聊 `session_key`
+  含发送者 user_id（按发送者分会话当前生效），保留为 INFO 绊线。
+- **改动**（Sonnet 子代理实现，主会话审查）：新增 `roots.state_db_path` accessor；以 `mode=ro` 读；每个会话经
+  `resolve_principal(source, user_id, author_class="", non_primary_context=source∈机器源)`，只有 owner / unknown 进入抽取；peer_agent /
+  other_human 记终态指纹（稀少、稳定），system 不记指纹（约 95% 的量，每轮由 `source` 即可重算）；SQL 层 `substr` 截断到 `max_message_chars`、
+  只取 user / assistant、每会话硬上限 500 行；新 knob `session_fact_extraction_max_sessions_scanned_per_tick`（500）与 `_lookback_days`（180）；
+  指纹改为 (session_id, message_count, last_activity_at)；schema v0→v1（诚实的纪元边界），新增 `input_source`、`sessions_skipped_by_principal`、
+  `group_sessions_scanned`、`group_sessions_without_user_suffix`；旧 JSON 读路径删除，跳过原因改为 `state_db_absent` / `sessions_table_missing` /
+  `no_sessions_in_window` / `no_actionable_sessions`；新发射点 `session_fact_extraction.state_db` 已登记。
+- **主会话审查修掉的一处（饥饿）**：候选查询是 `ORDER BY started_at DESC LIMIT 500`，LIMIT 在主体过滤之前生效，而机器会话约占 95%
+  （main 30 天 1190 个会话中 1131 个）且从不记指纹——窗口每轮都被它们填满（500 个 ≈ 12 天流量），比窗口更早的主人会话永远扫不到，
+  5 月以来的积压永远排不空。机器源改在 SQL 里排除（`lower(source) NOT IN`），另起一条 COUNT 查询计入 `sessions_skipped_by_principal.system`，
+  全部机器会话时跳过原因为 `no_actionable_sessions` 而不是"窗口里没会话"。机器源集合收归 `principal.MACHINE_SESSION_SOURCES` 一处定义。
+  反事实：12 个更新的 cron / subagent 会话 + 1 个更早的主人会话、扫描上限 10——旧查询下主人会话处理数为 0，修复后为 1。
+- **monitor 输入新鲜度**（主会话在本 PR 内做，SFE 语义归属本 PR）：`lane_input_freshness_summary` 从数 `session_*.json` 改为只读查询
+  `state.db` 的 `COUNT(*)` 与 `MAX(COALESCE(last_activity_at, started_at))`，统计全部会话（问的是 state.db 是否还在被写，不是此刻是否有可抽取
+  内容）；输出键名不变，分级不改。C0 的路径守卫测试改为经 `roots.state_db_path` 落库。
+- **反事实**：子代理 5 条（SQL 截断、角色过滤、system 不记指纹、已处理指纹、epoch-vs-ISO 窗口），主会话 1 条（机器会话饥饿）。
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修两处（各有破坏即失败的反事实）：state.db 存在但打不开时原本也报 `state_db_absent`，
+  与"没有文件"同貌——新增封闭原因 `state_db_open_failed`；未按发送者拆分的群会话的风险原本只体现在 lane 汇总计数里，现在每条候选与其 provenance
+  事件都带 `shared_session_unsplit`（未拆分群会话，或 `chat_type=webhook`——其 user_id 指的是投递的集成而非某个人），主人单看一条候选即可知道
+  它可能不是自己说的。审查另提示 peer / other_human 会话同样占扫描窗口（当前每 30 天约 59 个非机器会话，远低于 500），记为遗留。
+- **测试**：SFE 测试文件重写为 37 条（真实 SQLite 夹具）、monitor 新鲜度 2 条改写；全量 4062 passed / 13 skipped（审查修复前）；五门全绿。
+- **遗留**：`tool` / `webhook` / `v3-*` 等少量自定义来源与未配置的 wecom / weixin 落兼容态 `unknown`，可进入抽取（30 天内均为 0～1 个会话）；
+  monitor part 1 的主体普查仍手写 `state.db` 路径、本地定义机器源常量（与本分支并行），part 2 统一改用 `roots.state_db_path` 与
+  `principal.MACHINE_SESSION_SOURCES`；另有三处既有代码仍手写 `state.db` 路径（session_mirror / owner_actions / seam owner_channel_adapter），
+  未迁移；新计数尚未接入 monitor 分级。
+- **部署**：随规划全部落地后统一部署；部署后验收：main / sannai 的 `lane_input_stale` 消失，SFE `input_source=state_db`、
+  `sessions_skipped_by_principal.system>0`、主人会话 `facts_extracted>0`（依赖 L1 的 call_llm 已恢复 LLM 回复）。
+
+---
+
+## DS — J1：可选 TypeSafe Jev 判官后端，fact_judge 试点（2026-09-23）
+
+- **owner 裁定**：Jev 类判官是可选模块、默认关闭；改写成 Jev 原生的 `instructions` + `criteria` 结构（不是把旧的自由文本 prompt 包成一个问题），
+  先弄清官网用法；fact_judge 真实测试后再评估其他 lane。key 按 Hindsight 惯例：配置只存环境变量名 `api_key_env_var`（默认 `TYPESAFE_API_KEY`），
+  值在主机 `~/.hermes/.env`。
+- **官网核实**（Sonnet 子代理，URL 见 `jev_backend.py` 模块文档）：`POST https://api.typesafe.ai/v1/systemone`，Bearer 鉴权，`{state, model, questions}`；
+  `noul`（是/否概率）/ `choice`（≤255 选项，带 confidence）/ `score`（2–10 级）；官方选型指引明确"是/否判断用 noul"；**noul 不带 confidence**。
+  发现一处文档与线上不一致：文档说畸形问题返回 422，线上实为 400（两者都归入 `llm_http_4xx`）。
+- **真实 key 实测**（7 次调用，key 从不打印，探针脚本用后即删）：明确的长期事实 noul=0.94、一时性瞬间 0.02、模棱两可 0.39；choice / score 各一次；
+  畸形请求 400；错误 key 401；延迟 0.55–2.7s。端到端跑 `scripts/memory_os_jev_probe.py` 与预期一致。
+- **改动**：`plugins/memory/memory_os/jev_backend.py`（唯一知道 Jev 线格式的文件；stdlib `urllib`，无 SDK；封闭失败集在共享词表之上加
+  `llm_overloaded`（529）与 `llm_parse_failed`；缺 key 在联网前即返回 `llm_missing_key`；输入截断；永不抛出）。fact_judge 的持久事实判断映射为
+  原生 `noul` 问题；noul 无原生置信度，`confidence` 按 `2·|p−0.5|` 派生并在 docstring 注明；阈值沿用现有的宽 / 严不对称（结晶数少时 0.4 偏向收录，
+  否则 0.6）。knob `fact_judge_judge_backend`（`hermes_default` 默认 | `typesafe_jev`，`lane_switch`，永不自动批准），每 tick 解析一次、knob 覆盖优先于
+  lane config。Jev 任何失败回落到原 hermes_default 路径（它自身仍会在耗尽后回落到启发式），并计 `judge_backend_fallback_count` / `_reasons`。
+  默认关闭时：不调用 Jev、verdict 记录无新键，报告只多了恒定的 ADD-only 字段。CLAUDE.md 的 LLM Integration 节登记凭证例外，并由主会话补上
+  **数据外发**一句：开启即把（截断的）候选正文发往 Hermes provider 链之外的第三方，所以只能由 owner 翻 knob。
+- **其他 lane 评估**（只评估未实现）：clearance_cycle 每对判定适合 `choice`（clear / conflict / unknown，带原生 confidence）；llm_contradiction_lane
+  适合 `noul`，但该 lane 两边仍关闭，应等其重新启用后再接，避免两件事搅在一起；low_clue 候选选择需先看清选择语义（多选一用 `choice`、逐个打分用
+  `score`）；抽取 / 生成类 lane 不适用。
+- **反事实**（子代理，破坏即失败、恢复即通过）：去掉 529 特判；强制绕过默认关闭守卫；去掉缺 key 的联网前短路。
+- **独立审查（Sonnet）无阻塞**（默认关闭逐字节不变、key 卫生、失败封闭集、INV-5 边界均核实），据其 SHOULD-FIX 修两处（各有破坏即失败的
+  反事实）：`judge_noul` 只查 `noul` 字段是否存在，不查答案声明的 `type`——带着多余 `noul` 字段、类型却是 choice 的答案会被当成 noul 判定，
+  现要求 `type == "noul"`，原测试夹具根本没有 `noul` 字段所以覆盖不到；429（限流）与 400 / 422（请求畸形）同归 `llm_http_4xx`，而唯一保留原始
+  状态与报文的 `jev_failure_detail` 在回落时被丢弃——生产上看 `llm_http_4xx: N` 分不清"被限流"与"payload 写错"。429 改为独立的
+  `llm_rate_limited`，回落时把截断的错误详情带到 tick 报告的 `judge_backend_fallback_detail_sample`。
+- **测试**：jev_backend +40、fact_judge +25、probe +3；全量 4110 passed / 13 skipped（审查修复前）；五门全绿。
+- **遗留 / 待 owner 定**：阈值 0.4 / 0.6 是模块常量（与 `LEAN_CAPTURE_THRESHOLD` 同为非 knob），是否要开放可调由 owner 定；monitor 读取
+  `judge_backend` / 回落计数待 monitor part 2；开启前建议先在 sannai 小流量试（`fact_judge_max_per_tick` 默认 8 已限流）。
+- **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY` 并由 owner 登记
+  `fact_judge_judge_backend=typesafe_jev` 覆盖；部署后可先跑 `scripts/memory_os_jev_probe.py` 做只读验证。
 
 ---
 
