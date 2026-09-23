@@ -1221,6 +1221,94 @@ def test_resolve_hermes_default_runtime_dedupes_stale_explicit_root_to_front(tmp
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# W4-A / plan row L1 — LlmCallResult.route_unexpected / route_unknown.
+# Direct unit tests of the dataclass's __post_init__ derivation: an unknown
+# actual model is NEVER also route_unexpected (mutually exclusive by
+# construction); Memory-OS does no alias stripping/per-provider comparison
+# of its own (owner ruling 2026-09-10) -- plain string equality only.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_llm_call_result_route_unexpected_true_when_hermes_routes_to_another_provider():
+    """Plan row L1: the signal is actual provider != requested provider --
+    Hermes' silent cross-provider fallback on payment/quota/429 errors."""
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", model="some-model", expected_model="some-model",
+        expected_provider="openai-codex", routed_provider="fallback-provider",
+    )
+    assert result.route_unexpected is True
+    assert result.route_unknown is False
+
+
+def test_llm_call_result_model_alias_alone_is_not_a_route_change():
+    """Main-session integration counterfactual: both production profiles pin
+    ``gpt-5.6-luna-900k``, a Hermes-side alias Hermes strips before sending,
+    so the answer names ``gpt-5.6-luna``. Comparing model strings flagged
+    every call on those hosts; normalising the alias here is the per-provider
+    adaptation the 2026-09-10 owner ruling forbids. Same provider = no
+    route change."""
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", model="gpt-5.6-luna", expected_model="gpt-5.6-luna-900k",
+        expected_provider="openai-codex", routed_provider="openai-codex",
+    )
+    assert result.actual_model == "gpt-5.6-luna"
+    assert result.route_unexpected is False
+    assert result.route_unknown is False
+
+
+def test_llm_call_result_route_unknown_when_hermes_reports_no_provider():
+    """No routed provider (Hermes did not report one, or no call happened)
+    is route_unknown, never route_unexpected."""
+    result = low_clue_recall_module.LlmCallResult(
+        failure_reason="llm_empty_content", expected_provider="openai-codex",
+    )
+    assert result.route_unknown is True
+    assert result.route_unexpected is False
+
+
+def test_llm_call_result_route_fields_default_when_no_expectation_resolved():
+    """No expected provider at all (e.g. the runtime-resolve step failed):
+    nothing to compare against, so route_unexpected stays False."""
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", model="some-model", routed_provider="openai-codex",
+    )
+    assert result.expected_provider is None
+    assert result.route_unexpected is False
+    assert result.route_unknown is False
+
+
+def test_llm_call_diagnostics_forwards_route_fields_and_preserves_existing_keys():
+    """The shared helper (low_clue_recall._llm_call_diagnostics) is the
+    single seam every LLM lane's forwarding code delegates to (W4-A): every
+    pre-existing key keeps its exact name/value, plus the route keys."""
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", failure_reason="", provider="fallback-provider",
+        model="answering-model", expected_model="pinned-model",
+        expected_provider="openai-codex", routed_provider="fallback-provider",
+        transport="hermes_call_llm", usage={"prompt_tokens": 12, "completion_tokens": 7},
+    )
+    diagnostics = low_clue_recall_module._llm_call_diagnostics(result)
+    assert diagnostics == {
+        "llm_transport_failure_reason": "",
+        "llm_provider": "fallback-provider",
+        "llm_model": "answering-model",
+        "llm_transport": "hermes_call_llm",
+        "llm_expected_model": "pinned-model",
+        "llm_actual_model": "answering-model",
+        "llm_expected_provider": "openai-codex",
+        "llm_routed_provider": "fallback-provider",
+        "llm_route_unexpected": True,
+        "llm_route_unknown": False,
+        "llm_usage_prompt_tokens": 12,
+        "llm_usage_completion_tokens": 7,
+    }
+
+
+def test_llm_call_diagnostics_none_result_returns_empty_dict():
+    assert low_clue_recall_module._llm_call_diagnostics(None) == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # W2 — _call_hermes_runtime_model_result: typed transport, no hand-rolled
 # wire clients on the default path (hermes_call_llm), legacy_wire kept only
 # for rollback. Every test injects a FAKE agent.auxiliary_client module via
@@ -1316,6 +1404,31 @@ def test_call_hermes_runtime_model_result_success_records_provider_model_usage(m
     # caller's config names one explicitly.
     assert captured_kwargs["provider"] == "openai-codex"
     assert captured_kwargs["model"] is None
+
+
+def test_call_hermes_runtime_model_result_routed_provider_comes_only_from_route_info(monkeypatch):
+    """The routed provider is what Hermes reports in route_info, never the
+    requested provider as a fallback -- that would turn every call where
+    Hermes reports nothing into a silent "as expected"."""
+    _ok_provider_resolution(monkeypatch)
+    routes: list[dict] = [{}, {"provider": "openai-codex"}, {"provider": "fallback-provider"}]
+
+    def _fake_call_llm(task, **kwargs):
+        kwargs["route_info"].update(routes.pop(0))
+        return _FakeChatCompletion('{"ok": true}')
+
+    _install_fake_call_llm(monkeypatch, _fake_call_llm)
+    config = {"provider": "hermes_default", "timeout_ms": 5000, "max_tokens": 256}
+
+    silent, same, crossed = (
+        low_clue_recall_module._call_hermes_runtime_model_result("hello", config) for _ in range(3)
+    )
+
+    assert silent.route_unknown is True and silent.route_unexpected is False
+    assert same.route_unknown is False and same.route_unexpected is False
+    assert crossed.route_unexpected is True
+    assert crossed.expected_provider == "openai-codex"
+    assert crossed.routed_provider == "fallback-provider"
 
 
 def test_call_hermes_runtime_model_result_explicit_config_model_is_passed_through(monkeypatch):

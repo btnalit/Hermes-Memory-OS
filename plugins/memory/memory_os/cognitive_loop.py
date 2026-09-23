@@ -1086,6 +1086,13 @@ class CognitiveLoopRunner:
             "judge_backend_fallback_count": result.get("judge_backend_fallback_count", 0),
             "judge_backend_fallback_reasons": result.get("judge_backend_fallback_reasons", {}),
             "judge_backend_fallback_detail_sample": result.get("judge_backend_fallback_detail_sample", ""),
+            # W4-A / plan row L1: route-mismatch counters -- must survive
+            # this whitelist too, same shape as the W2 transport diagnostics
+            # note above (see CLAUDE.md's D2b/W2 "two-layer whitelist" hazard).
+            "llm_route_unexpected_count": result.get("llm_route_unexpected_count", 0),
+            "llm_route_unknown_count": result.get("llm_route_unknown_count", 0),
+            "llm_route_unexpected_expected_model": result.get("llm_route_unexpected_expected_model", ""),
+            "llm_route_unexpected_actual_model": result.get("llm_route_unexpected_actual_model", ""),
         }
 
     def _vector_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:

@@ -82,6 +82,40 @@ def test_event_envelope_from_dict_without_principal_defaults_to_legacy_era():
     assert event.principal_schema_version != EVENT_PRINCIPAL_SCHEMA_VERSION
 
 
+def test_legacy_event_round_trips_byte_identically_so_its_index_hash_is_stable():
+    """#95 review counterfactual: record_hash in the index is sha256 of
+    json.dumps(event.to_dict(), sort_keys=True). If to_dict() always emitted
+    the two P2 keys, every pre-P2 event would hash differently after the
+    upgrade and doctor / deploy postcheck would report index_content_mismatch
+    (FAIL) for the whole history until the next index_sync."""
+    import hashlib
+    import json
+
+    raw = _event_dict()
+    del raw["principal"]
+    del raw["principal_schema_version"]
+
+    reserialized = EventEnvelope.from_dict(raw).to_dict()
+
+    assert reserialized == raw
+    assert (
+        hashlib.sha256(json.dumps(reserialized, sort_keys=True).encode("utf-8")).hexdigest()
+        == hashlib.sha256(json.dumps(raw, sort_keys=True).encode("utf-8")).hexdigest()
+    )
+
+
+def test_marked_event_without_principal_still_serializes_both_keys():
+    """The monitor must be able to see a producer bug: a marked row with an
+    empty principal keeps both keys rather than looking legacy."""
+    raw = _event_dict()
+    raw["principal"] = ""
+
+    reserialized = EventEnvelope.from_dict(raw).to_dict()
+
+    assert reserialized["principal"] == ""
+    assert reserialized["principal_schema_version"] == EVENT_PRINCIPAL_SCHEMA_VERSION
+
+
 def test_ids_are_prefixed_and_sortable_for_supplied_times():
     early = datetime(2026, 5, 20, 1, 2, 3, tzinfo=timezone.utc)
     later = datetime(2026, 5, 20, 1, 2, 4, tzinfo=timezone.utc)

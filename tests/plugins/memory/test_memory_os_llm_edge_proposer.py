@@ -818,3 +818,58 @@ class TestJ2CallJevUnit:
         assert set(llm_edge_proposer._JEV_RELATION_CHOICE_CRITERIA.keys()) == {
             "refines", "contradicts", "depends_on", "co_occurs", "none",
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W4-A / plan row L1 — route visibility (llm_route_unexpected_count)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_run_llm_proposer_counts_route_unexpected_when_answering_model_differs(tmp_path, monkeypatch):
+    """W4-A: run_llm_proposer's summary must count calls whose answering
+    model diverged from the pinned one -- LlmCallResult.__post_init__
+    derives route_unexpected from expected_model vs model (see
+    low_clue_recall.py's docstring). Diagnostics-forwarding only: does not
+    touch _call_llm's judgment logic/prompt."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_route_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+        {"id": "cry_route_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+    ])
+    index.rebuild_from_store(store)
+
+    monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(
+            text=_VALID_REFINES_JSON, provider="openai-codex", model="answering-model",
+            expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
+        ),
+    )
+
+    result = run_llm_proposer(str(index.roots.index_path), index=index)
+
+    assert result["llm_route_unexpected_count"] == 1
+    assert result["llm_route_unknown_count"] == 0
+    assert result["llm_route_unexpected_expected_model"] == "pinned-model"
+    assert result["llm_route_unexpected_actual_model"] == "answering-model"
+
+
+def test_run_llm_proposer_counts_route_unknown_when_actual_model_cannot_be_determined(tmp_path, monkeypatch):
+    """Counterfactual companion: an empty-content reply never resolves an
+    actual model -- must count as unknown, NEVER as unexpected (mutually
+    exclusive by construction)."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_unk_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
+        {"id": "cry_unk_b", "created_at": "2026-06-01T11:00:00Z", "body": "B"},
+    ])
+    index.rebuild_from_store(store)
+
+    monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+    _queued_responses(monkeypatch, [""])
+
+    result = run_llm_proposer(str(index.roots.index_path), index=index)
+
+    assert result["llm_route_unknown_count"] == 1
+    assert result["llm_route_unexpected_count"] == 0

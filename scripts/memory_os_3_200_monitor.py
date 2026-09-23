@@ -385,6 +385,14 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host has no LLM-call history yet for these lanes to have failed",
         "production_behavior": "warn_if_production",
     },
+    # W4-A / plan row L1: fires only when an LLM lane actually answered with
+    # a model other than the one it was pinned to; clean-host has no live
+    # LLM-call traffic to have ever diverged.
+    "llm_route_unexpected": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host has no LLM-call history yet for the answering model to have diverged from the pinned one",
+        "production_behavior": "warn_if_production",
+    },
     "cron_registry_snapshot_member_drift": {
         "classification": "next_lane",
         "reason": "deployed cron registry snapshot resolves fewer group members than the installed registry defines - regenerate the snapshot (install/onboarding step)",
@@ -1619,8 +1627,33 @@ def _classify_event_principal_coverage(
             "value": {
                 "marked_event_count": marked_count,
                 "marked_with_principal_count": coverage.get("marked_with_principal_count"),
+                # A window of only system events has not sampled owner turns;
+                # this is what separates that from "owner turns all correct".
+                "marked_by_principal": coverage.get("marked_by_principal", {}),
             },
         })
+
+
+def _llm_route_unexpected_warn_entry(lane: str, summary: dict[str, Any]) -> dict[str, Any] | None:
+    """Build one WARN entry for an LLM lane whose latest run was routed by
+    Hermes to a provider other than the one it explicitly requested (plan
+    row L1: a silent cross-provider fallback). Returns None when the lane's
+    ``llm_route_unexpected_count`` is not positive. The comparison is on
+    providers, not model names (see LlmCallResult in low_clue_recall.py):
+    a Hermes-side model alias such as ``-900k`` never trips it. The models
+    of the mismatched call ride along for the reader.
+    """
+    count = int(summary.get("llm_route_unexpected_count") or 0)
+    if count <= 0:
+        return None
+    return {
+        "code": "llm_route_unexpected",
+        "lane": lane,
+        "llm_route_unexpected_count": count,
+        "routed_provider": str(summary.get("llm_provider") or summary.get("llm_transport_provider") or ""),
+        "expected_model": str(summary.get("llm_route_unexpected_expected_model") or ""),
+        "actual_model": str(summary.get("llm_route_unexpected_actual_model") or ""),
+    }
 
 
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1813,6 +1846,23 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             "value": raw_novelty,
         })
 
+    # W4-A / plan row G1: injection visibility -- deliberately ungraded, same
+    # disposition as G0 novelty above. Plan acceptance is a basis-forming
+    # signal (main should show superseded_by_newer > 0 within 7 days; updates
+    # daily births are bounded), not yet a gate -- see
+    # graph_layer_updates_summary() in the embedded probe script.
+    raw_graph_updates = snapshot.get("graph_layer_updates")
+    if isinstance(raw_graph_updates, dict) and raw_graph_updates:
+        graph_updates_status = str(raw_graph_updates.get("status") or "")
+        info.append({
+            "code": (
+                "graph_layer_updates" if graph_updates_status == "ok"
+                else "graph_layer_updates_no_sample" if graph_updates_status == "healthy_no_sample"
+                else "graph_layer_updates_collection_error"
+            ),
+            "value": raw_graph_updates,
+        })
+
     # ── DU: monitor part 2 -- J1 backend fallback + L1 transport visibility
     # (fact_judge, session_fact_extraction). See lane_backend_transport_summary()
     # in the embedded probe script for the producer side.
@@ -1841,6 +1891,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "llm_transport": fact_judge_backend.get("llm_transport") or "",
                     "llm_provider": fact_judge_backend.get("llm_provider") or "",
                     "llm_model": fact_judge_backend.get("llm_model") or "",
+                    "llm_route_unexpected_count": int(fact_judge_backend.get("llm_route_unexpected_count") or 0),
+                    "llm_route_unknown_count": int(fact_judge_backend.get("llm_route_unknown_count") or 0),
                 },
             })
             # typesafe_jev is opt-in and default-off (J1 owner ruling); a tick
@@ -1860,6 +1912,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         ) or "",
                     },
                 })
+            # W4-A / plan row L1: answering model != pinned model -- recorded,
+            # never dropping the answer (see _llm_route_unexpected_warn_entry).
+            _fj_route_entry = _llm_route_unexpected_warn_entry("fact_judge", fact_judge_backend)
+            if _fj_route_entry is not None:
+                warn.append(_fj_route_entry)
         else:
             info.append({"code": "fact_judge_backend_no_sample", "value": fact_judge_backend})
 
@@ -1882,8 +1939,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "llm_transport": sfe_backend.get("llm_transport") or "",
                     "llm_provider": sfe_backend.get("llm_provider") or "",
                     "llm_model": sfe_backend.get("llm_model") or "",
+                    "llm_route_unexpected_count": int(sfe_backend.get("llm_route_unexpected_count") or 0),
+                    "llm_route_unknown_count": int(sfe_backend.get("llm_route_unknown_count") or 0),
                 },
             })
+            # W4-A / plan row L1: answering model != pinned model -- recorded,
+            # never dropping the answer (see _llm_route_unexpected_warn_entry).
+            _sfe_route_entry = _llm_route_unexpected_warn_entry("session_fact_extraction", sfe_backend)
+            if _sfe_route_entry is not None:
+                warn.append(_sfe_route_entry)
         else:
             info.append({"code": "session_fact_extraction_backend_no_sample", "value": sfe_backend})
     # ── end DU grading block ────────────────────────────────────────────────
@@ -2262,6 +2326,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "backfill_failed_count": _backfill_failed,
                         "backfill_outcome": _backfill_outcome,
                     })
+                # W4-A / plan row L1: llm_edge_proposer's answering model !=
+                # pinned model -- recorded, never dropping the answer (see
+                # _llm_route_unexpected_warn_entry).
+                _llm_edge_proposer_step = edge_step_results.get("llm_edge_proposer")
+                if not isinstance(_llm_edge_proposer_step, dict):
+                    _llm_edge_proposer_step = {}
+                _llm_edge_route_entry = _llm_route_unexpected_warn_entry(
+                    "llm_edge_proposer", _llm_edge_proposer_step,
+                )
+                if _llm_edge_route_entry is not None:
+                    warn.append(_llm_edge_route_entry)
         elif clean_host:
             warn.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
         else:
@@ -5162,6 +5237,11 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "edge_weight_feedback",
     "entity_index",
     "feature_score",
+    # W4-A / plan row G1: graph_layer_updates_summary's bounded tail read of
+    # system/graph_layer_shadow.jsonl reports malformed lines here
+    # (jsonl_io.read_jsonl_tail) -- same pattern as prefetch.graph_layer_shadow
+    # above.
+    "graph_layer_updates_summary",
     "imagination_loop",
     "judge_calibration",
     "knob_ab_eval",
@@ -6848,8 +6928,24 @@ def working_status():
 def enrich_memory_sources_stats(stats):
     if not isinstance(stats, dict):
         return stats
-    records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/memory_sources.jsonl"))
-    feedback_records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/memory_sources_feedback.jsonl"))
+    # W4-A (Section W path-literal sweep): route through the producer's own
+    # accessors instead of rebuilding the paths (CLAUDE.md: "a path literal
+    # repeated at each call site is how a producer and its consumers drift
+    # onto different directories -- silently").
+    try:
+        from plugins.memory.memory_os.memory_sources import (
+            memory_sources_feedback_path,
+            memory_sources_path,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        _roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+        sources_path = memory_sources_path(_roots)
+        sources_feedback_path = memory_sources_feedback_path(_roots)
+    except Exception:
+        sources_path = os.path.join(_hermes_home, "memory-os/system/memory_sources.jsonl")
+        sources_feedback_path = os.path.join(_hermes_home, "memory-os/system/memory_sources_feedback.jsonl")
+    records = _read_jsonl(sources_path)
+    feedback_records = _read_jsonl(sources_feedback_path)
     selected_headings = Counter()
     dropped_headings = Counter()
     selected_source_classes = Counter()
@@ -7100,6 +7196,9 @@ def event_principal_coverage_summary(recent_window=500):
     marked_without_principal_count = 0
     legacy_unattributed_event_count = 0
     sources_without_principal = Counter()
+    # Machine producers (system) can fill the whole window; the breakdown is
+    # what says whether owner turns were sampled at all this tick.
+    marked_by_principal = Counter()
     for record in recent_records:
         if not isinstance(record, dict):
             continue
@@ -7109,6 +7208,7 @@ def event_principal_coverage_summary(recent_window=500):
         marked_count += 1
         if str(record.get("principal") or "") in PRINCIPALS:
             marked_with_principal_count += 1
+            marked_by_principal[str(record.get("principal"))] += 1
         else:
             marked_without_principal_count += 1
             sources_without_principal[str(record.get("source") or "unknown")] += 1
@@ -7122,6 +7222,7 @@ def event_principal_coverage_summary(recent_window=500):
         "marked_without_principal_count": marked_without_principal_count,
         "legacy_unattributed_event_count": legacy_unattributed_event_count,
         "sources_without_principal": dict(sources_without_principal),
+        "marked_by_principal": dict(marked_by_principal),
     }
 
 def graph_layer_novelty_summary(max_records=2000):
@@ -7138,6 +7239,104 @@ def graph_layer_novelty_summary(max_records=2000):
     errors = summary.pop("error_records", []) or []
     summary["error_record_count"] = len(errors)
     return summary
+
+# ─── W4-A / plan row G1 -- injection visibility (INFO, ungraded) ────────────
+# Plan acceptance: main shows superseded_by_newer > 0 within 7 days; updates
+# daily births are bounded. Two read-only aggregates, neither touching
+# prefetch.py or structural_edge_proposer.py (both out of scope for this
+# dispatch): supersession outcomes from the shadow ledger's own bounded tail
+# read (same read_jsonl_tail mechanism graph_layer_novelty_summary already
+# uses above), and `updates`-relation edge births read directly from the
+# edge store. healthy_no_sample when there is nothing to count -- an idle
+# upstream (or a profile that has never run PR-G1's structural proposer)
+# must never look like a fabricated 0.
+def graph_layer_updates_summary(max_shadow_records=2000):
+    import sqlite3
+
+    from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    schema = "memory-os.graph_layer_updates_summary.v0"
+    try:
+        roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+    except Exception as exc:
+        return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__}
+
+    now = datetime.now(timezone.utc)
+    window_7d = now - timedelta(days=7)
+
+    # ── supersession outcomes, from the shadow ledger's bounded tail ───────
+    shadow_path = roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    shadow_status = "no_shadow_ledger"
+    shadow_rows_scanned_7d = 0
+    superseded_by_newer_count_7d = 0
+    shadow_error_record_count = 0
+    if shadow_path.exists():
+        result = read_jsonl_tail(
+            shadow_path, max_records=max_shadow_records,
+            component="graph_layer_updates_summary", operation="shadow_tail",
+        )
+        shadow_error_record_count = len(result.error_records or [])
+        for row in result.records:
+            if not isinstance(row, dict):
+                continue
+            row_time = _parse_aware_utc(str(row.get("created_at") or row.get("recorded_at") or ""))
+            if row_time is not None and row_time < window_7d:
+                continue
+            shadow_rows_scanned_7d += 1
+            edges = row.get("edges") if isinstance(row.get("edges"), list) else []
+            for edge in edges:
+                if isinstance(edge, dict) and edge.get("outcome") == "superseded_by_newer":
+                    superseded_by_newer_count_7d += 1
+        shadow_status = "ok" if shadow_rows_scanned_7d else "healthy_no_sample"
+
+    # ── `updates`-relation edge births, read directly from the edge store ──
+    index_path = str(roots.index_path)
+    edge_store_status = "no_index"
+    edge_store_collection_error = ""
+    updates_born_count_24h = 0
+    updates_born_count_7d = 0
+    if os.path.exists(index_path):
+        try:
+            conn = sqlite3.connect(index_path)
+            try:
+                window_24h_iso = (now - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+                window_7d_iso = window_7d.isoformat().replace("+00:00", "Z")
+                updates_born_count_24h = conn.execute(
+                    "select count(*) from memory_edges where relation_type = 'updates' and created_at >= ?",
+                    (window_24h_iso,),
+                ).fetchone()[0]
+                updates_born_count_7d = conn.execute(
+                    "select count(*) from memory_edges where relation_type = 'updates' and created_at >= ?",
+                    (window_7d_iso,),
+                ).fetchone()[0]
+                edge_store_status = "ok"
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            # A failed edge-store query must not discard an already-collected
+            # shadow-ledger aggregate -- the two sources are independent.
+            edge_store_status = "collection_error"
+            edge_store_collection_error = f"{type(exc).__name__}: {exc}"[:160]
+
+    if edge_store_status == "collection_error":
+        overall_status = "collection_error"
+    elif shadow_status in ("no_shadow_ledger", "healthy_no_sample") and updates_born_count_7d == 0:
+        overall_status = "healthy_no_sample"
+    else:
+        overall_status = "ok"
+    return {
+        "schema_version": schema,
+        "status": overall_status,
+        "shadow_status": shadow_status,
+        "shadow_rows_scanned_7d": shadow_rows_scanned_7d,
+        "superseded_by_newer_count_7d": superseded_by_newer_count_7d,
+        "shadow_error_record_count": shadow_error_record_count,
+        "edge_store_status": edge_store_status,
+        "edge_store_collection_error": edge_store_collection_error,
+        "updates_born_count_24h": updates_born_count_24h,
+        "updates_born_count_7d": updates_born_count_7d,
+    }
 
 # ─── DU: monitor part 2 -- J1 backend fallback + L1 transport/provider/model
 # visibility for fact_judge and session_fact_extraction (2026-09-23) ────────
@@ -7209,6 +7408,17 @@ def lane_backend_transport_summary():
                 "llm_transport": str(fact_judge_result_summary.get("llm_transport") or ""),
                 "llm_provider": str(fact_judge_result_summary.get("llm_provider") or ""),
                 "llm_model": str(fact_judge_result_summary.get("llm_model") or ""),
+                # W4-A / plan row L1: route-mismatch counters -- see
+                # LlmCallResult's docstring (low_clue_recall.py) for the
+                # route_unexpected/route_unknown definition.
+                "llm_route_unexpected_count": int(fact_judge_result_summary.get("llm_route_unexpected_count") or 0),
+                "llm_route_unknown_count": int(fact_judge_result_summary.get("llm_route_unknown_count") or 0),
+                "llm_route_unexpected_expected_model": str(
+                    fact_judge_result_summary.get("llm_route_unexpected_expected_model") or ""
+                ),
+                "llm_route_unexpected_actual_model": str(
+                    fact_judge_result_summary.get("llm_route_unexpected_actual_model") or ""
+                ),
             }
 
     # session_fact_extraction: latest record from its own runs.jsonl, located
@@ -7235,6 +7445,17 @@ def lane_backend_transport_summary():
                 "llm_transport": str(sfe_latest.get("llm_transport") or ""),
                 "llm_provider": str(sfe_latest.get("llm_provider") or ""),
                 "llm_model": str(sfe_latest.get("llm_model") or ""),
+                # W4-A / plan row L1: route-mismatch counters -- see
+                # LlmCallResult's docstring (low_clue_recall.py) for the
+                # route_unexpected/route_unknown definition.
+                "llm_route_unexpected_count": int(sfe_latest.get("llm_route_unexpected_count") or 0),
+                "llm_route_unknown_count": int(sfe_latest.get("llm_route_unknown_count") or 0),
+                "llm_route_unexpected_expected_model": str(
+                    sfe_latest.get("llm_route_unexpected_expected_model") or ""
+                ),
+                "llm_route_unexpected_actual_model": str(
+                    sfe_latest.get("llm_route_unexpected_actual_model") or ""
+                ),
             }
 
     return {"schema_version": schema, "lanes": lanes}
@@ -7649,9 +7870,23 @@ def module_artifact_summary(*, include_retired_legacy=None):
             }
 
     prefetch_observability = prefetch_observability_summary()
-    expression_feedback = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/expression_feedback_ledger.jsonl"))
+    # W4-A (Section W path-literal sweep): route through the producer's own
+    # accessors (owner_actions.py) instead of rebuilding the paths.
+    try:
+        from plugins.memory.memory_os.owner_actions import (
+            expression_feedback_ledger_path,
+            speak_permission_tickets_path,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        _roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+        _expression_feedback_ledger_path = expression_feedback_ledger_path(_roots)
+        _speak_permission_tickets_path = speak_permission_tickets_path(_roots)
+    except Exception:
+        _expression_feedback_ledger_path = os.path.join(_hermes_home, "memory-os/system/expression_feedback_ledger.jsonl")
+        _speak_permission_tickets_path = os.path.join(_hermes_home, "memory-os/system/speak_permission_tickets.jsonl")
+    expression_feedback = _read_jsonl(_expression_feedback_ledger_path)
     speak_permission_tickets = (
-        _read_jsonl(os.path.join(_hermes_home, "memory-os/system/speak_permission_tickets.jsonl"))
+        _read_jsonl(_speak_permission_tickets_path)
         if include_retired_legacy
         else []
     )
@@ -8436,6 +8671,13 @@ def cognitive_loop_step_evidence():
       # own path to a monitor reader, see cognitive_loop._llm_edge_proposer).
       "judge_backend", "judge_backend_fallback_count",
       "judge_backend_fallback_reasons", "judge_backend_fallback_detail_sample",
+      # W4-A / plan row L1: llm_edge_proposer route-mismatch counters --
+      # when Hermes routes to a provider other than the one requested,
+      # recorded (never dropping the answer) rather than silently absorbed.
+      # See LlmCallResult's docstring (low_clue_recall.py) for why providers,
+      # not model names, are compared.
+      "llm_route_unexpected_count", "llm_route_unknown_count",
+      "llm_route_unexpected_expected_model", "llm_route_unexpected_actual_model",
     )
     edge_step_results = {}
     for step in steps:
@@ -8477,7 +8719,14 @@ def output_knob_override_state():
     # expiry-vocabulary drift happened.
     _expected_live = {"graph_layer_injection_enabled": True}
     _output_knobs = tuple(_expected_live)
-    path = os.path.join(_hermes_home, "memory-os/system/knob_overrides.jsonl")
+    # W4-A (Section W path-literal sweep): route through the producer's own
+    # accessor instead of rebuilding the path.
+    try:
+        from plugins.memory.memory_os.knob_overrides import override_store_path
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        path = override_store_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+    except Exception:
+        path = os.path.join(_hermes_home, "memory-os/system/knob_overrides.jsonl")
     try:
         rows = _read_jsonl(path)
     except Exception as exc:
@@ -8822,7 +9071,18 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
       if isinstance(latest_governance.get("execution_gate_permit_resolution"), dict)
       else {}
     )
-    records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/execution_gate_envelopes.jsonl"))
+    # W4-A (Section W path-literal sweep): route through the producer's own
+    # accessor instead of rebuilding the path -- same drift class as
+    # lane_backend_transport_summary() above (CLAUDE.md: "a path literal
+    # repeated at each call site is how a producer and its consumers drift
+    # onto different directories -- silently").
+    try:
+      from plugins.memory.memory_os.execution_gate import execution_gate_records_path
+      from plugins.memory.memory_os.roots import MemoryOSRoots
+      envelopes_path = execution_gate_records_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+    except Exception:
+      envelopes_path = os.path.join(_hermes_home, "memory-os/system/execution_gate_envelopes.jsonl")
+    records = _read_jsonl(envelopes_path)
     permits = [
       record for record in records
       if isinstance(record, dict)
@@ -9421,7 +9681,17 @@ def _enabled_job_count(jobs):
     return sum(1 for item in jobs if item.get("enabled") is True)
 
 def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
-    records_path = Path(_hermes_home) / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    # W4-A (Section W path-literal sweep): route through the producer's own
+    # accessor instead of rebuilding the path -- same drift class as
+    # lane_backend_transport_summary() above (CLAUDE.md: "a path literal
+    # repeated at each call site is how a producer and its consumers drift
+    # onto different directories -- silently").
+    try:
+        from plugins.memory.memory_os.execution_gate import execution_gate_records_path
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        records_path = execution_gate_records_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+    except Exception:
+        records_path = Path(_hermes_home) / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
     completions = {}
     if records_path.exists():
         try:
@@ -10405,6 +10675,7 @@ print(json.dumps({
   "principal_binding": principal_binding_summary(),
   "event_principal_coverage": event_principal_coverage_summary(),
   "graph_layer_novelty": graph_layer_novelty_summary(),
+  "graph_layer_updates": graph_layer_updates_summary(),
   "lane_backend_transport": lane_backend_transport_summary(),
   "disk_df": df,
   "disk_du": du,

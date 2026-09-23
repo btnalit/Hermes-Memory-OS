@@ -24,8 +24,10 @@ from .jsonl_io import build_error_record, read_jsonl, write_json_atomic
 from .principal import (
     FOREGROUND_CONTROL_PRINCIPALS,
     MACHINE_SESSION_SOURCES,
+    PRINCIPAL_OTHER_HUMAN,
     PRINCIPAL_SYSTEM,
     PRINCIPAL_UNKNOWN,
+    owner_binding_fingerprint,
     resolve_principal,
 )
 from .read_model_paths import (
@@ -487,10 +489,16 @@ class SessionMirror:
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         covered = self._provider_captured_session_ids()
+        # Same judgement as scan(): a stale other_human skip counts as pending.
+        config = load_config(self.store.roots.hermes_home)
+        seen = {
+            key for key, mark in state["seen_sessions"].items()
+            if not _binding_stale_skip_mark(mark, config)
+        }
         pending = [
             session
             for session in sessions
-            if session["session_id"] not in covered and session["dedup_key"] not in state["seen_sessions"]
+            if session["session_id"] not in covered and session["dedup_key"] not in seen
         ]
         return {
             "schema_version": "memory-os.session_mirror_status.v0",
@@ -611,6 +619,15 @@ class SessionMirror:
             # config normalizer's `0 -> None` conversion.
             max_age_days = None
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
+        # An other_human skip judged under an owner binding that has since
+        # changed is dropped here, so the session is judged again below (and
+        # re-marked or mirrored) instead of staying excluded forever.
+        stale_skip_keys = [
+            key for key, mark in state["seen_sessions"].items()
+            if _binding_stale_skip_mark(mark, memory_os_config)
+        ]
+        for key in stale_skip_keys:
+            del state["seen_sessions"][key]
         error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         event_records = _read_event_records(self.store)
@@ -764,6 +781,7 @@ class SessionMirror:
             "skipped_by_source_count": skipped_by_source_count,
             "skipped_by_principal_count": skipped_by_principal_count,
             "sessions_skipped_by_principal": dict(sessions_skipped_by_principal),
+            "principal_skip_marks_reevaluated_count": len(stale_skip_keys),
             "skipped_by_completion_count": skipped_by_completion_count,
             "skipped_by_message_count": skipped_by_message_count,
             "skipped_by_age_count": skipped_by_age_count,
@@ -860,6 +878,12 @@ class SessionMirror:
                     {
                         "skipped_reason": f"principal:{skipped_session.get('principal', '')}",
                         "indexed_at": datetime.now(timezone.utc).isoformat(),
+                        # The binding this was judged under: an other_human
+                        # mark is re-judged once it no longer matches.
+                        "platform": str(skipped_session.get("platform") or ""),
+                        "principal_binding": owner_binding_fingerprint(
+                            memory_os_config, str(skipped_session.get("platform") or "")
+                        ),
                     },
                 )
             state["last_scan_at"] = datetime.now(timezone.utc).isoformat()
@@ -2027,6 +2051,16 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"id": id_, "code": id_, "severity": severity, "message": message, "details": details or {}}
+
+
+def _binding_stale_skip_mark(mark: Any, config: dict[str, Any] | None) -> bool:
+    """True for an other_human skip judged under an owner binding that has
+    since changed. Such a session must be judged again: the owner adding
+    their own id later has to bring it back, not lose it forever. peer_agent
+    (the mailbox source) is structural and never goes stale."""
+    if not isinstance(mark, dict) or mark.get("skipped_reason") != f"principal:{PRINCIPAL_OTHER_HUMAN}":
+        return False
+    return mark.get("principal_binding") != owner_binding_fingerprint(config, str(mark.get("platform") or ""))
 
 
 def _error_summary_from_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:

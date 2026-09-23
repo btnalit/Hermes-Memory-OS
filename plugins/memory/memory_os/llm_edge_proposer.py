@@ -19,7 +19,12 @@ from typing import Any
 
 from . import jev_backend
 from .audit import append_audit
-from .low_clue_recall import LlmCallResult, _call_hermes_runtime_model_result, _resolve_hermes_default_runtime
+from .low_clue_recall import (
+    LlmCallResult,
+    _call_hermes_runtime_model_result,
+    _llm_call_diagnostics,
+    _resolve_hermes_default_runtime,
+)
 
 
 # Default LLM judge config (mirrors low_clue_recall.DEFAULT_CONFIG["llm_judge"]).
@@ -87,19 +92,16 @@ def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
     vocabulary (llm_call_exception/empty_llm_response/parse_failed/
     not_a_dict/invalid_confidence), which additionally covers post-transport
     parsing/schema failures the transport layer knows nothing about.
+
+    W4-A: delegates to the single shared seam
+    (``low_clue_recall._llm_call_diagnostics``) that also now forwards
+    ``llm_expected_model``/``llm_actual_model``/``llm_route_unexpected``/
+    ``llm_route_unknown`` (plan row L1) -- every key this function
+    previously returned is unchanged in name and value. Diagnostics-
+    forwarding only: this function is not part of ``_call_llm``'s judgment
+    logic/prompt.
     """
-    if call_result is None:
-        return {}
-    diagnostics: dict[str, Any] = {
-        "llm_transport_failure_reason": call_result.failure_reason,
-        "llm_provider": call_result.provider,
-        "llm_model": call_result.model,
-        "llm_transport": call_result.transport,
-    }
-    if call_result.usage:
-        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
-        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
-    return diagnostics
+    return _llm_call_diagnostics(call_result)
 
 
 def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, Any]:
@@ -540,6 +542,14 @@ def run_llm_proposer(
     judge_backend_fallback_count = 0
     judge_backend_fallback_reasons: dict[str, int] = {}
     judge_backend_fallback_detail_sample = ""
+    # W4-A / plan row L1: route-mismatch counters, plus a sample of the
+    # expected/actual model names from the most recent mismatch this run
+    # (see LlmCallResult's docstring for the definition and the
+    # alias-handling note).
+    llm_route_unexpected_count = 0
+    llm_route_unknown_count = 0
+    llm_route_unexpected_expected_model = ""
+    llm_route_unexpected_actual_model = ""
 
     for i in range(len(records)):
         if pairs >= _MAX_PAIRS:
@@ -601,6 +611,12 @@ def run_llm_proposer(
                 llm_transport_name = str(llm_result["llm_transport"])
             llm_usage_prompt_tokens += int(llm_result.get("llm_usage_prompt_tokens") or 0)
             llm_usage_completion_tokens += int(llm_result.get("llm_usage_completion_tokens") or 0)
+            if llm_result.get("llm_route_unexpected"):
+                llm_route_unexpected_count += 1
+                llm_route_unexpected_expected_model = str(llm_result.get("llm_expected_model") or "")
+                llm_route_unexpected_actual_model = str(llm_result.get("llm_actual_model") or "")
+            if llm_result.get("llm_route_unknown"):
+                llm_route_unknown_count += 1
             # ─────────────────────────────────────────────────────────────
             rtype = llm_result.get("relation_type", "none")
             confidence = llm_result.get("confidence", 0.0)
@@ -696,6 +712,11 @@ def run_llm_proposer(
         "judge_backend_fallback_count": judge_backend_fallback_count,
         "judge_backend_fallback_reasons": judge_backend_fallback_reasons,
         "judge_backend_fallback_detail_sample": judge_backend_fallback_detail_sample,
+        # W4-A / plan row L1: route-mismatch counters (ADD-only).
+        "llm_route_unexpected_count": llm_route_unexpected_count,
+        "llm_route_unknown_count": llm_route_unknown_count,
+        "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
+        "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
     }
 
     if audit_path:

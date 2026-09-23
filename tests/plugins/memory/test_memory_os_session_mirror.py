@@ -1691,6 +1691,34 @@ def test_scan_marks_non_owner_session_seen_so_it_is_not_rescanned_forever(tmp_pa
     assert second["candidate_session_count"] == 0
 
 
+def test_other_human_skip_is_rejudged_after_the_owner_binding_changes(tmp_path):
+    """#95 review counterfactual: other_human means "an identity is
+    configured here and this author is not it". A durable skip judged under
+    one binding must not outlive it -- the owner adding a second account
+    later would otherwise lose that account's sessions forever. While the
+    binding is unchanged the mark still drains the backlog."""
+    store = _store(tmp_path)
+    _enable_test_host_apply(store)
+    _create_state_db(tmp_path / "state.db", session_id="session-second-account", platform="telegram", user_id="222")
+    save_config({"principal": {"owner_identities": {"telegram": ["111"]}}}, tmp_path)
+    mirror = SessionMirror(store)
+
+    first = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+    unchanged = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+    save_config({"principal": {"owner_identities": {"telegram": ["111", "222"]}}}, tmp_path)
+    pending_after_rebind = mirror.status()["pending_session_count"]
+    rebound = mirror.scan(dry_run=False, max_sessions=1, apply_governance=_test_host_governance())
+
+    assert first["sessions_skipped_by_principal"] == {"other_human": 1}
+    assert first["written_event_ids_count"] == 0
+    assert unchanged["candidate_session_count"] == 0
+    assert unchanged["principal_skip_marks_reevaluated_count"] == 0
+    assert pending_after_rebind == 1
+    assert rebound["principal_skip_marks_reevaluated_count"] == 1
+    assert rebound["written_event_ids_count"] == 1
+    assert store.read_events()[0].principal == "owner"
+
+
 def test_mirrored_event_carries_principal_and_era_marker(tmp_path):
     """P2 on this producer: every event session_mirror writes must carry a
     first-class principal plus the era marker."""

@@ -5325,3 +5325,48 @@ def test_owner_review_surface_report_owner_and_unknown_are_byte_identical(tmp_pa
 
     assert owner_view == unknown_view
     assert owner_view["sections"]["action_required"][0]["action_tokens"]["approve_candidate"].startswith("oa_")
+
+
+# The closed set of production call sites of apply_owner_action (P1 review):
+# the two local-CLI entry points (owner by ruling) and the two paths inside
+# parse_owner_review_reply, which run after its principal self-check.
+_APPLY_OWNER_ACTION_CALL_SITES = {
+    ("plugins/memory/memory_os/cli.py", "_review_command"),
+    ("plugins/memory/memory_os/cli.py", "memory_os_command"),
+    ("plugins/memory/memory_os/owner_actions.py", "parse_owner_review_reply"),
+    ("plugins/memory/memory_os/owner_actions.py", "_parse_permanent_promotion_reply"),
+}
+
+
+def test_apply_owner_action_is_called_only_from_gated_entry_points():
+    """Firewall: apply_owner_action has no principal check of its own, so a
+    new caller that skips parse_owner_review_reply's gate would let any
+    principal drive an owner action. Adding a call site must be a conscious
+    edit of the closed set above, reviewed as an authority change."""
+    import ast
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    found = set()
+    for top in ("plugins", "scripts"):
+        for path in (repo_root / top).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            stack: list[str] = []
+
+            class _Visitor(ast.NodeVisitor):
+                def generic_visit(self, node):
+                    is_function = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    if is_function:
+                        stack.append(node.name)
+                    if isinstance(node, ast.Call):
+                        func = node.func
+                        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+                        if name == "apply_owner_action":
+                            found.add((path.relative_to(repo_root).as_posix(), stack[-1] if stack else "<module>"))
+                    super().generic_visit(node)
+                    if is_function:
+                        stack.pop()
+
+            _Visitor().visit(tree)
+
+    assert found == _APPLY_OWNER_ACTION_CALL_SITES

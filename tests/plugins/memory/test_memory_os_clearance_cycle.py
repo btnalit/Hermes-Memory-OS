@@ -1052,6 +1052,52 @@ def test_llm_call_stats_records_typed_failure_for_transport_exception(tmp_path: 
     )
 
 
+def test_llm_call_stats_records_route_unknown_when_actual_model_cannot_be_determined(tmp_path: Path) -> None:
+    """W4-A / plan row L1 counterfactual: a call that returns (does not
+    raise) with no resolvable actual model must count as route_unknown, and
+    must NEVER also count as route_unexpected -- the two are mutually
+    exclusive by construction (see low_clue_recall.LlmCallResult's
+    docstring)."""
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _judge_against_permanents
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+
+    perm_records_list = [
+        {"id": "perm_unknown", "body": "The sky is blue.",
+         "frontmatter": {"id": "perm_unknown", "provisional": False}},
+    ]
+    mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+    llm_call_stats: dict = {}
+
+    with patch(
+        "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+        return_value=mock_pairs,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
+    ), patch(
+        "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+        return_value=True,
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ):
+        _judge_against_permanents(
+            store, "cand_unknown_judge", "The sky is green.", {},
+            perm_records_list, max_pairs=5,
+            llm_call_stats=llm_call_stats,
+        )
+
+    assert llm_call_stats.get("route_unknown_count") == 1
+    assert llm_call_stats.get("route_unexpected_count") is None
+
+
 def test_run_clearance_cycle_report_exposes_llm_transport_diagnostics(tmp_path: Path) -> None:
     """W2: run_clearance_cycle's report (the cycle-level ledger the helper
     script persists) must expose typed LLM transport diagnostics -- ADD-only,
@@ -1112,6 +1158,7 @@ def test_run_clearance_cycle_report_exposes_llm_transport_diagnostics(tmp_path: 
         "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
         return_value=LlmCallResult(
             text=mock_llm_response, provider="openai-codex", model="gpt-5.6-luna",
+            expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
         ),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",
@@ -1128,6 +1175,15 @@ def test_run_clearance_cycle_report_exposes_llm_transport_diagnostics(tmp_path: 
     assert report["llm_model"] == "gpt-5.6-luna"
     assert report["llm_transport"] == "hermes_call_llm"
     assert isinstance(report["llm_failures_by_reason"], dict)
+    # W4-A / plan row L1: route visibility -- answering model ("gpt-5.6-luna")
+    # diverged from the pinned one ("pinned-model"), so LlmCallResult.
+    # __post_init__ derives route_unexpected=True (see low_clue_recall.py's
+    # docstring); the shared _llm_call_diagnostics seam forwards it into this
+    # cycle-level report.
+    assert report["llm_route_unexpected_count"] >= 1
+    assert report["llm_route_unknown_count"] == 0
+    assert report["llm_route_unexpected_expected_model"] == "pinned-model"
+    assert report["llm_route_unexpected_actual_model"] == "gpt-5.6-luna"
 
 
 def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(

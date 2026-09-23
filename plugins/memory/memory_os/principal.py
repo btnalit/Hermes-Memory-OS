@@ -29,6 +29,8 @@ each of them re-deriving the rules.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,6 +136,19 @@ def _owner_identities_for(config: dict[str, Any] | None, source: str) -> list[st
     identities = identities if isinstance(identities, dict) else {}
     ids = identities.get(source)
     return [str(item) for item in ids if str(item or "").strip()] if isinstance(ids, list) else []
+
+
+def owner_binding_fingerprint(config: dict[str, Any] | None, source: str) -> str:
+    """Stable fingerprint of the owner identities configured for ``source``.
+
+    ``other_human`` means "an identity is configured here and this author is
+    not it", so a persisted other_human decision is only valid while that
+    binding is unchanged. A caller that stores such a decision stores this
+    beside it and re-judges when it differs.
+    """
+    normalized = _normalize_source(source)
+    ids = sorted(set(_owner_identities_for(config, normalized)))
+    return hashlib.sha256(json.dumps([normalized, ids]).encode("utf-8")).hexdigest()[:16]
 
 
 def _binding_source_for(config: dict[str, Any] | None, source: str) -> str:
