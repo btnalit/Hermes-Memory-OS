@@ -1319,6 +1319,124 @@ class TestRunFactJudgeLaneErrorCount:
         )
 
 
+# ── W4-A / plan row L1: route visibility (llm_route_unexpected_count) ────
+
+
+class TestRunFactJudgeLaneRouteVisibility:
+    """run_fact_judge_lane counts calls Hermes routed to a provider other
+    than the one requested (llm_route_unexpected_count), and calls whose
+    routed provider Hermes did not report (llm_route_unknown_count) --
+    LlmCallResult's __post_init__ derives both from expected_provider vs
+    routed_provider (see low_clue_recall.py's docstring)."""
+
+    def test_route_sample_describes_the_mismatched_call_not_the_last_call(self, tmp_path):
+        """#96 review BLOCKER counterfactual: a 429 on one call makes Hermes
+        fall back to another provider, the next call is normal again. The
+        lane's llm_provider is last-wins, so it ends on the expected provider;
+        the WARN must read samples taken inside the mismatch branch."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(2):
+            _write_candidate(store, _candidate(
+                candidate_id=f"cand_route_sample_{i:03d}",
+                body=f"Remembered from event: preference item {i}.",
+            ))
+        answer = '{"durable_fact": true, "reason": "preference"}'
+        calls = [
+            LlmCallResult(text=answer, provider="fallback-provider", model="fallback-model",
+                          expected_model="pinned-model", expected_provider="openai-codex",
+                          routed_provider="fallback-provider"),
+            LlmCallResult(text=answer, provider="openai-codex", model="pinned-model",
+                          expected_model="pinned-model", expected_provider="openai-codex",
+                          routed_provider="openai-codex"),
+        ]
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            side_effect=calls,
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["llm_route_unexpected_count"] == 1
+        assert result["llm_provider"] == "openai-codex"
+        assert result["llm_route_unexpected_expected_provider"] == "openai-codex"
+        assert result["llm_route_unexpected_routed_provider"] == "fallback-provider"
+
+    def test_route_unexpected_counted_when_answering_model_differs_from_expected(self, tmp_path):
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(3):
+            _write_candidate(store, _candidate(
+                candidate_id=f"cand_route_{i:03d}",
+                body=f"Remembered from event: preference item {i}.",
+            ))
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(
+                text='{"durable_fact": true, "reason": "preference"}',
+                provider="openai-codex",
+                model="answering-model",
+                expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
+            ),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["judged_count"] == 3
+        assert result["llm_route_unexpected_count"] == 3
+        assert result["llm_route_unknown_count"] == 0
+        assert result["llm_route_unexpected_expected_model"] == "pinned-model"
+        assert result["llm_route_unexpected_actual_model"] == "answering-model"
+
+    def test_route_unexpected_zero_when_answering_model_matches_expected(self, tmp_path):
+        """Counterfactual companion: same pinned/answering model -> no WARN signal."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        _write_candidate(store, _candidate(
+            candidate_id="cand_route_match",
+            body="Remembered from event: preference item.",
+        ))
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(
+                text='{"durable_fact": true, "reason": "preference"}',
+                provider="openai-codex",
+                model="same-model",
+                expected_model="same-model", expected_provider="openai-codex", routed_provider="openai-codex",
+            ),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["llm_route_unexpected_count"] == 0
+        assert result["llm_route_unexpected_expected_model"] == ""
+        assert result["llm_route_unexpected_actual_model"] == ""
+
+    def test_route_unknown_counted_when_actual_model_cannot_be_determined(self, tmp_path):
+        """An empty-content failure never reaches a resolved actual model --
+        this must be counted as unknown, NEVER as unexpected (they are
+        mutually exclusive by construction)."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(2):
+            _write_candidate(store, _candidate(
+                candidate_id=f"cand_unknown_{i:03d}",
+                body=f"Session data: unjudgable content {i}.",
+            ))
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["llm_route_unknown_count"] == 2
+        assert result["llm_route_unexpected_count"] == 0
+
+
 # ── Knob registration ────────────────────────────────────────────────────
 
 

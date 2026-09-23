@@ -659,6 +659,7 @@ def run_contradiction_lane(
     from .low_clue_recall import (
         _call_hermes_runtime_model_result,
         _extract_json_object,
+        _llm_call_diagnostics,
         _resolve_hermes_default_runtime,
     )
 
@@ -689,6 +690,16 @@ def run_contradiction_lane(
     llm_transport_name = ""
     llm_usage_prompt_tokens = 0
     llm_usage_completion_tokens = 0
+    # W4-A / plan row L1: route-mismatch counters, plus a sample of the
+    # expected/actual model names from the most recent mismatch this run
+    # (see LlmCallResult's docstring for the definition and the
+    # alias-handling note).
+    llm_route_unexpected_count = 0
+    llm_route_unknown_count = 0
+    llm_route_unexpected_expected_model = ""
+    llm_route_unexpected_actual_model = ""
+    llm_route_unexpected_expected_provider = ""
+    llm_route_unexpected_routed_provider = ""
 
     for pair in candidate_pairs[:max_pairs]:
         rec_a = pair["a"]
@@ -718,18 +729,34 @@ def run_contradiction_lane(
             continue
 
         # ── W2 transport diagnostics ─────────────────────────────────────
-        if call_result.failure_reason:
-            llm_transport_failures_by_reason[call_result.failure_reason] = (
-                llm_transport_failures_by_reason.get(call_result.failure_reason, 0) + 1
+        # W4-A: route through the single shared diagnostics seam
+        # (low_clue_recall._llm_call_diagnostics) instead of hand-picking
+        # fields off call_result -- keeps this lane's own field names
+        # (llm_transport_provider/model, etc.) unchanged while gaining
+        # llm_expected_model/llm_actual_model/llm_route_unexpected/
+        # llm_route_unknown (plan row L1) for free.
+        _diagnostics = _llm_call_diagnostics(call_result)
+        if _diagnostics.get("llm_transport_failure_reason"):
+            _reason = _diagnostics["llm_transport_failure_reason"]
+            llm_transport_failures_by_reason[_reason] = (
+                llm_transport_failures_by_reason.get(_reason, 0) + 1
             )
-        if call_result.provider:
-            llm_transport_provider = call_result.provider
-        if call_result.model:
-            llm_transport_model = call_result.model
-        llm_transport_name = call_result.transport
-        if call_result.usage:
-            llm_usage_prompt_tokens += int(call_result.usage.get("prompt_tokens") or 0)
-            llm_usage_completion_tokens += int(call_result.usage.get("completion_tokens") or 0)
+        if _diagnostics.get("llm_provider"):
+            llm_transport_provider = _diagnostics["llm_provider"]
+        if _diagnostics.get("llm_model"):
+            llm_transport_model = _diagnostics["llm_model"]
+        llm_transport_name = _diagnostics.get("llm_transport") or ""
+        if "llm_usage_prompt_tokens" in _diagnostics:
+            llm_usage_prompt_tokens += int(_diagnostics.get("llm_usage_prompt_tokens") or 0)
+            llm_usage_completion_tokens += int(_diagnostics.get("llm_usage_completion_tokens") or 0)
+        if _diagnostics.get("llm_route_unexpected"):
+            llm_route_unexpected_count += 1
+            llm_route_unexpected_expected_model = str(_diagnostics.get("llm_expected_model") or "")
+            llm_route_unexpected_actual_model = str(_diagnostics.get("llm_actual_model") or "")
+            llm_route_unexpected_expected_provider = str(_diagnostics.get("llm_expected_provider") or "")
+            llm_route_unexpected_routed_provider = str(_diagnostics.get("llm_routed_provider") or "")
+        if _diagnostics.get("llm_route_unknown"):
+            llm_route_unknown_count += 1
         # ───────────────────────────────────────────────────────────────
 
         if not call_result.text or not call_result.text.strip():
@@ -866,4 +893,11 @@ def run_contradiction_lane(
         "llm_transport": llm_transport_name,
         "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
         "llm_usage_completion_tokens": llm_usage_completion_tokens,
+        # W4-A / plan row L1: route-mismatch counters (ADD-only).
+        "llm_route_unexpected_count": llm_route_unexpected_count,
+        "llm_route_unknown_count": llm_route_unknown_count,
+        "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
+        "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
+        "llm_route_unexpected_expected_provider": llm_route_unexpected_expected_provider,
+        "llm_route_unexpected_routed_provider": llm_route_unexpected_routed_provider,
     }

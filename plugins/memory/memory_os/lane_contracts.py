@@ -201,11 +201,14 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         # DU: monitor part 2 reads the ExecutionGate completion ledger's
         # result_summary for this lane_id (judge_backend / fallback / L1
         # transport diagnostics) -- see lane_backend_transport_summary().
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read from that same result_summary.
         monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
             "llm_lane_consecutive_failure_streak",
             "fact_judge_backend_state",
             "fact_judge_backend_no_sample",
             "fact_judge_backend_fallback_all",
+            "llm_route_unexpected",
         ),
     ),
     "candidate_aggregation": LaneContract(
@@ -242,11 +245,14 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         # runs.jsonl's latest record for input_source / sessions_skipped_by_
         # principal / group_sessions_* / L1 transport diagnostics -- see
         # lane_backend_transport_summary().
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read from that same runs.jsonl record.
         monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
             "lane_input_stale",
             "llm_lane_consecutive_failure_streak",
             "session_fact_extraction_backend_state",
             "session_fact_extraction_backend_no_sample",
+            "llm_route_unexpected",
         ),
     ),
     # G4 -- day-boundary + maintenance
@@ -549,7 +555,10 @@ _COGNITIVE_LOOP_STEP_CONTRACTS: dict[str, LaneContract] = {
         reads=("roots.index_path", "low_clue_recall._call_hermes_runtime_model_result (LLM edge judging via Hermes call_llm)"),
         produces=("active graph edges; born at 0.45 + 0.30 x confidence per CLAUDE.md",),
         consumers=("plugins.memory.memory_os.prefetch",),
-        monitor_codes=("llm_lane_consecutive_failure_streak",),
+        # W4-A: llm_route_unexpected (plan row L1) -- Hermes routed to a
+        # provider other than the one requested, read via cognitive_loop_step_evidence's edge_step_results
+        # (see the monitor's _edge_fields whitelist).
+        monitor_codes=("llm_lane_consecutive_failure_streak", "llm_route_unexpected"),
     ),
     "vector_edge_proposer": LaneContract(
         kind=COGNITIVE_LOOP_STEP,

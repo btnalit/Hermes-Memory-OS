@@ -5113,6 +5113,46 @@ def test_execution_gate_helper_completion_summary_weekly_lane_in_daily_group_not
     assert "working_cleanup" not in summary["helper_completion_stale_lanes"]
 
 
+def test_execution_gate_helper_completion_summary_uses_the_accessor_not_a_rebuilt_literal(tmp_path, monkeypatch):
+    """W4-A (Section W path-literal sweep) counterfactual: this collector
+    used to rebuild memory-os/system/execution_gate_envelopes.jsonl as a
+    literal Path join. Routed through execution_gate.execution_gate_records_
+    path instead, so a producer path change is followed rather than silently
+    missed (CLAUDE.md: "a path literal repeated at each call site is how a
+    producer and its consumers drift onto different directories --
+    silently"). Proven by pointing the accessor at a DIFFERENT file than the
+    hardcoded literal would ever resolve to."""
+    from plugins.memory.memory_os import execution_gate as execution_gate_module
+
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    namespace["_hermes_home"] = str(tmp_path)
+
+    alt_dir = tmp_path / "elsewhere_entirely"
+    alt_dir.mkdir(parents=True)
+    alt_path = alt_dir / "execution_gate_envelopes.jsonl"
+    completion_record = {
+        "stage": "completion",
+        "lane_id": "working_cleanup",
+        "execution_status": "ok",
+        "postcheck": {"returncode": 0},
+    }
+    alt_path.write_text(json.dumps(completion_record) + "\n", encoding="utf-8")
+    monkeypatch.setattr(execution_gate_module, "execution_gate_records_path", lambda roots: alt_path)
+
+    specs_by_lane = {
+        "working_cleanup": {
+            "key": "working_cleanup", "name": "job", "lane_id": "working_cleanup",
+            "due_interval_minutes": 60,
+        },
+    }
+    summary = namespace["_execution_gate_helper_completion_summary"](specs_by_lane, {})
+
+    assert "working_cleanup" in summary["helper_completion_completed_lanes"], (
+        f"collector did not follow the monkeypatched accessor to {alt_path}: {summary}"
+    )
+
+
 def test_execution_gate_helper_completion_summary_respects_per_lane_disable_list(tmp_path):
     """Group ticks make disabling the Hermes job disable every member lane.
     Per-lane control is restored via cron_lane_disabled.json
@@ -6890,6 +6930,9 @@ def test_fact_judge_lane_report_contains_the_keys_the_monitor_reads(tmp_path):
         "judge_backend", "judged_count", "judge_backend_fallback_count",
         "judge_backend_fallback_reasons", "judge_backend_fallback_detail_sample",
         "llm_transport", "llm_provider", "llm_model",
+        # W4-A / plan row L1
+        "llm_route_unexpected_count", "llm_route_unknown_count",
+        "llm_route_unexpected_expected_model", "llm_route_unexpected_actual_model",
     }
     assert monitored_keys <= set(report)
 
@@ -6908,6 +6951,9 @@ def test_session_fact_extraction_lane_report_contains_the_keys_the_monitor_reads
     monitored_keys = {
         "input_source", "sessions_skipped_by_principal", "group_sessions_scanned",
         "group_sessions_without_user_suffix", "llm_transport", "llm_provider", "llm_model",
+        # W4-A / plan row L1
+        "llm_route_unexpected_count", "llm_route_unknown_count",
+        "llm_route_unexpected_expected_model", "llm_route_unexpected_actual_model",
     }
     assert monitored_keys <= set(report)
 
@@ -6917,6 +6963,127 @@ def test_lane_backend_transport_summary_no_sample_without_any_ledgers(tmp_path):
     summary = namespace["lane_backend_transport_summary"]()
     assert summary["lanes"]["fact_judge"]["status"] == "no_sample"
     assert summary["lanes"]["session_fact_extraction"]["status"] == "no_sample"
+
+
+# ─── W4-A / plan row G1: graph_layer_updates_summary (injection visibility) ──
+
+
+def test_graph_layer_updates_summary_healthy_no_sample_without_any_data(tmp_path):
+    """An idle upstream (or a profile that has never run PR-G1's structural
+    proposer) must report healthy_no_sample, never a fabricated 0-as-ok."""
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["graph_layer_updates_summary"]()
+    assert summary["status"] == "healthy_no_sample"
+    assert summary["shadow_status"] == "no_shadow_ledger"
+    assert summary["edge_store_status"] == "no_index"
+    assert summary["superseded_by_newer_count_7d"] == 0
+    assert summary["updates_born_count_24h"] == 0
+    assert summary["updates_born_count_7d"] == 0
+
+
+def test_graph_layer_updates_summary_counts_superseded_by_newer_within_7_days(tmp_path):
+    """Rows older than 7 days must not be counted -- the plan acceptance
+    window is 7 days, not the collector's full bounded tail."""
+    now = datetime.now(timezone.utc)
+    system_dir = tmp_path / "memory-os" / "system"
+    system_dir.mkdir(parents=True)
+    shadow_path = system_dir / "graph_layer_shadow.jsonl"
+    rows = [
+        {
+            "created_at": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+            "edges": [
+                {"outcome": "superseded_by_newer"},
+                {"outcome": "emitted_full"},
+            ],
+        },
+        {
+            "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            "edges": [{"outcome": "superseded_by_newer"}],
+        },
+        {
+            # Outside the 7-day window -- must not be counted.
+            "created_at": (now - timedelta(days=30)).isoformat().replace("+00:00", "Z"),
+            "edges": [{"outcome": "superseded_by_newer"}, {"outcome": "superseded_by_newer"}],
+        },
+    ]
+    with shadow_path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["graph_layer_updates_summary"]()
+
+    assert summary["status"] == "ok"
+    assert summary["shadow_status"] == "ok"
+    assert summary["shadow_rows_scanned_7d"] == 2
+    assert summary["superseded_by_newer_count_7d"] == 2
+
+
+def test_graph_layer_updates_summary_counts_updates_edges_born_in_24h_and_7d(tmp_path):
+    """`updates`-relation edge births are read directly from the edge store,
+    bucketed into 24h/7d windows -- an edge older than 7d must not inflate
+    either bucket, and a non-`updates` relation must never be counted."""
+    import sqlite3
+
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    MemoryOSIndex(roots).rebuild_from_store(store)
+
+    now = datetime.now(timezone.utc)
+
+    def _insert_edge(edge_id, relation_type, created_at, state="active"):
+        conn = sqlite3.connect(str(roots.index_path))
+        try:
+            conn.execute(
+                "insert into memory_edges (edge_id, from_record_type, from_record_id, "
+                "to_record_type, to_record_id, relation_type, weight, created_at, state, proposed_by) "
+                "values (?, 'crystallized_record', 'a', 'crystallized_record', 'b', ?, 0.6, ?, ?, 'structural')",
+                (edge_id, relation_type, created_at, state),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _insert_edge("e_recent", "updates", (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z"))
+    _insert_edge("e_within_7d", "updates", (now - timedelta(days=3)).isoformat().replace("+00:00", "Z"))
+    _insert_edge("e_old", "updates", (now - timedelta(days=30)).isoformat().replace("+00:00", "Z"))
+    _insert_edge("e_co_occurs", "co_occurs", (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"))
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["graph_layer_updates_summary"]()
+
+    assert summary["edge_store_status"] == "ok"
+    assert summary["updates_born_count_24h"] == 1
+    assert summary["updates_born_count_7d"] == 2
+    assert summary["status"] == "ok"
+
+
+def test_graph_layer_updates_is_ungraded_info_only():
+    """Same disposition as G0 novelty -- a basis-forming signal, not yet a
+    gate; must never appear in warn/fail."""
+    for status, code in (
+        ("ok", "graph_layer_updates"),
+        ("healthy_no_sample", "graph_layer_updates_no_sample"),
+        ("collection_error", "graph_layer_updates_collection_error"),
+    ):
+        graded = classify_snapshot({
+            "monitor_profile": "live",
+            "graph_layer_updates": {
+                "status": status,
+                "shadow_status": "ok",
+                "superseded_by_newer_count_7d": 3,
+                "updates_born_count_24h": 1,
+                "updates_born_count_7d": 5,
+            },
+        })
+        assert any(item["code"] == code for item in graded["info"])
+        for bucket in ("pass", "warn", "fail"):
+            assert not any(item["code"].startswith("graph_layer_updates") for item in graded[bucket])
 
 
 def test_lane_ledger_collectors_follow_the_producer_path_accessors(tmp_path, monkeypatch):
@@ -7015,6 +7182,10 @@ def test_lane_backend_transport_summary_reads_real_session_fact_extraction_runs_
     assert sfe["llm_transport"] == ""
     assert sfe["llm_provider"] == ""
     assert sfe["llm_model"] == ""
+    assert sfe["llm_route_unexpected_count"] == 0
+    assert sfe["llm_route_unknown_count"] == 0
+    assert sfe["llm_route_unexpected_expected_model"] == ""
+    assert sfe["llm_route_unexpected_actual_model"] == ""
 
 
 def _write_execution_gate_completion(roots, *, lane_id, result_summary, envelope_id):
@@ -7066,6 +7237,10 @@ def test_lane_backend_transport_summary_reads_real_fact_judge_completion_envelop
     assert fj["judge_backend"] == "hermes_default"
     assert fj["judged_count"] == 0
     assert fj["judge_backend_fallback_count"] == 0
+    assert fj["llm_route_unexpected_count"] == 0
+    assert fj["llm_route_unknown_count"] == 0
+    assert fj["llm_route_unexpected_expected_model"] == ""
+    assert fj["llm_route_unexpected_actual_model"] == ""
 
 
 def test_lane_backend_transport_summary_fact_judge_picks_the_latest_completion(tmp_path):
@@ -7173,6 +7348,114 @@ def test_fact_judge_backend_fallback_all_is_warn_if_production_on_clean_host():
     assert any(item["code"] == "fact_judge_backend_fallback_all" for item in graded["warn"])
     unclassified = {item.get("warn_code") for item in graded["fail"] if item["code"] == "clean_host_warn_unclassified"}
     assert "fact_judge_backend_fallback_all" not in unclassified
+
+
+def test_fact_judge_llm_route_unexpected_warns_when_count_positive():
+    """W4-A / plan row L1: Hermes routed one of fact_judge's calls to a
+    provider other than the one requested -- recorded (never dropping the
+    answer) as a WARN. #96 review BLOCKER counterfactual: the lane's
+    llm_provider is last-wins and here ends on the expected provider (a
+    later normal call); the WARN must report the mismatch samples."""
+    snapshot = _fact_judge_backend_snapshot("hermes_default", 3, 0)
+    lane = snapshot["lane_backend_transport"]["lanes"]["fact_judge"]
+    lane["llm_route_unexpected_count"] = 2
+    lane["llm_provider"] = "openai-codex"
+    lane["llm_route_unexpected_expected_provider"] = "openai-codex"
+    lane["llm_route_unexpected_routed_provider"] = "fallback-provider"
+    lane["llm_route_unexpected_expected_model"] = "pinned-model"
+    lane["llm_route_unexpected_actual_model"] = "answering-model"
+    graded = classify_snapshot(snapshot)
+    warn_entries = [item for item in graded["warn"] if item["code"] == "llm_route_unexpected"]
+    assert len(warn_entries) == 1
+    assert warn_entries[0]["lane"] == "fact_judge"
+    assert warn_entries[0]["llm_route_unexpected_count"] == 2
+    assert warn_entries[0]["expected_provider"] == "openai-codex"
+    assert warn_entries[0]["routed_provider"] == "fallback-provider"
+    assert warn_entries[0]["expected_model"] == "pinned-model"
+    assert warn_entries[0]["actual_model"] == "answering-model"
+
+
+def test_fact_judge_llm_route_unexpected_no_warn_when_count_zero():
+    """Counterfactual companion: the field is present but zero -- must not WARN."""
+    snapshot = _fact_judge_backend_snapshot("hermes_default", 3, 0)
+    snapshot["lane_backend_transport"]["lanes"]["fact_judge"]["llm_route_unexpected_count"] = 0
+    graded = classify_snapshot(snapshot)
+    assert not any(item["code"] == "llm_route_unexpected" for item in graded["warn"])
+
+
+def test_fact_judge_llm_route_unexpected_is_warn_if_production_on_clean_host():
+    snapshot = _fact_judge_backend_snapshot("hermes_default", 3, 0)
+    snapshot["lane_backend_transport"]["lanes"]["fact_judge"]["llm_route_unexpected_count"] = 1
+    snapshot["monitor_profile"] = "clean-host"
+    graded = classify_snapshot(snapshot)
+    assert any(item["code"] == "llm_route_unexpected" for item in graded["warn"])
+    unclassified = {item.get("warn_code") for item in graded["fail"] if item["code"] == "clean_host_warn_unclassified"}
+    assert "llm_route_unexpected" not in unclassified
+
+
+def test_session_fact_extraction_llm_route_unexpected_warns_when_count_positive():
+    snapshot = {
+        "monitor_profile": "live",
+        "lane_backend_transport": {
+            "lanes": {
+                "fact_judge": {"status": "no_sample"},
+                "session_fact_extraction": {
+                    "status": "ok",
+                    "input_source": "state_db",
+                    "llm_transport": "hermes_call_llm",
+                    "llm_provider": "hermes_default",
+                    "llm_model": "some-model",
+                    "llm_route_unexpected_count": 1,
+                    "llm_route_unexpected_expected_model": "pinned-model",
+                    "llm_route_unexpected_actual_model": "answering-model",
+                },
+            },
+        },
+    }
+    graded = classify_snapshot(snapshot)
+    warn_entries = [item for item in graded["warn"] if item["code"] == "llm_route_unexpected"]
+    assert len(warn_entries) == 1
+    assert warn_entries[0]["lane"] == "session_fact_extraction"
+    assert warn_entries[0]["expected_model"] == "pinned-model"
+    assert warn_entries[0]["actual_model"] == "answering-model"
+
+
+def test_llm_edge_proposer_llm_route_unexpected_warns_when_count_positive():
+    """The third LLM lane reads via cognitive_loop_step_evidence's
+    edge_step_results, not lane_backend_transport -- a different snapshot
+    shape than fact_judge/SFE, so it needs its own integration check."""
+    evidence = {
+        "status": "ok",
+        "edge_step_results": {
+            "llm_edge_proposer": {
+                "status": "ok",
+                "llm_route_unexpected_count": 1,
+                "llm_route_unexpected_expected_model": "pinned-model",
+                "llm_route_unexpected_actual_model": "answering-model",
+            },
+        },
+    }
+    graded = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": evidence,
+    })
+    warn_entries = [item for item in graded["warn"] if item["code"] == "llm_route_unexpected"]
+    assert len(warn_entries) == 1
+    assert warn_entries[0]["lane"] == "llm_edge_proposer"
+
+
+def test_llm_edge_proposer_llm_route_unexpected_no_warn_when_count_zero():
+    evidence = {
+        "status": "ok",
+        "edge_step_results": {
+            "llm_edge_proposer": {"status": "ok", "llm_route_unexpected_count": 0},
+        },
+    }
+    graded = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "cognitive_loop_step_evidence": evidence,
+    })
+    assert not any(item["code"] == "llm_route_unexpected" for item in graded["warn"])
 
 
 def test_session_fact_extraction_backend_state_is_info_only():
@@ -10164,6 +10447,96 @@ def test_every_structural_edge_proposer_scalar_survives_both_whitelists_end_to_e
     }
     missing = sorted(scalar_keys - set(surfaced))
     assert not missing, f"structural_edge_proposer scalars dropped by the monitor's _edge_fields: {missing}"
+
+
+def test_every_llm_edge_proposer_scalar_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """W4-A census: the REAL producer (run_llm_proposer, including its new
+    llm_route_unexpected_count/llm_route_unknown_count counters) runs through
+    the REAL cognitive_loop wrapper and the REAL embedded monitor collector --
+    mirroring the edge_weight_feedback/structural_edge_proposer censuses
+    above, the same DL/G0 lesson: a hand-listed key set stays green while a
+    new counter is dropped at either whitelist layer."""
+    import json as _json
+
+    from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    frontmatter_common = {
+        "schema_version": "memory-os.crystallized.v0",
+        "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z",
+        "approval_purpose": "test",
+        "approval_note": "test seed",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+        "hindsight_indexed": False,
+        "bridge_state": "active",
+    }
+    store.append_crystallized_record(
+        "cry_llm_census_a.md",
+        {**frontmatter_common, "id": "cry_llm_census_a", "kind": "note", "created_at": "2026-06-01T00:00:00Z"},
+        "test crystallized body one",
+    )
+    store.append_crystallized_record(
+        "cry_llm_census_b.md",
+        {**frontmatter_common, "id": "cry_llm_census_b", "kind": "note", "created_at": "2026-06-02T00:00:00Z"},
+        "test crystallized body two",
+    )
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "pinned-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(
+            text=_json.dumps({"relation_type": "refines", "confidence": 0.8, "reasoning": "x"}),
+            provider="openai-codex", model="answering-model", expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
+        ),
+    )
+
+    context: dict = {}
+    wrapper_summary = CognitiveLoopRunner(store)._llm_edge_proposer(context)
+    assert context["llm_edge_proposer_result"]["llm_route_unexpected_count"] == 1, (
+        "sanity: the producer's route-mismatch counter fired"
+    )
+    assert "llm_route_unexpected_count" in wrapper_summary, "sanity: the wrapper passed W4-A route counters"
+
+    report = {
+        "cycle_id": "cycle-census-llm-edge",
+        "status": "ok",
+        "steps": [{
+            "step": "llm_edge_proposer", "status": "ok", "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    (mod_dir / "reports.jsonl").write_text(_json.dumps(report) + "\n", encoding="utf-8")
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    surfaced = namespace["cognitive_loop_step_evidence"]()["edge_step_results"]["llm_edge_proposer"]
+
+    not_carried = {"schema_version"}
+    scalar_keys = {
+        key for key, value in wrapper_summary.items()
+        if key not in not_carried and not isinstance(value, (dict, list))
+    }
+    missing = sorted(scalar_keys - set(surfaced))
+    assert not missing, f"llm_edge_proposer scalars dropped by the monitor's _edge_fields: {missing}"
+    assert surfaced["llm_route_unexpected_count"] == 1
+    assert surfaced["llm_route_unexpected_expected_model"] == "pinned-model"
+    assert surfaced["llm_route_unexpected_actual_model"] == "answering-model"
 
 
 def test_structural_updates_backfill_failure_is_graded_warn():

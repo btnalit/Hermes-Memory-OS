@@ -294,6 +294,13 @@ def run_clearance_cycle(
     report["llm_transport"] = llm_call_stats.get("transport", "")
     report["llm_usage_prompt_tokens"] = llm_call_stats.get("usage_prompt_tokens", 0)
     report["llm_usage_completion_tokens"] = llm_call_stats.get("usage_completion_tokens", 0)
+    # W4-A / plan row L1: route-mismatch counters (ADD-only).
+    report["llm_route_unexpected_count"] = llm_call_stats.get("route_unexpected_count", 0)
+    report["llm_route_unknown_count"] = llm_call_stats.get("route_unknown_count", 0)
+    report["llm_route_unexpected_expected_model"] = llm_call_stats.get("route_unexpected_expected_model", "")
+    report["llm_route_unexpected_actual_model"] = llm_call_stats.get("route_unexpected_actual_model", "")
+    report["llm_route_unexpected_expected_provider"] = llm_call_stats.get("route_unexpected_expected_provider", "")
+    report["llm_route_unexpected_routed_provider"] = llm_call_stats.get("route_unexpected_routed_provider", "")
 
     return report
 
@@ -410,6 +417,7 @@ def _judge_against_permanents(
     from .low_clue_recall import (
         _call_hermes_runtime_model_result,
         _extract_json_object,
+        _llm_call_diagnostics,
         _resolve_hermes_default_runtime,
     )
 
@@ -479,23 +487,39 @@ def _judge_against_permanents(
 
         if llm_call_stats is not None:
             llm_call_stats["calls"] = llm_call_stats.get("calls", 0) + 1
-            if call_result.failure_reason:
+            # W4-A: route through the single shared diagnostics seam
+            # (low_clue_recall._llm_call_diagnostics) instead of hand-picking
+            # fields off call_result -- keeps this accumulator's own field
+            # names (provider/model/transport/usage_*) unchanged while
+            # gaining llm_expected_model/llm_actual_model/llm_route_unexpected/
+            # llm_route_unknown (plan row L1) for free.
+            diagnostics = _llm_call_diagnostics(call_result)
+            if diagnostics.get("llm_transport_failure_reason"):
                 reasons = llm_call_stats.setdefault("failures_by_reason", {})
-                reasons[call_result.failure_reason] = reasons.get(call_result.failure_reason, 0) + 1
-            if call_result.provider:
-                llm_call_stats["provider"] = call_result.provider
-            if call_result.model:
-                llm_call_stats["model"] = call_result.model
-            llm_call_stats["transport"] = call_result.transport
-            if call_result.usage:
+                reason = diagnostics["llm_transport_failure_reason"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+            if diagnostics.get("llm_provider"):
+                llm_call_stats["provider"] = diagnostics["llm_provider"]
+            if diagnostics.get("llm_model"):
+                llm_call_stats["model"] = diagnostics["llm_model"]
+            llm_call_stats["transport"] = diagnostics.get("llm_transport") or ""
+            if "llm_usage_prompt_tokens" in diagnostics:
                 llm_call_stats["usage_prompt_tokens"] = (
                     llm_call_stats.get("usage_prompt_tokens", 0)
-                    + int(call_result.usage.get("prompt_tokens") or 0)
+                    + int(diagnostics.get("llm_usage_prompt_tokens") or 0)
                 )
                 llm_call_stats["usage_completion_tokens"] = (
                     llm_call_stats.get("usage_completion_tokens", 0)
-                    + int(call_result.usage.get("completion_tokens") or 0)
+                    + int(diagnostics.get("llm_usage_completion_tokens") or 0)
                 )
+            if diagnostics.get("llm_route_unexpected"):
+                llm_call_stats["route_unexpected_count"] = llm_call_stats.get("route_unexpected_count", 0) + 1
+                llm_call_stats["route_unexpected_expected_model"] = str(diagnostics.get("llm_expected_model") or "")
+                llm_call_stats["route_unexpected_actual_model"] = str(diagnostics.get("llm_actual_model") or "")
+                llm_call_stats["route_unexpected_expected_provider"] = str(diagnostics.get("llm_expected_provider") or "")
+                llm_call_stats["route_unexpected_routed_provider"] = str(diagnostics.get("llm_routed_provider") or "")
+            if diagnostics.get("llm_route_unknown"):
+                llm_call_stats["route_unknown_count"] = llm_call_stats.get("route_unknown_count", 0) + 1
 
         if call_result.failure_reason:
             # Transport-level failure (exception, timeout, HTTP 4xx, missing

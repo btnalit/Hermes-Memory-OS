@@ -1077,6 +1077,15 @@ class CognitiveLoopRunner:
             "llm_transport": result.get("llm_transport", ""),
             "llm_usage_prompt_tokens": result.get("llm_usage_prompt_tokens", 0),
             "llm_usage_completion_tokens": result.get("llm_usage_completion_tokens", 0),
+            # W4-A / plan row L1: route-mismatch counters -- must survive
+            # this whitelist too, same shape as the W2 transport diagnostics
+            # note above (see CLAUDE.md's D2b/W2 "two-layer whitelist" hazard).
+            "llm_route_unexpected_count": result.get("llm_route_unexpected_count", 0),
+            "llm_route_unknown_count": result.get("llm_route_unknown_count", 0),
+            "llm_route_unexpected_expected_model": result.get("llm_route_unexpected_expected_model", ""),
+            "llm_route_unexpected_actual_model": result.get("llm_route_unexpected_actual_model", ""),
+            "llm_route_unexpected_expected_provider": result.get("llm_route_unexpected_expected_provider", ""),
+            "llm_route_unexpected_routed_provider": result.get("llm_route_unexpected_routed_provider", ""),
         }
 
     def _vector_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:
