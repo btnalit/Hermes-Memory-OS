@@ -119,6 +119,7 @@ from .owner_actions import (
 )
 from .prefetch import continuity_selector_report
 from .prefetch import build_context_router_report
+from .principal import PRINCIPAL_OWNER
 from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .session_mirror import SessionMirror
@@ -2695,6 +2696,10 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                     action_token=str(args.action_token),
                     offset=int(args.offset),
                     limit=int(args.limit),
+                    # Local CLI is owner by ruling (2026-09-23): a caller who
+                    # can already reach this shell has higher privilege than
+                    # the owner-review gate exists to enforce.
+                    principal=PRINCIPAL_OWNER,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -2869,6 +2874,9 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
             max_action_required=args.max_action_required,
             max_review_suggested=args.max_review_suggested,
             max_fyi=args.max_fyi,
+            # Local CLI is owner by ruling (2026-09-23): see the "surface"
+            # command above for the same rationale.
+            principal=PRINCIPAL_OWNER,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if report.get("status") in {"ok", "needs_clarification", "unsupported"} else 1

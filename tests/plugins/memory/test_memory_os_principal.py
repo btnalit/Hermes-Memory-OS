@@ -23,6 +23,7 @@ from plugins.memory.memory_os.principal import (
     FOREGROUND_CONTROL_PRINCIPALS,
     LOCAL_OWNER_SOURCES,
     MAILBOX_SOURCE,
+    OWNER_ACTION_PRINCIPALS,
     PRINCIPAL_OTHER_HUMAN,
     PRINCIPAL_OWNER,
     PRINCIPAL_PEER_AGENT,
@@ -220,6 +221,18 @@ def test_ingress_foreground_control_principals_match_principal_module():
     classify_ingress would silently gate on stale vocabulary."""
     assert ingress._FOREGROUND_CONTROL_PRINCIPALS == FOREGROUND_CONTROL_PRINCIPALS
     assert FOREGROUND_CONTROL_PRINCIPALS == {PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN}
+
+
+def test_owner_action_principals_is_exactly_owner_and_unknown():
+    """P1 (2026-09-23 next-phase plan, Phase 2): owner_actions.py self-checks
+    against this constant for both parse_owner_review_reply and
+    owner_review_surface_report. Pin its exact membership so a future edit
+    cannot silently widen (or narrow) who may perform/see an owner action."""
+    assert OWNER_ACTION_PRINCIPALS == {PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN}
+    assert PRINCIPAL_PEER_AGENT not in OWNER_ACTION_PRINCIPALS
+    assert PRINCIPAL_OTHER_HUMAN not in OWNER_ACTION_PRINCIPALS
+    assert PRINCIPAL_SYSTEM not in OWNER_ACTION_PRINCIPALS
+    assert "" not in OWNER_ACTION_PRINCIPALS
 
 
 # ── principal_binding_status ─────────────────────────────────────────────

@@ -324,6 +324,7 @@ def _apply_cluster_owner_token(store: MemoryOSStore, *, owner_id: str) -> tuple[
         apply=True,
         digest_id=str(rendered["digest_id"]),
         require_recorded_digest=True,
+        principal="owner",
     )
     assert result["status"] == "ok", result.get("reason")
     return result["owner_action_result"], target_id

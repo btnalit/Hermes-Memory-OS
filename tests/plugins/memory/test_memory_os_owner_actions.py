@@ -59,6 +59,13 @@ from plugins.memory.memory_os.owner_actions import (
     route_approved_proposal_followup_to_ops_gate,
     route_pending_approved_proposal_followups_to_ops_gate,
 )
+from plugins.memory.memory_os.principal import (
+    PRINCIPAL_OTHER_HUMAN,
+    PRINCIPAL_OWNER,
+    PRINCIPAL_PEER_AGENT,
+    PRINCIPAL_SYSTEM,
+    PRINCIPAL_UNKNOWN,
+)
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -138,6 +145,7 @@ def _apply_candidate_via_recorded_digest(
         apply=True,
         digest_id=str(rendered["digest_id"]),
         require_recorded_digest=True,
+        principal="owner",
     )
     assert result["status"] == "ok", result
     return dict(result["owner_action_result"])
@@ -1250,6 +1258,7 @@ def test_proposal_followup_surface_exposes_tokenized_explicit_apply(tmp_path):
         operation="proposal_followups",
         owner_id="owner",
         channel="telegram",
+        principal="owner",
     )
     item = surface["proposal_followups"]["items"][0]
     apply_token = item["action_tokens"]["apply_proposal"]
@@ -1284,6 +1293,7 @@ def test_proposal_followup_surface_exposes_tokenized_explicit_apply(tmp_path):
         owner_id="owner",
         channel="telegram",
         apply=True,
+        principal="owner",
     )
 
     policy_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "policy.json"
@@ -2073,7 +2083,9 @@ def test_review_surface_exposes_latest_expression_feedback_context_tokens(tmp_pa
         encoding="utf-8",
     )
 
-    report = owner_review_surface_report(store, operation="expression_feedback_context", limit=6)
+    report = owner_review_surface_report(
+        store, operation="expression_feedback_context", limit=6, principal="owner"
+    )
 
     assert report["status"] == "ok"
     assert report["operation"] == "expression_feedback_context"
@@ -2111,7 +2123,7 @@ def test_expression_feedback_context_token_applies_without_digest_binding(tmp_pa
         + "\n",
         encoding="utf-8",
     )
-    surface = owner_review_surface_report(store, operation="expression_feedback_context", limit=6)
+    surface = owner_review_surface_report(store, operation="expression_feedback_context", limit=6, principal="owner")
     token = surface["feedback_actions"]["too_mechanical"]["action_token"]
 
     result = parse_owner_review_reply(
@@ -2121,6 +2133,7 @@ def test_expression_feedback_context_token_applies_without_digest_binding(tmp_pa
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
 
     feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
@@ -2211,7 +2224,9 @@ def test_review_surface_exposes_latest_memory_sources_feedback_context_tokens(tm
         },
     )
 
-    report = owner_review_surface_report(store, operation="memory_sources_feedback_context", limit=5)
+    report = owner_review_surface_report(
+        store, operation="memory_sources_feedback_context", limit=5, principal="owner"
+    )
 
     assert report["status"] == "ok"
     assert report["operation"] == "memory_sources_feedback_context"
@@ -2263,7 +2278,9 @@ def test_memory_sources_feedback_context_token_applies_without_digest_binding(tm
             "boundary": {"raw_body_included": False},
         },
     )
-    surface = owner_review_surface_report(store, operation="memory_sources_feedback_context", limit=5)
+    surface = owner_review_surface_report(
+        store, operation="memory_sources_feedback_context", limit=5, principal="owner"
+    )
     token = surface["feedback_actions"]["too_mechanistic"]["action_token"]
 
     result = parse_owner_review_reply(
@@ -2273,6 +2290,7 @@ def test_memory_sources_feedback_context_token_applies_without_digest_binding(tm
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
 
     feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
@@ -2476,7 +2494,9 @@ def test_owner_review_reply_can_revoke_crystallized_record_by_token(tmp_path):
         f"revoke_crystallized|crystallized_record|{record_id}".encode("utf-8")
     ).hexdigest()[:14]
 
-    result = parse_owner_review_reply(store, f"memory revoke {token}", owner_id="owner", channel="cli", apply=True)
+    result = parse_owner_review_reply(
+        store, f"memory revoke {token}", owner_id="owner", channel="cli", apply=True, principal="owner"
+    )
     revoked = CrystallizedMemoryService(store).find_record(record_id)
     projection = derive_projection_coherence(
         ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").read_all(),
@@ -2501,7 +2521,9 @@ def test_owner_review_reply_can_demote_crystallized_record_by_token(tmp_path):
         f"demote_crystallized|crystallized_record|{record_id}".encode("utf-8")
     ).hexdigest()[:14]
 
-    result = parse_owner_review_reply(store, f"memory demote {token}", owner_id="owner", channel="cli", apply=True)
+    result = parse_owner_review_reply(
+        store, f"memory demote {token}", owner_id="owner", channel="cli", apply=True, principal="owner"
+    )
     demoted = CrystallizedMemoryService(store).find_record(record_id)
     projection = derive_projection_coherence(
         ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").read_all(),
@@ -2546,6 +2568,7 @@ def test_repro_offline_forged_revoke_token_is_refused_without_recorded_digest(tm
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
 
     after = CrystallizedMemoryService(store).find_record(record_id)
@@ -2572,6 +2595,7 @@ def test_repro_offline_forged_demote_token_is_refused_when_recorded_digest_lacks
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
 
     after = CrystallizedMemoryService(store).find_record(record_id)
@@ -2645,6 +2669,7 @@ def test_proposal_followup_apply_token_still_applies_with_require_recorded_diges
         operation="proposal_followups",
         owner_id="owner",
         channel="telegram",
+        principal="owner",
     )
     apply_token = surface["proposal_followups"]["items"][0]["action_tokens"]["apply_proposal"]
 
@@ -2655,6 +2680,7 @@ def test_proposal_followup_apply_token_still_applies_with_require_recorded_diges
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
 
     assert result["active_digest"]["binding"] == "digest_not_found"
@@ -2954,6 +2980,7 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
         max_action_required=0,
         max_review_suggested=1,
         max_fyi=0,
+        principal="owner",
     )
     feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
 
@@ -3228,6 +3255,7 @@ def test_review_surface_detail_scrubs_actions_from_stale_digest(tmp_path):
         channel="origin",
         digest_id=first["digest_id"],
         apply=True,
+        principal="owner",
     )
     ProposalQueueModule(tmp_path, profile="main").create_candidate(
         store=store,
@@ -3248,6 +3276,7 @@ def test_review_surface_detail_scrubs_actions_from_stale_digest(tmp_path):
         operation="detail",
         action_token=old_reject_token,
         channel="telegram",
+        principal="owner",
     )
     serialized = json.dumps(report, ensure_ascii=False)
 
@@ -3288,6 +3317,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
         channel="telegram",
         digest_id=delivered["digest_id"],
         apply=False,
+        principal="owner",
     )
 
     assert dry_run["schema_version"] == "memory-os.owner_review_reply.v0"
@@ -3307,6 +3337,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
         channel="telegram",
         digest_id=delivered["digest_id"],
         apply=True,
+        principal="owner",
     )
 
     assert applied["status"] == "ok"
@@ -3335,6 +3366,7 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
         owner_id="owner",
         channel="telegram",
         apply=False,
+        principal="owner",
     )
 
     assert result["status"] == "ok"
@@ -3383,6 +3415,7 @@ def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(t
         owner_id="owner",
         channel="telegram",
         apply=True,
+        principal="owner",
     )
 
     assert result["status"] == "ok"
@@ -3881,6 +3914,7 @@ def test_reply_parser_handles_feedback_anchor_without_route_mutation(tmp_path):
         channel="telegram",
         apply=True,
         max_fyi=1,
+        principal="owner",
     )
 
     feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
@@ -3896,7 +3930,9 @@ def test_reply_parser_unknown_anchor_needs_clarification_without_mutation(tmp_pa
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
 
-    result = parse_owner_review_reply(store, "memory approve oa_deadbeef", owner_id="owner", channel="telegram", apply=True)
+    result = parse_owner_review_reply(
+        store, "memory approve oa_deadbeef", owner_id="owner", channel="telegram", apply=True, principal="owner"
+    )
 
     assert result["status"] == "needs_clarification"
     assert result["reason"] == "action_token_not_found_in_recorded_digest"
@@ -5104,3 +5140,188 @@ def test_hermes_send_timeout_returns_typed_failure(monkeypatch):
     assert result["ok"] is False
     assert result["code"] == "hermes_send_timeout"
     assert result["delivery_ref"]["returncode"] == 124
+
+
+# ── P1 (2026-09-23 next-phase plan, Phase 2): owner action core-layer
+# principal self-check. The ingress in __init__.py already gates on
+# principal before calling parse_owner_review_reply, but these tests call
+# the authority module directly -- with no ingress in front of it -- to
+# prove the module refuses for itself. ──────────────────────────────────
+
+
+def _digest_with_approve_token(store, *, channel="telegram"):
+    rendered = render_owner_review_digest(
+        store,
+        channel=channel,
+        max_action_required=1,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+    token = rendered["sections"]["action_required"][0]["action_tokens"]["approve_candidate"]
+    return rendered, token
+
+
+@pytest.mark.parametrize("principal", [PRINCIPAL_PEER_AGENT, PRINCIPAL_OTHER_HUMAN, PRINCIPAL_SYSTEM])
+def test_parse_owner_review_reply_rejects_non_owner_principals(tmp_path, principal):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered, token = _digest_with_approve_token(store)
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id="owner",
+        channel="telegram",
+        digest_id=rendered["digest_id"],
+        apply=True,
+        require_recorded_digest=True,
+        principal=principal,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "owner_action_principal_rejected"
+    assert not owner_actions_path(store.roots).exists()
+
+    audit = read_audit_entries(store.roots.audit_path)
+    rejections = [item for item in audit if item.get("action") == "owner_action_principal_rejected"]
+    assert len(rejections) == 1
+    assert rejections[0]["status"] == "rejected"
+    assert rejections[0]["details"]["principal"] == principal
+    assert rejections[0]["details"]["apply"] is True
+    assert token not in json.dumps(rejections[0], ensure_ascii=False)
+
+
+def test_parse_owner_review_reply_rejects_unspecified_principal_by_default(tmp_path):
+    """Counterfactual for 'default parameters must never be traps': a caller
+    that forgets to resolve/pass a principal must not silently get owner
+    authority. Calling with no `principal` kwarg at all must refuse exactly
+    like an explicit non-owner principal, not fall through to `unknown` or
+    any other permissive default."""
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered, token = _digest_with_approve_token(store)
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id="owner",
+        channel="telegram",
+        digest_id=rendered["digest_id"],
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "owner_action_principal_rejected"
+    assert not owner_actions_path(store.roots).exists()
+    audit = read_audit_entries(store.roots.audit_path)
+    rejections = [item for item in audit if item.get("action") == "owner_action_principal_rejected"]
+    assert len(rejections) == 1
+    assert rejections[0]["details"]["principal"] == "unspecified"
+
+
+@pytest.mark.parametrize("principal", [PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN])
+def test_parse_owner_review_reply_allows_owner_and_unknown_principals(tmp_path, principal):
+    """`unknown` is a deliberate compatibility allowance (an unconfigured
+    platform's owner also resolves to `unknown`), not an oversight -- and the
+    approval is still recorded with that principal so it stays visible."""
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered, token = _digest_with_approve_token(store)
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id="owner",
+        channel="telegram",
+        digest_id=rendered["digest_id"],
+        apply=True,
+        require_recorded_digest=True,
+        principal=principal,
+    )
+
+    assert result["status"] == "ok"
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "approve_candidate"
+
+
+def test_owner_review_surface_report_hides_oa_tokens_from_non_owner_principal(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=1,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    owner_view = owner_review_surface_report(
+        store, channel="telegram", operation="overview", principal=PRINCIPAL_OWNER
+    )
+    non_owner_view = owner_review_surface_report(
+        store, channel="telegram", operation="overview", principal=PRINCIPAL_PEER_AGENT
+    )
+
+    owner_item = owner_view["sections"]["action_required"][0]
+    non_owner_item = non_owner_view["sections"]["action_required"][0]
+    owner_token = owner_item["action_tokens"]["approve_candidate"]
+
+    assert owner_token.startswith("oa_")
+    assert "redacted" not in owner_token
+    assert non_owner_item["action_tokens"]["approve_candidate"] == "oa_[redacted]"
+    assert owner_token not in json.dumps(non_owner_view, ensure_ascii=False)
+    assert "memory approve oa_[redacted]" in non_owner_item["owner_utterance_examples"]
+    assert {
+        "tool_name": "memory_os_review_reply",
+        "arguments": {"action": "approve", "action_token": "oa_[redacted]"},
+    } in non_owner_item["agent_tool_calls"]
+    # Everything that is not itself a token is untouched by redaction.
+    assert non_owner_item["target_id"] == owner_item["target_id"]
+    assert non_owner_view["counts"] == owner_view["counts"]
+
+
+def test_owner_review_surface_report_unspecified_principal_defaults_to_redacted(tmp_path):
+    """Same default-must-not-be-a-trap counterfactual as
+    parse_owner_review_reply, for the read-only surface: an unspecified
+    principal must not silently reveal a live token."""
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=1,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    default_view = owner_review_surface_report(store, channel="telegram", operation="overview")
+
+    assert default_view["sections"]["action_required"][0]["action_tokens"]["approve_candidate"] == "oa_[redacted]"
+
+
+def test_owner_review_surface_report_owner_and_unknown_are_byte_identical(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=1,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    owner_view = owner_review_surface_report(
+        store, channel="telegram", operation="overview", principal=PRINCIPAL_OWNER
+    )
+    unknown_view = owner_review_surface_report(
+        store, channel="telegram", operation="overview", principal=PRINCIPAL_UNKNOWN
+    )
+
+    assert owner_view == unknown_view
+    assert owner_view["sections"]["action_required"][0]["action_tokens"]["approve_candidate"].startswith("oa_")
