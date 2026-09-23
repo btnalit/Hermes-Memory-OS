@@ -72,7 +72,6 @@ V7_GOVERNANCE_COMPONENTS = (
     "provisional",
     "cascade_routing_policy",
     "migration_controller",
-    "symbolic_offloader",
     "abstraction_distillation",
     "retractable_label_miner",
     "imagination_loop",
@@ -80,14 +79,51 @@ V7_GOVERNANCE_COMPONENTS = (
     "crystallized_revalidator",
     "grounded_expression_judge",
 )
-V7_OPTIONAL_COMPONENT_REASONS = {
-    "symbolic_offloader": "optional_audit_level_default_disabled",
-}
+V7_OPTIONAL_COMPONENT_REASONS: dict[str, str] = {}
 V7_REQUIRED_COMPONENTS_PRODUCTION = tuple(
     component for component in V7_GOVERNANCE_COMPONENTS if component not in V7_OPTIONAL_COMPONENT_REASONS
 )
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
 V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
+
+# W1-B lane-contract freeze-gate gradings (see plugins/memory/memory_os/
+# lane_contracts.py). Thresholds are named constants, not inline literals,
+# per CLAUDE.md's rule that a gate's vocabulary/thresholds must be
+# grep-able. All three grade WARN, never FAIL, for now.
+#
+# session_fact_extraction reads <hermes_home>/sessions/session_*.json, a
+# format Hermes stopped writing around 2026-05/06 (now writes state.db).
+# Verified on hermes-media main 2026-09-23: 141 session_*.json files, newest
+# mtime ~2026-05-13 -- over 4 months stale against today's date, so this
+# threshold is deliberately far below that gap and still comfortably above
+# any legitimate multi-day gap in owner activity.
+LANE_INPUT_STALE_THRESHOLD_SECONDS = 7 * 24 * 3600  # 7 days
+
+# Append-only ledger sizes measured on hermes-media main 2026-09-23:
+# graph_layer_shadow.jsonl ~15.1MB, candidate_triage.jsonl ~13.9MB,
+# v3_seed_edges_daily.jsonl ~28.2MB, cognitive_loop reports.jsonl ~54.0MB --
+# all already past these thresholds, which is the point: they grow forever
+# with no compaction and this gate exists to say so.
+APPEND_ONLY_LEDGER_SIZE_WARN_BYTES: dict[str, int] = {
+    "graph_layer_shadow": 10 * 1024 * 1024,
+    "candidate_triage": 10 * 1024 * 1024,
+    "v3_seed_edges_daily": 20 * 1024 * 1024,
+    "cognitive_loop_reports": 20 * 1024 * 1024,
+}
+APPEND_ONLY_LEDGER_RELATIVE_PATHS: dict[str, str] = {
+    "graph_layer_shadow": "memory-os/system/graph_layer_shadow.jsonl",
+    "candidate_triage": "memory-os/crystallized/candidate_triage.jsonl",
+    "v3_seed_edges_daily": "memory-os/system/v3_seed_edges_daily.jsonl",
+    "cognitive_loop_reports": "system-modules/cognitive_loop/reports.jsonl",
+}
+
+# Consecutive most-recent-run/verdict failures before an LLM lane's
+# degradation is a WARN rather than noise. Verified on hermes-media main
+# 2026-09-23: the last 60 fact_judge verdicts are ALL failure_reason=
+# "llm_empty_content" -- a live incident, not a hypothetical.
+LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD = 5
+LLM_LANE_FAILURE_STREAK_TAIL_LIMIT = 50
+
 INDEX_CATCHUP_MAX_AGE_SECONDS = 900
 INDEX_CATCHUP_MAX_EVENT_BACKLOG = 1
 FULL_MONITOR_LIVE_TARGET_SECONDS = 180
@@ -305,6 +341,27 @@ MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     },
 }
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
+    # W1-B lane-contract freeze-gate gradings. A freshly onboarded clean
+    # host has no session_*.json history, no accumulated append-only
+    # ledgers, and no LLM-call history yet, so these three would legitimately
+    # never fire there -- but an unclassified WARN still turns clean-host
+    # FAIL if one somehow does (e.g. a compatibility host seeded with old
+    # fixture files), so they are registered defensively.
+    "lane_input_stale": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host has no session_*.json history yet to be stale, and a fixture-seeded host should not fail install compatibility over it",
+        "production_behavior": "warn_if_production",
+    },
+    "append_only_ledger_oversized": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host has not accumulated the traffic that grows these append-only ledgers",
+        "production_behavior": "warn_if_production",
+    },
+    "llm_lane_consecutive_failure_streak": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host has no LLM-call history yet for these lanes to have failed",
+        "production_behavior": "warn_if_production",
+    },
     "cron_registry_snapshot_member_drift": {
         "classification": "next_lane",
         "reason": "deployed cron registry snapshot resolves fewer group members than the installed registry defines - regenerate the snapshot (install/onboarding step)",
@@ -953,7 +1010,6 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         "shadow_recall_status": component_status["shadow_recall"],
         "deferral_accuracy_status": component_status["cascade_routing_policy"],
         "migration_regression_status": component_status["migration_controller"],
-        "offload_integrity_status": component_status["symbolic_offloader"],
         "distillation_fidelity_status": component_status["abstraction_distillation"],
         "simulation_coverage_status": component_status["imagination_loop"],
         "confabulation_detection_status": component_status["confabulation_detector"],
@@ -1151,15 +1207,6 @@ def _infer_v7_components_from_artifacts(snapshot: dict[str, Any]) -> dict[str, d
             status_key="migration_controller",
             count_keys=("run_count",),
             live_applied_keys=("migration_live_applied",),
-        )
-    )
-    inferred.update(
-        _infer_v7_shadow_module(
-            module_artifacts,
-            component="symbolic_offloader",
-            status_key="symbolic_offloader",
-            count_keys=("report_count", "ref_count"),
-            live_applied_keys=("canonical_state_changed",),
         )
     )
     inferred.update(
@@ -1466,6 +1513,100 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 ),
             },
         })
+
+    # ── W1-B lane-contract freeze-gate gradings (plugins/memory/memory_os/
+    # lane_contracts.py) ─────────────────────────────────────────────────
+    # All three grade WARN, never FAIL. A lane/ledger the collector could not
+    # observe at all is reported no-sample (info), never silently folded into
+    # a healthy PASS -- see CLAUDE.md's "empty gated set must report
+    # healthy_no_sample, never PASS."
+    raw_lane_input_freshness = snapshot.get("lane_input_freshness")
+    lane_input_freshness: dict[str, Any] = (
+        raw_lane_input_freshness if isinstance(raw_lane_input_freshness, dict) else {}
+    )
+    freshness_lanes = (
+        lane_input_freshness.get("lanes") if isinstance(lane_input_freshness.get("lanes"), dict) else {}
+    )
+    for lane_name, lane_value in freshness_lanes.items():
+        lane_value = lane_value if isinstance(lane_value, dict) else {}
+        age_seconds = lane_value.get("newest_age_seconds")
+        if not lane_value.get("directory_exists") or not lane_value.get("file_count"):
+            # Directory absent or literally zero matching files: cannot tell
+            # "input source went dead" apart from "this profile never had
+            # this input in the first place" (e.g. a profile created after
+            # Hermes moved to state.db). Report no-sample, not a guess.
+            info.append({
+                "code": "lane_input_freshness_no_sample",
+                "value": {"lane": lane_name, **lane_value},
+            })
+        elif isinstance(age_seconds, (int, float)) and age_seconds > LANE_INPUT_STALE_THRESHOLD_SECONDS:
+            warn.append({
+                "code": "lane_input_stale",
+                "lane": lane_name,
+                "age_seconds": age_seconds,
+                "threshold_seconds": LANE_INPUT_STALE_THRESHOLD_SECONDS,
+                "newest_mtime_utc": lane_value.get("newest_mtime_utc"),
+            })
+        else:
+            passed.append({"code": "lane_input_freshness_ok", "value": {"lane": lane_name, **lane_value}})
+
+    raw_ledger_size = snapshot.get("append_only_ledger_size")
+    ledger_size: dict[str, Any] = raw_ledger_size if isinstance(raw_ledger_size, dict) else {}
+    ledgers = ledger_size.get("ledgers") if isinstance(ledger_size.get("ledgers"), dict) else {}
+    for ledger_name, ledger_value in ledgers.items():
+        ledger_value = ledger_value if isinstance(ledger_value, dict) else {}
+        size_bytes = ledger_value.get("size_bytes")
+        threshold = APPEND_ONLY_LEDGER_SIZE_WARN_BYTES.get(ledger_name)
+        if not ledger_value.get("exists") or size_bytes is None:
+            # A ledger that does not exist yet is a healthy state (the lane
+            # that writes it may simply not have run yet on this host), not
+            # evidence of anything -- report no-sample.
+            info.append({
+                "code": "append_only_ledger_size_no_sample",
+                "value": {"ledger": ledger_name, **ledger_value},
+            })
+        elif threshold is not None and isinstance(size_bytes, (int, float)) and size_bytes > threshold:
+            warn.append({
+                "code": "append_only_ledger_oversized",
+                "ledger": ledger_name,
+                "size_bytes": size_bytes,
+                "threshold_bytes": threshold,
+            })
+        else:
+            passed.append({
+                "code": "append_only_ledger_size_ok",
+                "value": {"ledger": ledger_name, "size_bytes": size_bytes},
+            })
+
+    raw_llm_streak = snapshot.get("llm_lane_failure_streak")
+    llm_streak: dict[str, Any] = raw_llm_streak if isinstance(raw_llm_streak, dict) else {}
+    streak_lanes = llm_streak.get("lanes") if isinstance(llm_streak.get("lanes"), dict) else {}
+    for lane_name, lane_value in streak_lanes.items():
+        lane_value = lane_value if isinstance(lane_value, dict) else {}
+        sample_count = int(lane_value.get("sample_count") or 0)
+        streak = int(lane_value.get("consecutive_failure_streak") or 0)
+        if sample_count <= 0:
+            # Nothing attempted an LLM call yet in the observed tail -- this
+            # is exactly the session_fact_extraction production steady state
+            # (0 llm_calls because sessions_eligible is 0), which is the
+            # lane_input_stale signal's job to report, not this one's.
+            info.append({
+                "code": "llm_lane_failure_streak_no_sample",
+                "value": {"lane": lane_name, **lane_value},
+            })
+        elif streak >= LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD:
+            warn.append({
+                "code": "llm_lane_consecutive_failure_streak",
+                "lane": lane_name,
+                "streak": streak,
+                "threshold": LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD,
+                "last_failure_reason": lane_value.get("last_failure_reason"),
+            })
+        else:
+            passed.append({
+                "code": "llm_lane_failure_streak_ok",
+                "value": {"lane": lane_name, "streak": streak, "sample_count": sample_count},
+            })
 
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
@@ -4713,7 +4854,6 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     # reader rather than the silent `except: pass` they replaced.
     "state_overlay",
     "state_source_mirror",
-    "symbolic_offloader",
     "temporal_retriever",
 })
 
@@ -5420,7 +5560,6 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "expression_draft": summary.get("expression_draft"),
         "expression_feedback": summary.get("expression_feedback"),
         "right_brain_expression_adapter": summary.get("right_brain_expression_adapter"),
-        "symbolic_offloader": summary.get("symbolic_offloader"),
         "prefetch_observability": _error_component_summary(summary.get("prefetch_observability") or {}),
     }
 
@@ -6449,6 +6588,171 @@ def lane_last_run_summary():
         "raw_body_included": False,
     }
 
+def lane_input_freshness_summary():
+    # W1-B: session_fact_extraction reads <hermes_home>/sessions/session_*.json.
+    # This is a raw-facts collector only -- classify_snapshot() applies
+    # LANE_INPUT_STALE_THRESHOLD_SECONDS locally so the threshold lives in one
+    # place (the local module), not duplicated into this remote script.
+    lanes = {}
+    directory = os.path.join(_hermes_home, "sessions")
+    directory_exists = os.path.isdir(directory)
+    newest_mtime = None
+    file_count = 0
+    if directory_exists:
+        for name in os.listdir(directory):
+            if not (name.startswith("session_") and name.endswith(".json")):
+                continue
+            file_count += 1
+            try:
+                mtime = os.path.getmtime(os.path.join(directory, name))
+            except OSError:
+                continue
+            if newest_mtime is None or mtime > newest_mtime:
+                newest_mtime = mtime
+    now = datetime.now(timezone.utc).timestamp()
+    lanes["session_fact_extraction"] = {
+        "directory": directory,
+        "directory_exists": directory_exists,
+        "file_count": file_count,
+        "newest_mtime_utc": (
+            datetime.fromtimestamp(newest_mtime, tz=timezone.utc).isoformat() if newest_mtime is not None else ""
+        ),
+        "newest_age_seconds": (now - newest_mtime) if newest_mtime is not None else None,
+    }
+    return {
+        "schema_version": "memory-os.lane_input_freshness.v0",
+        "lanes": lanes,
+    }
+
+def append_only_ledger_size_summary():
+    # W1-B: raw sizes only -- classify_snapshot() applies
+    # APPEND_ONLY_LEDGER_SIZE_WARN_BYTES locally. Relative paths mirror
+    # APPEND_ONLY_LEDGER_RELATIVE_PATHS in the local module; kept as a
+    # literal dict here (not spliced from the local module) because this
+    # script text is generated once per probe call and must stay a plain
+    # string the remote host can exec with no import of monitor.py itself.
+    relative_paths = {
+        "graph_layer_shadow": "memory-os/system/graph_layer_shadow.jsonl",
+        "candidate_triage": "memory-os/crystallized/candidate_triage.jsonl",
+        "v3_seed_edges_daily": "memory-os/system/v3_seed_edges_daily.jsonl",
+        "cognitive_loop_reports": "system-modules/cognitive_loop/reports.jsonl",
+    }
+    ledgers = {}
+    for key, relative in relative_paths.items():
+        path = os.path.join(_hermes_home, relative)
+        try:
+            size_bytes = os.path.getsize(path)
+            exists = True
+        except OSError:
+            size_bytes = None
+            exists = os.path.exists(path)
+        ledgers[key] = {"path": relative, "exists": exists, "size_bytes": size_bytes}
+    return {
+        "schema_version": "memory-os.append_only_ledger_size.v0",
+        "ledgers": ledgers,
+    }
+
+def llm_lane_failure_streak_summary(tail_limit=50):
+    # W1-B: consecutive-failure streak per LLM-calling lane, read from each
+    # lane's own bounded tail (read_jsonl_tail seeks backwards from EOF --
+    # see CLAUDE.md's jsonl_io note -- so this stays cheap even against
+    # cognitive_loop's reports.jsonl, which is tens of MB on production).
+    # classify_snapshot() applies LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD
+    # locally. The tail_limit=50 default here and the local module's
+    # LLM_LANE_FAILURE_STREAK_TAIL_LIMIT constant are two copies of the same
+    # number by necessity (this script text has no import of monitor.py to
+    # splice it from) -- if one changes, change the other.
+    try:
+        from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
+    except Exception:
+        return {"schema_version": "memory-os.llm_lane_failure_streak.v0", "lanes": {}, "collection_error": "jsonl_io_import_failed"}
+
+    def _tail(path, limit, max_bytes=1048576):
+        try:
+            result = read_jsonl_tail(path, max_records=limit, max_bytes=max_bytes)
+        except Exception:
+            return []
+        return [r for r in result.records if isinstance(r, dict)]
+
+    def _consecutive_streak(records, is_failure):
+        streak = 0
+        for record in reversed(records):
+            if is_failure(record):
+                streak += 1
+            else:
+                break
+        return streak
+
+    lanes = {}
+
+    # fact_judge: one verdict record per judged candidate; failure_reason is
+    # set (e.g. "llm_empty_content") whenever the LLM path did not produce a
+    # usable verdict and the heuristic fallback had to answer instead.
+    fact_judge_path = os.path.join(_hermes_home, "memory-os/system-modules/fact_judge/verdicts.jsonl")
+    fact_judge_records = _tail(fact_judge_path, tail_limit)
+    lanes["fact_judge"] = {
+        "sample_count": len(fact_judge_records),
+        "consecutive_failure_streak": _consecutive_streak(fact_judge_records, lambda r: bool(r.get("failure_reason"))),
+        "last_failure_reason": (fact_judge_records[-1].get("failure_reason") or "") if fact_judge_records else "",
+    }
+
+    # session_fact_extraction: one run-summary record per lane invocation.
+    # A run only "fails" here if it actually attempted LLM calls and all of
+    # them failed (llm_calls > 0 and every one is accounted for in
+    # llm_failures_by_reason) -- a run that skipped because there was
+    # nothing eligible (the current production steady state) is not a
+    # failure, it is the separate lane_input_stale signal's job to say so.
+    sfe_path = os.path.join(_hermes_home, "memory-os/system-modules/session_fact_extraction/runs.jsonl")
+    sfe_records = _tail(sfe_path, tail_limit)
+    def _sfe_run_failed(record):
+        llm_calls = int(record.get("llm_calls") or 0)
+        if llm_calls <= 0:
+            return False
+        failures_by_reason = record.get("llm_failures_by_reason") if isinstance(record.get("llm_failures_by_reason"), dict) else {}
+        total_failures = sum(int(v or 0) for v in failures_by_reason.values())
+        return total_failures >= llm_calls
+    sfe_attempted = [r for r in sfe_records if int(r.get("llm_calls") or 0) > 0]
+    last_sfe_attempt = sfe_attempted[-1] if sfe_attempted else {}
+    lanes["session_fact_extraction"] = {
+        "sample_count": len(sfe_attempted),
+        "consecutive_failure_streak": _consecutive_streak(sfe_attempted, _sfe_run_failed),
+        "last_failure_reason": (
+            ",".join(sorted((last_sfe_attempt.get("llm_failures_by_reason") or {}).keys()))
+            if last_sfe_attempt else ""
+        ),
+    }
+
+    # llm_edge_proposer: a cognitive-loop step, one cycle per reports.jsonl
+    # line. outcome=="llm_degraded" means at least one pair's LLM call
+    # failed that cycle (see cognitive_loop.py's llm_edge_proposer summary).
+    cl_path = os.path.join(_hermes_home, "system-modules/cognitive_loop/reports.jsonl")
+    cl_records = _tail(cl_path, tail_limit, max_bytes=4194304)
+    def _llm_edge_proposer_step(record):
+        for step in record.get("steps", []) if isinstance(record.get("steps"), list) else []:
+            if isinstance(step, dict) and step.get("step") == "llm_edge_proposer":
+                return step
+        return None
+    def _llm_edge_proposer_degraded(record):
+        step = _llm_edge_proposer_step(record)
+        if not step:
+            return False
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        return str(result.get("outcome") or "") == "llm_degraded"
+    cl_with_step = [r for r in cl_records if _llm_edge_proposer_step(r) is not None]
+    last_step = _llm_edge_proposer_step(cl_with_step[-1]) if cl_with_step else None
+    last_result = (last_step.get("result") if last_step and isinstance(last_step.get("result"), dict) else {}) or {}
+    lanes["llm_edge_proposer"] = {
+        "sample_count": len(cl_with_step),
+        "consecutive_failure_streak": _consecutive_streak(cl_with_step, _llm_edge_proposer_degraded),
+        "last_failure_reason": str(last_result.get("outcome") or ""),
+    }
+
+    return {
+        "schema_version": "memory-os.llm_lane_failure_streak.v0",
+        "tail_limit": int(tail_limit),
+        "lanes": lanes,
+    }
+
 def rh26_probe():
     code = r"""
 import json, re
@@ -6665,7 +6969,6 @@ def module_artifact_summary(*, include_retired_legacy=None):
     provisional = status("provisional")
     cascade_routing_policy = status("cascade_routing_policy")
     migration_controller = status("migration_controller")
-    symbolic_offloader = status("symbolic_offloader")
     abstraction_distillation = status("abstraction_distillation")
     crystallized_revalidator = status("crystallized_revalidator")
     deep_reflection = status("deep_reflection")
@@ -6673,7 +6976,6 @@ def module_artifact_summary(*, include_retired_legacy=None):
     speak_gate = status("speak_gate") if include_retired_legacy else {}
     expression_draft = status("expression_draft") if include_retired_legacy else {}
     grounded_expression_judge = status("grounded_expression_judge") if include_retired_legacy else {}
-    mailbox = status("mailbox")
 
     def prefetch_observability_summary():
         try:
@@ -7027,16 +7329,6 @@ def module_artifact_summary(*, include_retired_legacy=None):
         "actual_send": migration_controller.get("actual_send"),
         "actual_execute": migration_controller.get("actual_execute"),
       },
-      "symbolic_offloader": {
-        "status": symbolic_offloader.get("status"),
-        "report_count": symbolic_offloader.get("report_count"),
-        "ref_count": symbolic_offloader.get("ref_count"),
-        "suppressed_error_count": symbolic_offloader.get("suppressed_error_count"),
-        "recent_error_codes": symbolic_offloader.get("recent_error_codes"),
-        "canonical_state_changed": symbolic_offloader.get("canonical_state_changed"),
-        "actual_send": symbolic_offloader.get("actual_send"),
-        "actual_execute": symbolic_offloader.get("actual_execute"),
-      },
       "abstraction_distillation": {
         "status": abstraction_distillation.get("status"),
         "item_count": abstraction_distillation.get("item_count"),
@@ -7224,10 +7516,6 @@ def module_artifact_summary(*, include_retired_legacy=None):
             if isinstance(latest_speak_permission_ticket.get("delivery_ref"), dict)
             else None
         ),
-      },
-      "mailbox": {
-        "mailbox_exists": mailbox.get("mailbox_exists"),
-        "would_send_count": mailbox.get("would_send_count"),
       },
       "prefetch_observability": {
         "schema_version": prefetch_observability.get("schema_version") if isinstance(prefetch_observability, dict) else "",
@@ -9457,6 +9745,9 @@ print(json.dumps({
   "compaction": compaction_stats(),
   "continuity_freshness": continuity_freshness_summary(),
   "lane_last_run": lane_last_run_summary(),
+  "lane_input_freshness": lane_input_freshness_summary(),
+  "append_only_ledger_size": append_only_ledger_size_summary(),
+  "llm_lane_failure_streak": llm_lane_failure_streak_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))
