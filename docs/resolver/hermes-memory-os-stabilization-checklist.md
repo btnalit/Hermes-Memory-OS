@@ -8772,6 +8772,15 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   的审批逐字节相同。修复：入口成功审计补上 `principal`，注释改指真实位置；反事实（未配置平台、主人轮解析为 `unknown`、审计必须带
   `principal=unknown`）cp 备份法先败后过。另记两处局限（未修）：系统提示词若被 Hermes 按会话缓存，其脱敏只反映构建那一刻的发言者
   （与 P1 之前相比不更差，但不是逐轮关闭）；`apply_owner_action` 本身仍无主体自检，当前仅本地 CLI 可达。
+- **独立审查（Sonnet，安全向）无阻塞**：独立核对了两个令牌生成器（`oa_` 为 14 位小写 hex、`ppmt_` 为 urlsafe base64）均落在脱敏正则内、
+  拒绝审计不含令牌、`apply_owner_action` 四个生产调用点都在门后或本地 CLI、插件别名 CLI 是同一份 `cli.py` 进程内调用。据其两条
+  SHOULD-FIX 补两条测试（各有破坏即失败的反事实）：① 防火墙测试用 AST 扫描 `plugins/` 与 `scripts/`，把 `apply_owner_action(` 的调用点
+  钉成封闭集（CLI `_review_command` / `memory_os_command`，`parse_owner_review_reply` 与其内的 `_parse_permanent_promotion_reply`）——
+  它自己没有主体检查，新增一个绕过门的调用点即失败；② 端到端测试走真实 provider 的 `on_turn_start → system_prompt_block`：此前所有
+  P1 测试都显式传 `principal=`，没有任何测试证明 provider 在每轮注入的系统提示词里传的是本轮主体。只把 surface 主体替换成本块读取的
+  形状，真实的脱敏包装与 provider 生命周期照常运行；把 provider 的实参改成固定 `owner` 即令牌泄漏、测试失败。注：本块读取顶层
+  `action_required` 与 surface 实际的 `sections[...]` 形状不符（既有问题，上文已记），所以今天生产上它多半渲染为空——脱敏接线仍须
+  就位，否则修好读取路径的那一天就开始泄漏。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
   人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
   `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。
