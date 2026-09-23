@@ -5033,7 +5033,7 @@ sannai-community 仓库 README。）
 
 - `e9a2c92..HEAD`：收敛冲刺 C0（DM）——lane 契约普查表 + 冻结门（23 条 lane 与全部认知循环步骤各有 reads / produces /
   consumers-或-disposition / monitor_codes，缺项或陈旧即 FAIL）、monitor 三条新 WARN 分级（输入源陈旧 / 追加账本超限 / LLM lane
-  连续失败），按裁定删除 mailbox 与 symbolic_offloader；主会话补上监控码词表守卫与采集路径对生产者 accessor 的守卫。全量 3947 passed。**未部署**。
+  连续失败），按裁定删除 mailbox 与 symbolic_offloader；主会话补上监控码词表守卫与采集路径对生产者 accessor 的守卫。全量 3949 passed。**未部署**。
 - `3d9cb44..HEAD`：图谱卫生 G0（DL）——孤儿边按规范结晶文件判定存活后级联失效（规范视图不可信则整轮 fail-closed 跳过）、
   选槽前解析存活、shadow 账本限长、shadow 行新增 session_ref 与新颖度；主会话审查修掉"索引当权威 + 查询失败即全判孤儿"的清图风险，并补上新计数在两层白名单被丢弃的缺口。
   +18 测试（含两层白名单普查），全量 3803 passed。**未部署**。
@@ -8282,9 +8282,14 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   - 远端嵌入式采集器把每个生产者路径重打成字面量，原测试也按同一批字面量造夹具，路径写错会永远互相同意。新测试按生产者自己的 accessor
     （`v3_seed_edges_daily_path`、`crystallized_root / CANDIDATE_TRIAGE_FILE`、`CognitiveLoopRunner.reports_path`、`fact_judge._verdicts_path`、
     `session_fact_extraction._runs_path`）落文件，要求真实采集器逐一找到；三种破坏（账本字面量漂移、SFE runs 路径漂移、散文码）各自失败。
-- **测试**：lane 契约普查 145（含参数化）、monitor +13（含路径守卫）/ −2（V7 可选组件豁免的两条，唯一实例随 offloader 删除），
+- **独立审查（Sonnet）无阻塞，据其 SHOULD-FIX 再修两处**（各有破坏即失败的反事实）：llm_edge_proposer 整步抛异常时，
+  `_run_step` 写的是 `status: error` 且无 `result`，连续失败采集只认 `outcome == llm_degraded`，每轮都崩的 lane 被判连续失败 0 →
+  PASS——现在 `status == error` 计入失败，原因记 `step_error`（测试用真实 `_run_step` 产出错误形态）；`sessions/` 有文件但一个都
+  stat 不了（`newest_age_seconds` 为 None）时改报 no-sample 而非 pass。审查另提示 5 条 `@requires_internal_docs` 测试仍引用
+  内部文档里的 Mailbox 行：本地与 CI 均无 `docs/internal-memory-os/`，这些测试恒跳过，记为遗留。
+- **测试**：lane 契约普查 145（含参数化）、monitor +15（含路径守卫与两条审查反事实）/ −2（V7 可选组件豁免的两条，唯一实例随 offloader 删除），
   删除 mailbox / offloader / offload_integrity 相关测试；
-  全量 3947 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
+  全量 3949 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
 - **遗留**：
   - `V7_OPTIONAL_COMPONENT_REASONS` 现为空（机制保留，暂无实例；原唯一实例的测试随 offloader 删除）。
   - 契约表不含"退役路径"字段：按规划由退役 PR（C4/6/7/8）承担，普查只保证"生产者 → 消费者 → 监控"三项可查。

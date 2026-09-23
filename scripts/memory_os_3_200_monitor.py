@@ -1530,11 +1530,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     for lane_name, lane_value in freshness_lanes.items():
         lane_value = lane_value if isinstance(lane_value, dict) else {}
         age_seconds = lane_value.get("newest_age_seconds")
-        if not lane_value.get("directory_exists") or not lane_value.get("file_count"):
+        if (
+            not lane_value.get("directory_exists")
+            or not lane_value.get("file_count")
+            or not isinstance(age_seconds, (int, float))
+        ):
             # Directory absent or literally zero matching files: cannot tell
             # "input source went dead" apart from "this profile never had
             # this input in the first place" (e.g. a profile created after
             # Hermes moved to state.db). Report no-sample, not a guess.
+            # Files present but none stat-able (age None) is no-sample too,
+            # never a pass.
             info.append({
                 "code": "lane_input_freshness_no_sample",
                 "value": {"lane": lane_name, **lane_value},
@@ -6736,6 +6742,10 @@ def llm_lane_failure_streak_summary(tail_limit=50):
         step = _llm_edge_proposer_step(record)
         if not step:
             return False
+        # A step that raised is recorded as status "error" with no result;
+        # it failed harder than llm_degraded and must count, not reset.
+        if str(step.get("status") or "") == "error":
+            return True
         result = step.get("result") if isinstance(step.get("result"), dict) else {}
         return str(result.get("outcome") or "") == "llm_degraded"
     cl_with_step = [r for r in cl_records if _llm_edge_proposer_step(r) is not None]
@@ -6744,7 +6754,11 @@ def llm_lane_failure_streak_summary(tail_limit=50):
     lanes["llm_edge_proposer"] = {
         "sample_count": len(cl_with_step),
         "consecutive_failure_streak": _consecutive_streak(cl_with_step, _llm_edge_proposer_degraded),
-        "last_failure_reason": str(last_result.get("outcome") or ""),
+        "last_failure_reason": (
+            "step_error"
+            if last_step and str(last_step.get("status") or "") == "error"
+            else str(last_result.get("outcome") or "")
+        ),
     }
 
     return {

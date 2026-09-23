@@ -1135,6 +1135,65 @@ def test_w1b_collector_paths_match_the_real_producers(tmp_path):
     assert freshness["file_count"] == 1
 
 
+def test_llm_edge_proposer_step_that_raised_counts_toward_the_failure_streak(tmp_path):
+    """Counterfactual: a step that raises is recorded by the real
+    CognitiveLoopRunner._run_step as status "error" with no result. Reading
+    only result.outcome == "llm_degraded" scored a lane that crashes every
+    cycle as streak 0 -> llm_lane_failure_streak_ok, a PASS for the worst
+    failure the grading exists to catch."""
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    runner = CognitiveLoopRunner(MemoryOSStore(roots))
+
+    def _crash(context):
+        raise RuntimeError("proposer blew up")
+
+    error_step = runner._run_step("llm_edge_proposer", _crash, {})
+    assert error_step["status"] == "error" and "result" not in error_step, "sanity: the real producer's error shape"
+    runner.reports_path.parent.mkdir(parents=True, exist_ok=True)
+    runner.reports_path.write_text(
+        "".join(json.dumps({"steps": [error_step]}) + "\n" for _ in range(5)),
+        encoding="utf-8",
+    )
+
+    namespace = _exec_embedded_probe_prefix(str(tmp_path))
+    summary = namespace["llm_lane_failure_streak_summary"]()
+    lane = summary["lanes"]["llm_edge_proposer"]
+    assert lane["consecutive_failure_streak"] == 5
+    assert lane["last_failure_reason"] == "step_error"
+
+    classification = classify_snapshot({"llm_lane_failure_streak": summary})
+    assert any(
+        item["code"] == "llm_lane_consecutive_failure_streak" and item["lane"] == "llm_edge_proposer"
+        for item in classification["warn"]
+    )
+
+
+def test_classify_snapshot_lane_input_freshness_no_sample_when_no_file_could_be_stat_ed():
+    """Files present but none stat-able leaves newest_age_seconds None; that
+    is no evidence either way and must read as no-sample, never a pass."""
+    snapshot = {
+        "lane_input_freshness": {
+            "lanes": {
+                "session_fact_extraction": {
+                    "directory_exists": True,
+                    "file_count": 3,
+                    "newest_mtime_utc": "",
+                    "newest_age_seconds": None,
+                }
+            }
+        }
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "lane_input_freshness_no_sample" for item in classification["info"])
+    assert not any(item["code"] == "lane_input_freshness_ok" for item in classification["pass"])
+
+
 def test_llm_lane_failure_streak_summary_reads_real_fact_judge_verdicts_ledger(tmp_path):
     """Verdict shape mirrors the real fact_judge.py record (candidate_id/
     durable_fact/failure_reason/judged_at/reason/schema_version) and the
