@@ -5031,8 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
-- `ace7434..HEAD`：W4-A（DX）——`LlmCallResult` 新增 `expected_model` + 派生 `actual_model`/`route_unexpected`/`route_unknown`（字面量
-  比较，不做别名特判）；四处重复的 `_call_diagnostics` 收口成共享 `low_clue_recall._llm_call_diagnostics`；fact_judge / SFE /
+- `ace7434..HEAD`：W4-A（DX）——`LlmCallResult` 派生 `route_unexpected`/`route_unknown`（主会话更正为比较 provider：请求值 vs
+  `route_info` 报告的路由值；按模型名比较会被 `-900k` 别名在生产上每次误报），模型名只作展示；四处重复的 `_call_diagnostics` 收口成共享 `low_clue_recall._llm_call_diagnostics`；fact_judge / SFE /
   clearance_cycle / contradiction_lane / llm_edge_proposer 五条 lane 各带 `llm_route_unexpected_count` 等四个新计数；monitor 对
   fact_judge / SFE / llm_edge_proposer 出 WARN `llm_route_unexpected`（clearance_cycle/contradiction_lane 暂无 monitor 读者，遗留）；
   新增 ungraded INFO `graph_layer_updates_summary`（G1 的 `superseded_by_newer` 7 天窗口 + `updates` 边 24h/7d 出生量）；收口
