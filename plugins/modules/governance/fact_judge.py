@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from plugins.memory.memory_os import jev_backend
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, read_candidate_queue
 from plugins.memory.memory_os.low_clue_recall import (
     LlmCallResult,
@@ -82,6 +83,13 @@ DEFAULT_JUDGE_CONFIG: dict[str, Any] = {
     "timeout_ms": 15000,
     "max_tokens": 1024,
     "max_per_tick": 8,
+    # J1: optional structured-judge backend (owner ruling 2026-09-23,
+    # next-phase plan row J1). "hermes_default" is the existing free-text
+    # LLM judge path below; "typesafe_jev" routes through jev_backend.py's
+    # native noul primitive first, falling back to this path on any Jev
+    # failure. Overridden by the fact_judge_judge_backend knob, which wins
+    # over this lane-config default -- see run_fact_judge_lane.
+    "judge_backend": "hermes_default",
 }
 
 # ── Retry + heuristic fallback ─────────────────────────────────────────────
@@ -245,12 +253,129 @@ def _adaptive_prompt(active_crystallized_count: int) -> str:
     return _JUDGE_SYSTEM_PROMPT_STRICT
 
 
+# ── J1: Jev native-noul mapping (owner ruling 2026-09-23) ───────────────
+# TypeSafe's own docs are explicit that a yes/no judgment like this one
+# should be a noul question, NOT a 2-option choice: "Use Noul for a yes/no
+# judgment... the deciding factor isn't confidence -- it's what the
+# probability means" (https://docs.typesafe.ai/primitives.md). Their own
+# worked example ("does this message contain PII") is the same shape as
+# "is this a durable fact" -- a probability that is directly actionable.
+#
+# instructions/criteria mirror the same lean/strict asymmetry as
+# _JUDGE_SYSTEM_PROMPT vs _JUDGE_SYSTEM_PROMPT_STRICT above, condensed into
+# Jev's native {instructions, criteria: {true, false}} shape instead of a
+# free-text prompt wrapped as one question (the owner explicitly rejected
+# that lower-fidelity mapping).
+_JEV_NOUL_INSTRUCTIONS_LEAN = (
+    "Is this conversation snippet from a personal memory system a DURABLE "
+    "FACT worth permanently remembering, as opposed to a TRANSIENT MOMENT "
+    "that should fade away? Lean toward capture: a preference, decision, "
+    "commitment, or fact about the user stated once, even casually or "
+    "embedded in messy conversation, counts as durable."
+)
+_JEV_NOUL_CRITERIA_LEAN = {
+    "true": (
+        "States a user preference, decision, commitment, or fact about the "
+        "user (e.g. a stated preference, a decision to use something, "
+        "factual knowledge about the user, an explicit request to "
+        "remember, or reusable project context) -- even if stated only "
+        "once or phrased casually."
+    ),
+    "false": (
+        "Greeting or pleasantry, process/navigation chatter (open/show/"
+        "run/check/deploy), a momentary emotional state, a pure "
+        "information request, or content-free chatter with no "
+        "substantive content about the user."
+    ),
+}
+
+_JEV_NOUL_INSTRUCTIONS_STRICT = (
+    "Is this conversation snippet from a personal memory system a DURABLE "
+    "FACT worth permanently remembering -- a clearly lasting user "
+    "preference, decision, or factual knowledge -- as opposed to a "
+    "TRANSIENT MOMENT? If uncertain, this is NOT a durable fact."
+)
+_JEV_NOUL_CRITERIA_STRICT = {
+    "true": (
+        "Clearly states a lasting user preference, decision/commitment, or "
+        "factual knowledge about the user. A fact stated once IS durable "
+        "if it reveals a preference or identity."
+    ),
+    "false": (
+        "Greeting/pleasantry, process/navigation chatter, an emotional "
+        "expression (even if strongly expressed), a pure information "
+        "request, inconclusive discussion without closure, or a "
+        "single-turn instruction with no lasting value. When uncertain, "
+        "this is the default."
+    ),
+}
+
+# Threshold to convert Jev's noul probability into a boolean durable_fact
+# decision. Documented, asymmetric by design (same lean/strict rationale as
+# the two prompt variants above): below LEAN_CAPTURE_THRESHOLD active
+# crystallized records the lane leans toward capture, so a lower bar (0.4)
+# is used; above it, more evidence is required before marking durable
+# (0.6). TypeSafe's own docs endorse this: "Lower the threshold when false
+# negatives are expensive... Raise the threshold when false positives are
+# expensive" (https://docs.typesafe.ai/primitives/noul.md).
+_JEV_NOUL_THRESHOLD_LEAN = 0.4
+_JEV_NOUL_THRESHOLD_STRICT = 0.6
+
+
+def _judge_via_jev(body: str, active_crystallized_count: int, config: dict[str, Any]) -> dict[str, Any]:
+    """Ask Jev's native noul primitive whether *body* is a durable fact.
+
+    Returns a fact_judge-shaped verdict dict: ``{"durable_fact", "reason",
+    "failure_reason", ...}``. ``failure_reason`` is ``None`` on success
+    (drawn from :data:`jev_backend.JEV_CALL_FAILURE_REASONS` on failure) --
+    callers must treat any non-``None`` failure_reason as "fall back to the
+    hermes_default path", never as a False durable_fact answer.
+    """
+    lean = active_crystallized_count < LEAN_CAPTURE_THRESHOLD
+    instructions = _JEV_NOUL_INSTRUCTIONS_LEAN if lean else _JEV_NOUL_INSTRUCTIONS_STRICT
+    criteria = _JEV_NOUL_CRITERIA_LEAN if lean else _JEV_NOUL_CRITERIA_STRICT
+    threshold = _JEV_NOUL_THRESHOLD_LEAN if lean else _JEV_NOUL_THRESHOLD_STRICT
+
+    result = jev_backend.judge_noul(
+        question_id="durable_fact",
+        instructions=instructions,
+        criteria=criteria,
+        state={"candidate_body": body},
+        threshold=threshold,
+        config=config,
+    )
+    if result.failure_reason:
+        return {
+            "durable_fact": False,
+            "reason": "",
+            "failure_reason": result.failure_reason,
+            "jev_failure_detail": result.detail,
+        }
+
+    probability_text = f"{result.probability:.2f}" if result.probability is not None else "?"
+    return {
+        "durable_fact": result.label == "true",
+        "reason": _clip_jev_reason(probability_text, threshold),
+        "failure_reason": None,
+        "judge_backend": jev_backend.JEV_BACKEND_NAME,
+        "judge_confidence": result.confidence,
+        "jev_probability": result.probability,
+        "jev_model": result.model,
+        "jev_latency_ms": result.latency_ms,
+    }
+
+
+def _clip_jev_reason(probability_text: str, threshold: float) -> str:
+    return f"jev_noul_probability={probability_text}_threshold={threshold}"[:200]
+
+
 def judge_candidate(
     candidate: CrystallizedCandidate,
     config: dict[str, Any] | None = None,
     *,
     active_crystallized_count: int = 0,
     heuristic_only: bool = False,
+    judge_backend: str = "hermes_default",
 ) -> dict[str, Any]:
     """Judge whether a candidate is a durable fact or a transient moment.
 
@@ -259,6 +384,16 @@ def judge_candidate(
         config: Optional judge config overrides (provider, timeout_ms, max_tokens).
         heuristic_only: When True, skip LLM entirely and use keyword heuristic
             (emergency knob: ``fact_judge_heuristic_only``).
+        judge_backend: ``"hermes_default"`` (default) uses the free-text LLM
+            judge below unchanged. ``"typesafe_jev"`` (owner ruling
+            2026-09-23, opt-in via the ``fact_judge_judge_backend`` knob)
+            asks Jev's native noul primitive first; on ANY Jev failure it
+            falls back to this same hermes_default path (never straight to
+            heuristic), and the fallback is recorded in
+            ``judge_backend_fallback_reason`` on the returned verdict so the
+            cron lane can count it (see run_fact_judge_lane). When
+            ``judge_backend`` stays at its default, this parameter changes
+            nothing below -- default-off is byte-identical.
 
     Returns:
         {"durable_fact": bool, "reason": str, "failure_reason": str | None}
@@ -279,6 +414,18 @@ def judge_candidate(
 
     # Truncate very long bodies to keep the prompt reasonable
     body_for_prompt = body[:2000]
+
+    # J1: try the optional Jev backend first when selected. ANY failure here
+    # (missing key, network, HTTP, parse) falls through to the unchanged
+    # hermes_default path below rather than straight to heuristic -- this is
+    # a typed, counted fallback, not a silent one (see
+    # judge_backend_fallback_reason threaded into both return points below).
+    jev_fallback_reason: str | None = None
+    if judge_backend == jev_backend.JEV_BACKEND_NAME:
+        jev_verdict = _judge_via_jev(body_for_prompt, active_crystallized_count, effective_config)
+        if jev_verdict.get("failure_reason") is None:
+            return jev_verdict
+        jev_fallback_reason = str(jev_verdict.get("failure_reason") or "")
 
     user_prompt = (
         f'Candidate ID: {candidate.candidate_id}\n'
@@ -348,17 +495,22 @@ def judge_candidate(
 
         # Successful parse with valid durable_fact
         reason = str(parsed.get("reason") or "")[:200]
-        return {
+        result = {
             "durable_fact": durable,
             "reason": reason,
             "failure_reason": None,
             **_call_diagnostics(call_result),
         }
+        if jev_fallback_reason:
+            result["judge_backend_fallback_reason"] = jev_fallback_reason
+        return result
 
     # All attempts exhausted — fall back to deterministic heuristic
     verdict = _heuristic_durable(candidate)
     verdict["failure_reason"] = last_failure
     verdict.update(_call_diagnostics(last_call_result))
+    if jev_fallback_reason:
+        verdict["judge_backend_fallback_reason"] = jev_fallback_reason
     return verdict
 
 
@@ -417,6 +569,24 @@ def run_fact_judge_lane(
         is True
     )
 
+    # J1: judge_backend knob override wins over lane config (same precedence
+    # as low_clue_recall._resolve_llm_transport) -- resolved once per tick
+    # rather than per-candidate, matching how heuristic_only is resolved
+    # above. Default "hermes_default" is untouched by this resolution when
+    # no override is registered, so the rest of the lane behaves exactly as
+    # before J1.
+    judge_backend = str(
+        resolve_knob(
+            "fact_judge_judge_backend",
+            default=str(judge_config.get("judge_backend") or "hermes_default"),
+            roots=store.roots,
+        )
+        or "hermes_default"
+    )
+    if judge_backend not in ("hermes_default", jev_backend.JEV_BACKEND_NAME):
+        judge_backend = "hermes_default"
+    judge_config["judge_backend"] = judge_backend
+
     max_per_tick = _safe_int_knob("fact_judge_max_per_tick", 8)
     # ───────────────────────────────────────────────────────────────────
 
@@ -438,6 +608,10 @@ def run_fact_judge_lane(
     llm_transport = ""
     llm_usage_prompt_tokens = 0
     llm_usage_completion_tokens = 0
+    # J1: optional Jev backend diagnostics, aggregated across this tick.
+    judge_confidence: float | None = None
+    judge_backend_fallback_count = 0
+    judge_backend_fallback_reasons: dict[str, int] = {}
 
     for candidate in candidates:
         if candidate.candidate_id in already_judged:
@@ -458,6 +632,7 @@ def run_fact_judge_lane(
             config=judge_config,
             active_crystallized_count=active_count,
             heuristic_only=heuristic_only,
+            judge_backend=judge_backend,
         )
         judged_count += 1
 
@@ -486,6 +661,19 @@ def run_fact_judge_lane(
         llm_usage_completion_tokens += int(verdict.get("llm_usage_completion_tokens") or 0)
         # ─────────────────────────────────────────────────────────────────
 
+        # ── J1 Jev backend diagnostics ──────────────────────────────────
+        verdict_judge_backend = verdict.get("judge_backend")
+        verdict_judge_confidence = verdict.get("judge_confidence")
+        if verdict_judge_confidence is not None:
+            judge_confidence = float(verdict_judge_confidence)
+        fallback_reason = str(verdict.get("judge_backend_fallback_reason") or "")
+        if fallback_reason:
+            judge_backend_fallback_count += 1
+            judge_backend_fallback_reasons[fallback_reason] = (
+                judge_backend_fallback_reasons.get(fallback_reason, 0) + 1
+            )
+        # ─────────────────────────────────────────────────────────────────
+
         _append_verdict(
             store,
             candidate_id=candidate.candidate_id,
@@ -493,6 +681,8 @@ def run_fact_judge_lane(
             reason=str(verdict.get("reason") or ""),
             failure_reason=failure_reason or None,
             now=_now,
+            judge_backend=str(verdict_judge_backend) if verdict_judge_backend else None,
+            judge_confidence=float(verdict_judge_confidence) if verdict_judge_confidence is not None else None,
         )
 
     return {
@@ -518,6 +708,17 @@ def run_fact_judge_lane(
         "llm_transport": llm_transport,
         "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
         "llm_usage_completion_tokens": llm_usage_completion_tokens,
+        # J1: optional Jev judge-backend diagnostics (ADD-only). judge_backend
+        # is the resolved backend for this tick ("hermes_default" unless the
+        # fact_judge_judge_backend knob selects "typesafe_jev").
+        # judge_backend_fallback_count/reasons count ticks where Jev was
+        # selected but failed and this tick fell back to hermes_default --
+        # Completion Is Not Output: a clean envelope alone cannot distinguish
+        # "Jev worked" from "Jev failed and fell back silently" without this.
+        "judge_backend": judge_backend,
+        "judge_confidence": judge_confidence,
+        "judge_backend_fallback_count": judge_backend_fallback_count,
+        "judge_backend_fallback_reasons": judge_backend_fallback_reasons,
     }
 
 
@@ -554,6 +755,8 @@ def _append_verdict(
     reason: str,
     failure_reason: str | None = None,
     now: datetime,
+    judge_backend: str | None = None,
+    judge_confidence: float | None = None,
 ) -> None:
     path = _verdicts_path(store)
     record = {
@@ -565,6 +768,13 @@ def _append_verdict(
     }
     if failure_reason:
         record["failure_reason"] = failure_reason
+    # J1: only stamped when the Jev backend actually produced this verdict --
+    # hermes_default-path records (the default, always, when the feature is
+    # off) keep their exact pre-J1 shape.
+    if judge_backend:
+        record["judge_backend"] = judge_backend
+    if judge_confidence is not None:
+        record["judge_confidence"] = judge_confidence
     from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
 
     append_jsonl_locked(path, record)

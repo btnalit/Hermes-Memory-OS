@@ -5031,6 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
+  真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8401,3 +8403,32 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DS — J1：可选 TypeSafe Jev 判官后端，fact_judge 试点（2026-09-23）
+
+- **owner 裁定**：Jev 类判官是可选模块、默认关闭；改写成 Jev 原生的 `instructions` + `criteria` 结构（不是把旧的自由文本 prompt 包成一个问题），
+  先弄清官网用法；fact_judge 真实测试后再评估其他 lane。key 按 Hindsight 惯例：配置只存环境变量名 `api_key_env_var`（默认 `TYPESAFE_API_KEY`），
+  值在主机 `~/.hermes/.env`。
+- **官网核实**（Sonnet 子代理，URL 见 `jev_backend.py` 模块文档）：`POST https://api.typesafe.ai/v1/systemone`，Bearer 鉴权，`{state, model, questions}`；
+  `noul`（是/否概率）/ `choice`（≤255 选项，带 confidence）/ `score`（2–10 级）；官方选型指引明确"是/否判断用 noul"；**noul 不带 confidence**。
+  发现一处文档与线上不一致：文档说畸形问题返回 422，线上实为 400（两者都归入 `llm_http_4xx`）。
+- **真实 key 实测**（7 次调用，key 从不打印，探针脚本用后即删）：明确的长期事实 noul=0.94、一时性瞬间 0.02、模棱两可 0.39；choice / score 各一次；
+  畸形请求 400；错误 key 401；延迟 0.55–2.7s。端到端跑 `scripts/memory_os_jev_probe.py` 与预期一致。
+- **改动**：`plugins/memory/memory_os/jev_backend.py`（唯一知道 Jev 线格式的文件；stdlib `urllib`，无 SDK；封闭失败集在共享词表之上加
+  `llm_overloaded`（529）与 `llm_parse_failed`；缺 key 在联网前即返回 `llm_missing_key`；输入截断；永不抛出）。fact_judge 的持久事实判断映射为
+  原生 `noul` 问题；noul 无原生置信度，`confidence` 按 `2·|p−0.5|` 派生并在 docstring 注明；阈值沿用现有的宽 / 严不对称（结晶数少时 0.4 偏向收录，
+  否则 0.6）。knob `fact_judge_judge_backend`（`hermes_default` 默认 | `typesafe_jev`，`lane_switch`，永不自动批准），每 tick 解析一次、knob 覆盖优先于
+  lane config。Jev 任何失败回落到原 hermes_default 路径（它自身仍会在耗尽后回落到启发式），并计 `judge_backend_fallback_count` / `_reasons`。
+  默认关闭时：不调用 Jev、verdict 记录无新键，报告只多了恒定的 ADD-only 字段。CLAUDE.md 的 LLM Integration 节登记凭证例外，并由主会话补上
+  **数据外发**一句：开启即把（截断的）候选正文发往 Hermes provider 链之外的第三方，所以只能由 owner 翻 knob。
+- **其他 lane 评估**（只评估未实现）：clearance_cycle 每对判定适合 `choice`（clear / conflict / unknown，带原生 confidence）；llm_contradiction_lane
+  适合 `noul`，但该 lane 两边仍关闭，应等其重新启用后再接，避免两件事搅在一起；low_clue 候选选择需先看清选择语义（多选一用 `choice`、逐个打分用
+  `score`）；抽取 / 生成类 lane 不适用。
+- **反事实**（子代理，破坏即失败、恢复即通过）：去掉 529 特判；强制绕过默认关闭守卫；去掉缺 key 的联网前短路。
+- **测试**：jev_backend +39、fact_judge +25、probe +3；全量 4110 passed / 13 skipped；五门全绿。
+- **遗留 / 待 owner 定**：阈值 0.4 / 0.6 是模块常量（与 `LEAN_CAPTURE_THRESHOLD` 同为非 knob），是否要开放可调由 owner 定；monitor 读取
+  `judge_backend` / 回落计数待 monitor part 2；开启前建议先在 sannai 小流量试（`fact_judge_max_per_tick` 默认 8 已限流）。
+- **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY` 并由 owner 登记
+  `fact_judge_judge_backend=typesafe_jev` 覆盖；部署后可先跑 `scripts/memory_os_jev_probe.py` 做只读验证。

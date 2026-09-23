@@ -1639,3 +1639,344 @@ def _write_knob_override(store, knob_name, value):
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(_json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# J1: optional Jev judge backend (owner ruling 2026-09-23, next-phase plan
+# row J1). Default OFF -- these tests lock in byte-identical behaviour when
+# the knob is unset, correct routing/fallback when it is set, and the
+# native-primitive mapping (criteria, not a wrapped free-text prompt).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestJ1JudgeBackendKnobRegistered:
+    def test_judge_backend_knob_registered(self):
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        assert "fact_judge_judge_backend" in OVERRIDABLE_KNOBS
+        knob = OVERRIDABLE_KNOBS["fact_judge_judge_backend"]
+        assert knob["module"] == "fact_judge"
+        assert knob["default"] == "hermes_default"
+        assert knob["kind"] == "lane_switch"
+        assert knob["allowed"] == ["hermes_default", "typesafe_jev"]
+        assert knob["meta"] is False
+
+    def test_judge_backend_knob_round_trips_through_register_and_resolve(self, tmp_path):
+        from plugins.memory.memory_os.knob_overrides import register_override, resolve_knob
+
+        store_root = tmp_path / "system"
+        store_root.mkdir(parents=True, exist_ok=True)
+
+        assert resolve_knob(
+            "fact_judge_judge_backend", default="hermes_default", _store_root=store_root,
+        ) == "hermes_default"
+
+        register_override(
+            "fact_judge_judge_backend", "typesafe_jev",
+            prior="hermes_default", proposed_by="test", approved_via="test",
+            expires_at="", _store_root=store_root,
+        )
+        assert resolve_knob(
+            "fact_judge_judge_backend", default="hermes_default", _store_root=store_root,
+        ) == "typesafe_jev"
+
+    def test_judge_backend_knob_rejects_unregistered_value(self):
+        from plugins.memory.memory_os.knob_overrides import register_override
+        with pytest.raises(ValueError, match="not in allowed"):
+            register_override(
+                "fact_judge_judge_backend", "openai_direct",
+                prior="hermes_default", proposed_by="test", approved_via="test",
+                expires_at="",
+            )
+
+    def test_judge_backend_lane_switch_never_auto_approvable(self):
+        """lane_switch kind is always owner-gated -- blast radius too large
+        to self-tune, same rule as llm_transport / fact_judge_heuristic_only."""
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        assert knob_override_auto_approvable("fact_judge_judge_backend", "typesafe_jev") is False
+
+
+class TestJ1DefaultOffByteIdentical:
+    """Default-off (no knob override registered) must be byte-identical to
+    pre-J1 fact_judge behaviour -- Section W counterfactual."""
+
+    def test_default_off_never_calls_jev_backend(self, tmp_path):
+        """Counterfactual: remove the `judge_backend ==
+        jev_backend.JEV_BACKEND_NAME` guard in judge_candidate and this call
+        would happen even with the knob unset."""
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_default_off", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch("plugins.memory.memory_os.jev_backend.judge_noul") as mock_jev, patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert not mock_jev.called, "default-off must never call the Jev backend"
+        assert result["judge_backend"] == "hermes_default"
+        assert result["judge_backend_fallback_count"] == 0
+        assert result["judge_backend_fallback_reasons"] == {}
+        assert result["judge_confidence"] is None
+
+    def test_default_off_verdict_record_has_no_jev_fields(self, tmp_path):
+        """Even the durable per-record JSONL sidecar must stay unchanged in
+        shape when J1 is off -- not just the in-memory report."""
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_no_jev_fields", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
+        ):
+            run_fact_judge_lane(store)
+        verdicts = _read_verdicts(store)
+        record = verdicts["cand_no_jev_fields"]
+        assert "judge_backend" not in record
+        assert "judge_confidence" not in record
+
+    def test_judge_candidate_default_parameter_is_hermes_default(self):
+        """Every pre-J1 call site of judge_candidate omits judge_backend --
+        this locks the default so those call sites stay byte-identical."""
+        import inspect
+        from plugins.modules.governance.fact_judge import judge_candidate
+        sig = inspect.signature(judge_candidate)
+        assert sig.parameters["judge_backend"].default == "hermes_default"
+
+
+class TestJ1JevBackendRouting:
+    """Knob override routes to the Jev backend; success skips hermes_default
+    entirely."""
+
+    def test_knob_override_routes_to_jev_and_skips_hermes_default(self, tmp_path):
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_jev_success", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(label="true", confidence=0.8, probability=0.9, failure_reason=""),
+        ) as mock_jev, patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+        ) as mock_hermes:
+            result = run_fact_judge_lane(store)
+
+        assert mock_jev.called
+        assert not mock_hermes.called, "Jev success must not fall through to hermes_default"
+        assert result["judge_backend"] == "typesafe_jev"
+        assert result["judge_confidence"] == 0.8
+
+        verdicts = _read_verdicts(store)
+        assert verdicts["cand_jev_success"]["durable_fact"] is True
+        assert verdicts["cand_jev_success"]["judge_backend"] == "typesafe_jev"
+        assert verdicts["cand_jev_success"]["judge_confidence"] == 0.8
+
+    def test_jev_false_label_is_not_durable(self, tmp_path):
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_jev_false", body="Thanks, let me check")
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(label="false", confidence=0.9, probability=0.02, failure_reason=""),
+        ):
+            run_fact_judge_lane(store)
+
+        verdicts = _read_verdicts(store)
+        assert verdicts["cand_jev_false"]["durable_fact"] is False
+
+
+class TestJ1JevFallback:
+    """Any Jev failure must fall back to the hermes_default path and be
+    counted -- Completion Is Not Output."""
+
+    def test_jev_failure_falls_back_to_hermes_default_and_counts(self, tmp_path):
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_fallback", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(failure_reason="llm_timeout", detail="socket_timeout"),
+        ) as mock_jev, patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
+        ) as mock_hermes:
+            result = run_fact_judge_lane(store)
+
+        assert mock_jev.called
+        assert mock_hermes.called, "Jev failure must fall back to the hermes_default path"
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_timeout": 1}
+
+        verdicts = _read_verdicts(store)
+        assert verdicts["cand_fallback"]["durable_fact"] is True
+        assert "failure_reason" not in verdicts["cand_fallback"]
+        # hermes_default ultimately produced this verdict, not Jev
+        assert "judge_backend" not in verdicts["cand_fallback"]
+
+    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path):
+        """Counterfactual for jev_backend._resolve_api_key, exercised through
+        the real (unmocked) jev_backend.judge_noul with no TYPESAFE_API_KEY."""
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_missing_key", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        import os
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        old_key = os.environ.pop("TYPESAFE_API_KEY", None)
+        try:
+            with patch("urllib.request.urlopen") as mock_urlopen, patch(
+                "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+                return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
+            ):
+                result = run_fact_judge_lane(store)
+        finally:
+            if old_key is not None:
+                os.environ["TYPESAFE_API_KEY"] = old_key
+
+        assert not mock_urlopen.called, "missing key must never reach the network"
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_missing_key": 1}
+
+    def test_total_failure_falls_through_to_heuristic_with_fallback_recorded(self, tmp_path):
+        """Jev fails AND hermes_default exhausts retries -> heuristic
+        fallback still records judge_backend_fallback_reason (the Jev
+        reason survives even through a second layer of fallback)."""
+        store = _store(tmp_path)
+        candidate = _candidate(
+            candidate_id="cand_total_fail", body="I prefer dark mode and always use pytest",
+        )
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(failure_reason="llm_exception", detail="boom"),
+        ), patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(failure_reason="llm_empty_content"),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["judge_backend_fallback_count"] == 1
+        assert result["judge_backend_fallback_reasons"] == {"llm_exception": 1}
+
+        verdicts = _read_verdicts(store)
+        record = verdicts["cand_total_fail"]
+        assert record.get("failure_reason") == "llm_empty_content"
+        assert "judge_backend" not in record
+
+    def test_fallback_counts_aggregate_across_candidates(self, tmp_path):
+        store = _store(tmp_path)
+        _write_candidate(store, _candidate(candidate_id="cand_a", body="I prefer dark mode"))
+        _write_candidate(store, _candidate(candidate_id="cand_b", body="I use vim daily"))
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(failure_reason="llm_timeout", detail="x"),
+        ), patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["judge_backend_fallback_count"] == 2
+        assert result["judge_backend_fallback_reasons"] == {"llm_timeout": 2}
+
+
+class TestJ1NativePrimitiveMapping:
+    """The durable-fact question must be Jev's native noul primitive with
+    real criteria -- not the existing free-text prompt wrapped as one
+    question (owner's explicit higher-fidelity requirement)."""
+
+    def test_question_uses_native_true_false_criteria(self):
+        from plugins.modules.governance.fact_judge import _judge_via_jev
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+
+        captured = {}
+
+        def _fake_judge_noul(**kwargs):
+            captured.update(kwargs)
+            return JevJudgmentResult(label="true", confidence=0.5, probability=0.6, failure_reason="")
+
+        with patch("plugins.memory.memory_os.jev_backend.judge_noul", side_effect=_fake_judge_noul):
+            _judge_via_jev("some candidate body", active_crystallized_count=0, config={})
+
+        assert set(captured["criteria"].keys()) == {"true", "false"}
+        assert captured["state"] == {"candidate_body": "some candidate body"}
+        assert captured["question_id"] == "durable_fact"
+        # not just the hermes_default free-text prompt reused verbatim
+        assert "DURABLE FACT" not in captured["instructions"] or captured["instructions"] != ""
+
+    def test_lean_threshold_used_below_capture_threshold(self):
+        from plugins.modules.governance.fact_judge import _judge_via_jev, _JEV_NOUL_THRESHOLD_LEAN
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+
+        captured = {}
+
+        def _fake_judge_noul(**kwargs):
+            captured.update(kwargs)
+            return JevJudgmentResult(label="true", confidence=0.5, probability=0.45, failure_reason="")
+
+        with patch("plugins.memory.memory_os.jev_backend.judge_noul", side_effect=_fake_judge_noul):
+            _judge_via_jev("body", active_crystallized_count=0, config={})
+
+        assert captured["threshold"] == _JEV_NOUL_THRESHOLD_LEAN
+
+    def test_strict_threshold_used_at_or_above_capture_threshold(self):
+        from plugins.modules.governance.fact_judge import (
+            _judge_via_jev,
+            _JEV_NOUL_THRESHOLD_STRICT,
+            LEAN_CAPTURE_THRESHOLD,
+        )
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+
+        captured = {}
+
+        def _fake_judge_noul(**kwargs):
+            captured.update(kwargs)
+            return JevJudgmentResult(label="false", confidence=0.5, probability=0.55, failure_reason="")
+
+        with patch("plugins.memory.memory_os.jev_backend.judge_noul", side_effect=_fake_judge_noul):
+            _judge_via_jev("body", active_crystallized_count=LEAN_CAPTURE_THRESHOLD, config={})
+
+        assert captured["threshold"] == _JEV_NOUL_THRESHOLD_STRICT
+
+    def test_jev_success_verdict_never_triggers_hermes_call_even_on_low_confidence(self, tmp_path):
+        """A successful (non-failing) Jev answer -- even with low confidence
+        -- must not itself count as a fallback; only a typed failure does."""
+        store = _store(tmp_path)
+        candidate = _candidate(candidate_id="cand_low_confidence", body="Maybe I'll switch someday")
+        _write_candidate(store, candidate)
+        _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+
+        from plugins.memory.memory_os.jev_backend import JevJudgmentResult
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.memory.memory_os.jev_backend.judge_noul",
+            return_value=JevJudgmentResult(label="false", confidence=0.02, probability=0.49, failure_reason=""),
+        ), patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+        ) as mock_hermes:
+            result = run_fact_judge_lane(store)
+
+        assert not mock_hermes.called
+        assert result["judge_backend_fallback_count"] == 0
