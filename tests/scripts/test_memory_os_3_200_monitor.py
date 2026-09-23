@@ -9527,6 +9527,138 @@ def test_every_edge_weight_feedback_scalar_survives_both_whitelists_end_to_end(t
     assert not missing, f"edge_weight_feedback scalars dropped by the monitor's _edge_fields: {missing}"
 
 
+def test_every_structural_edge_proposer_scalar_survives_both_whitelists_end_to_end(tmp_path):
+    """PR-G1 census: the REAL producer (run_structural_proposer, including
+    its bounded updates-backfill pass) runs through the REAL cognitive_loop
+    wrapper and the REAL embedded monitor collector — mirroring
+    test_every_edge_weight_feedback_scalar_survives_both_whitelists_end_to_end,
+    the DL/G0 lesson this file records: a hand-listed key set stays green
+    while a new counter is dropped at either whitelist layer.
+    """
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    frontmatter_common = {
+        "schema_version": "memory-os.crystallized.v0",
+        "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z",
+        "approval_purpose": "test",
+        "approval_note": "test seed",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+        "hindsight_indexed": False,
+        "bridge_state": "active",
+    }
+    store.append_crystallized_record(
+        "cry_census_a.md",
+        {**frontmatter_common, "id": "cry_census_a", "kind": "note", "created_at": "2026-06-01T00:00:00Z"},
+        "test crystallized body one",
+    )
+    store.append_crystallized_record(
+        "cry_census_b.md",
+        {**frontmatter_common, "id": "cry_census_b", "kind": "note", "created_at": "2026-06-02T00:00:00Z"},
+        "test crystallized body two",
+    )
+
+    # The wrapper emits every backfill key through its defaults even when the
+    # producer errored, so key presence proves nothing: build the index so the
+    # producer takes its real path, and check that it did.
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    context: dict = {}
+    wrapper_summary = CognitiveLoopRunner(store)._structural_edge_proposer(context)
+    assert context["structural_edge_proposer_result"]["status"] == "ok", "sanity: the producer ran its real path"
+    assert "backfill_scanned_count" in wrapper_summary, "sanity: the wrapper passed PR-G1 backfill counters"
+
+    report = {
+        "cycle_id": "cycle-census-g1",
+        "status": "ok",
+        "steps": [{
+            "step": "structural_edge_proposer", "status": "ok", "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    (mod_dir / "reports.jsonl").write_text(_json.dumps(report) + "\n", encoding="utf-8")
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    surfaced = namespace["cognitive_loop_step_evidence"]()["edge_step_results"]["structural_edge_proposer"]
+
+    not_carried = {"schema_version", "backfill_error_records"}
+    scalar_keys = {
+        key for key, value in wrapper_summary.items()
+        if key not in not_carried and not isinstance(value, (dict, list))
+    }
+    missing = sorted(scalar_keys - set(surfaced))
+    assert not missing, f"structural_edge_proposer scalars dropped by the monitor's _edge_fields: {missing}"
+
+
+def test_structural_updates_backfill_failure_is_graded_warn():
+    """PR-G1 review: a failed backfill upgrade can leave a pair with no active
+    structural edge. It must not hide in the ungraded v2_graph_governance_state
+    INFO blob next to benign skips."""
+    for failed_count, expect_warn in ((0, False), (2, True)):
+        evidence = {
+            "status": "ok",
+            "edge_step_results": {
+                "structural_edge_proposer": {
+                    "backfill_scanned_count": 5,
+                    "backfill_skipped_count": 3,
+                    "backfill_failed_count": failed_count,
+                },
+            },
+        }
+        graded = monitor.classify_snapshot({
+            "monitor_profile": "live",
+            "cognitive_loop_step_evidence": evidence,
+        })
+        warn_codes = [
+            item for item in graded["warn"] if item["code"] == "graph_structural_updates_backfill_failed"
+        ]
+        assert bool(warn_codes) is expect_warn, failed_count
+        if expect_warn:
+            assert warn_codes[0]["backfill_failed_count"] == failed_count
+
+
+def test_structural_updates_backfill_scan_failure_is_graded_warn():
+    """Review follow-up counterfactual: when the candidate scan itself fails,
+    every count stays 0 and the run looks idle. The outcome code is what
+    separates the two, so it must be graded too — and only its failure
+    values, never the benign ones."""
+    from plugins.memory.memory_os.structural_edge_proposer import UPDATES_BACKFILL_OUTCOMES
+
+    assert monitor.STRUCTURAL_BACKFILL_FAILED_OUTCOMES <= UPDATES_BACKFILL_OUTCOMES
+    for outcome in sorted(UPDATES_BACKFILL_OUTCOMES):
+        evidence = {
+            "status": "ok",
+            "edge_step_results": {
+                "structural_edge_proposer": {
+                    "backfill_scanned_count": 0,
+                    "backfill_failed_count": 0,
+                    "backfill_outcome": outcome,
+                },
+            },
+        }
+        graded = monitor.classify_snapshot({
+            "monitor_profile": "live",
+            "cognitive_loop_step_evidence": evidence,
+        })
+        warned = any(
+            item["code"] == "graph_structural_updates_backfill_failed" for item in graded["warn"]
+        )
+        assert warned is (outcome in {"scan_failed", "resolve_failed"}), outcome
+
+
 def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).

@@ -319,6 +319,34 @@ class MemoryOSIndex:
         finally:
             conn.close()
 
+    def is_latest_crystallized_record(self, record_id: str) -> bool:
+        """PR-G1: derive currency from active ``updates`` edges.
+
+        A record is NOT latest iff an active ``updates`` edge names it as
+        the older (``to_record_id``) endpoint (updates is from=newer ->
+        to=older). This is a pure derived read over ``memory_edges`` —
+        rebuildable from canonical ``graph/edges.jsonl`` at any time, never
+        authoritative — no crystallized record is ever written to carry
+        this flag (08-06 / PR-G1 rulings: no record mutation, no new layer).
+        Fail-open: an index that cannot be queried proves nothing about
+        supersession, so it reports latest=True rather than fabricating a
+        stale verdict.
+        """
+        if not self.roots.index_path.exists():
+            return True
+        conn = sqlite3.connect(self.roots.index_path)
+        try:
+            row = conn.execute(
+                "select 1 from memory_edges where relation_type = 'updates'"
+                " and state = 'active' and to_record_id = ? limit 1",
+                (str(record_id),),
+            ).fetchone()
+        except sqlite3.Error:
+            return True
+        finally:
+            conn.close()
+        return row is None
+
     def vector_search(
         self,
         query_vec: "np.ndarray",

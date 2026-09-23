@@ -136,6 +136,10 @@ PRINCIPAL_BINDING_WINDOW_DAYS = 30
 # growing is a stopped lane, not an idle one.
 MEMORY_PROJECTION_COMPACTION_STALE_SECONDS = 2 * 1440 * 60
 
+# PR-G1: members of structural_edge_proposer.UPDATES_BACKFILL_OUTCOMES that
+# mean the backfill could not run (a guard test pins the subset relation).
+STRUCTURAL_BACKFILL_FAILED_OUTCOMES = frozenset({"scan_failed", "resolve_failed"})
+
 INDEX_CATCHUP_MAX_AGE_SECONDS = 900
 INDEX_CATCHUP_MAX_EVENT_BACKLOG = 1
 FULL_MONITOR_LIVE_TARGET_SECONDS = 180
@@ -2075,6 +2079,25 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "code": "v2_graph_governance_state",
                     "value": edge_step_results,
                 })
+                # PR-G1: unlike a skip, a failed updates-backfill upgrade can
+                # leave a pair with no active structural edge (invalidation is
+                # one-way), so it is graded rather than left in the INFO blob.
+                # A scan that could not run leaves every count at 0, so the
+                # outcome code is graded too.
+                _structural = edge_step_results.get("structural_edge_proposer")
+                if not isinstance(_structural, dict):
+                    _structural = {}
+                _backfill_failed = _structural.get("backfill_failed_count")
+                _backfill_outcome = _structural.get("backfill_outcome")
+                if (
+                    (isinstance(_backfill_failed, int) and _backfill_failed > 0)
+                    or _backfill_outcome in STRUCTURAL_BACKFILL_FAILED_OUTCOMES
+                ):
+                    warn.append({
+                        "code": "graph_structural_updates_backfill_failed",
+                        "backfill_failed_count": _backfill_failed,
+                        "backfill_outcome": _backfill_outcome,
+                    })
         elif clean_host:
             warn.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
         else:
@@ -5024,6 +5047,10 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     # reader rather than the silent `except: pass` they replaced.
     "state_overlay",
     "state_source_mirror",
+    # PR-G1: run_structural_updates_backfill reports a failed canonical/index
+    # read here (the backfill pass is then skipped for the run, never run
+    # blind — same shape as edge_weight_feedback's orphan cascade above).
+    "structural_edge_proposer",
     "temporal_retriever",
 })
 
@@ -8053,6 +8080,14 @@ def cognitive_loop_step_evidence():
       "orphan_skipped_by_cap_count", "orphan_cascade_skipped_reason",
       "shadow_compaction_reason", "shadow_compaction_records_archived",
       "shadow_compaction_suppressed_error_count",
+      # PR-G1 structural_edge_proposer: bounded backfill that upgrades
+      # pre-existing co_occurs pairs to `updates` (see
+      # run_structural_updates_backfill) — scanned/upgraded/skipped is the
+      # "Completion Is Not Output" evidence that the lane ran AND did
+      # something, not just that its envelope closed clean.
+      "backfill_scanned_count", "backfill_upgraded_count",
+      "backfill_skipped_count", "backfill_failed_count", "backfill_pass_complete",
+      "backfill_outcome", "backfill_duration_ms",
     )
     edge_step_results = {}
     for step in steps:

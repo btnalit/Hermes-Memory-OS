@@ -5,10 +5,11 @@ from __future__ import annotations
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from eval.memory_os.runner.types import Rh31Document
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -68,3 +69,50 @@ def synthetic_store(documents: list[Rh31Document]) -> Iterator[MemoryOSStore]:
             },
         )
         yield store
+
+
+@contextmanager
+def graph_replay_pair_store(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+) -> Iterator[tuple[MemoryOSStore, MemoryOSIndex]]:
+    """Build an isolated Memory-OS store holding exactly two crystallized
+    records (G4 graph-replay eval).
+
+    Each record is written through the real producer path (canonical
+    markdown via ``store.append_crystallized_record``), then a fresh index
+    is rebuilt from the store — mirroring the pattern used by
+    ``test_memory_os_edge_weight_feedback._active_edge`` / ``_seed_crystallized``
+    so ``structural_edge_proposer`` and the prefetch graph layer see real
+    ``crystallized_records`` + ``memory_fts`` projections, never hand-built
+    SQLite rows. Isolated per-pair (rather than one shared store for the
+    whole corpus) so ``run_structural_proposer``'s per-cycle pair budget
+    never truncates before reaching a case's pair, and so cases cannot leak
+    edges into each other.
+    """
+    with tempfile.TemporaryDirectory(prefix="memory-os-graph-replay-") as temp_root:
+        roots = MemoryOSRoots.from_hermes_home(Path(temp_root))
+        store = MemoryOSStore(roots)
+        store.initialize()
+        for record in (record_a, record_b):
+            record_id = str(record["id"])
+            created_at = str(record["created_at"])
+            frontmatter = {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": record_id,
+                "kind": str(record["kind"]),
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "graph_replay_eval",
+                "approval_note": "G4 synthetic fixture — never real user data",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            }
+            store.append_crystallized_record(f"{record_id}.md", frontmatter, str(record["body"]))
+        index = MemoryOSIndex(roots)
+        index.rebuild_from_store(store)
+        yield store, index

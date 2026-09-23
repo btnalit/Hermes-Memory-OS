@@ -745,7 +745,13 @@ def test_t2_1_1_write_refines_edge(tmp_path):
             "created_at": "2026-06-01T12:00:00Z",
             "source_event_ids": ["evt_shared_001"],
             "tags": ["refines-test"],
-            "body": "Version two of the deployment configuration (refined).",
+            # PR-G1: body deliberately NOT a near-verbatim restatement of
+            # v1 (dice must stay well below θ_high=0.85) — this test is
+            # specifically about the shared_source_event → co_occurs path,
+            # not the `updates` path (see test_t2_1_9_* below for that).
+            # A near-verbatim body here would make `updates` fire first and
+            # this test would stop exercising shared_source_event at all.
+            "body": "A completely unrelated note about the rollback runbook location.",
         },
     ])
     index.rebuild_from_store(store)
@@ -1021,9 +1027,17 @@ def test_t2_1_7_proposer_detects_co_occurs_temporal(tmp_path):
 
 
 def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
-    """T2.1.8 (W1 语义反转): 同 kind 相似 body → co_occurs, 不再是 refines。"""
+    """T2.1.8 (W1 语义反转): 同 kind 相似 body → co_occurs, 不再是 refines。
+
+    PR-G1: body_b is a moderate paraphrase of body_a (dice ~0.72), deliberately
+    kept below θ_high=0.85 so this test still exercises the plain
+    body-similarity → co_occurs path in isolation, not the new `updates`
+    path (a byte-identical body pair now correctly yields `updates`, not
+    co_occurs — see test_t2_1_9_updates_relation_for_near_verbatim_pair).
+    """
     store, index = _store(tmp_path)
-    body = "The system deployment was verified on 2026-06-01 with all tests green."
+    body_a = "The system deployment was verified on 2026-06-01 with all tests green."
+    body_b = "The system deployment on 2026-06-01 also passed the security review."
     _seed_canonical_crystallized(store, [
         {
             "id": "cry_body_a",
@@ -1031,7 +1045,7 @@ def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
             "created_at": "2026-06-01T10:00:00Z",
             "source_event_ids": [],
             "tags": [],
-            "body": body,
+            "body": body_a,
         },
         {
             "id": "cry_body_b",
@@ -1039,7 +1053,7 @@ def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
             "created_at": "2026-06-01T12:00:00Z",
             "source_event_ids": [],
             "tags": [],
-            "body": body,
+            "body": body_b,
         },
     ])
     index.rebuild_from_store(store)
@@ -1066,6 +1080,589 @@ def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
     )
     assert types.get("refines", 0) == 0
     assert types.get("contradicts", 0) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-G1 — `updates` relation + latest-wins injection (2026-09-23)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_t2_1_9_updates_relation_for_near_verbatim_pair_same_kind(tmp_path):
+    """PR-G1: Dice >= θ_high(0.85) AND same kind AND determinable direction
+    -> `updates`, from=newer -> to=older. This pair ALSO shares a
+    source_event_id — proving updates takes priority over shared_source_event
+    co_occurs too, not merely over the body-similarity branch (the real
+    production shape: near-duplicate crystallized records extracted from the
+    same session/source event)."""
+    store, index = _store(tmp_path)
+    body = "客户的服务器机房在上海张江高科技园区,机柜编号是A区十二号,联系人是运维组的王工,平时白天联系比较及时。"
+    body_newer = body + "他的座机换了新号码。"
+    _seed_canonical_crystallized(store, [
+        {
+            "id": "cry_upd_old",
+            "kind": "fact",
+            "created_at": "2026-05-01T09:00:00Z",
+            "source_event_ids": ["evt_shared_upd"],
+            "tags": [],
+            "body": body,
+        },
+        {
+            "id": "cry_upd_new",
+            "kind": "fact",
+            "created_at": "2026-06-15T09:00:00Z",
+            "source_event_ids": ["evt_shared_upd"],
+            "tags": [],
+            "body": body_newer,
+        },
+    ])
+    index.rebuild_from_store(store)
+
+    from plugins.memory.memory_os.structural_edge_proposer import run_structural_proposer
+
+    result = run_structural_proposer(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok"
+
+    conn2 = _conn(index)
+    rows = conn2.execute(
+        "select * from memory_edges where relation_type = 'updates' and state = 'active'"
+    ).fetchall()
+    co_occurs_count = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'co_occurs'"
+    ).fetchone()[0]
+    conn2.close()
+    assert len(rows) == 1, "exactly one updates edge, not also a co_occurs edge for the same pair"
+    assert co_occurs_count == 0
+    assert rows[0]["from_record_id"] == "cry_upd_new"
+    assert rows[0]["to_record_id"] == "cry_upd_old"
+    assert rows[0]["proposed_by"] == "structural"
+    assert 0.30 < float(rows[0]["weight"]) < 1.0
+
+
+def test_t2_1_10_updates_blocked_by_kind_guard(tmp_path):
+    """PR-G1 kind guard: near-identical body but different kind must NOT
+    produce `updates` — it falls back to ordinary co_occurs."""
+    store, index = _store(tmp_path)
+    body = "用户的家庭住址是北京市朝阳区建国路八十八号院三号楼五零二室,快递可以直接放在门口的柜子里。"
+    body_b = body + "周末在家的概率比较高。"
+    _seed_canonical_crystallized(store, [
+        {
+            "id": "cry_xk_old",
+            "kind": "identity",
+            "created_at": "2026-05-01T09:00:00Z",
+            "source_event_ids": [],
+            "tags": [],
+            "body": body,
+        },
+        {
+            "id": "cry_xk_new",
+            "kind": "decision",
+            "created_at": "2026-06-15T09:00:00Z",
+            "source_event_ids": [],
+            "tags": [],
+            "body": body_b,
+        },
+    ])
+    index.rebuild_from_store(store)
+
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        _dice_coefficient,
+        run_structural_proposer,
+    )
+
+    assert _dice_coefficient(body, body_b) >= 0.85, "fixture sanity: dice must clear θ_high"
+
+    result = run_structural_proposer(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok"
+
+    conn2 = _conn(index)
+    types = {
+        str(r[0]): r[1]
+        for r in conn2.execute(
+            "select relation_type, count(*) from memory_edges group by relation_type"
+        ).fetchall()
+    }
+    conn2.close()
+    assert types.get("updates", 0) == 0, f"kind guard must block updates across kinds: {types}"
+    assert types.get("co_occurs", 0) >= 1
+
+
+def test_t2_1_11_updates_blocked_by_low_dice_paraphrase(tmp_path):
+    """PR-G1: a genuine "changed my mind" paraphrase (same kind, low dice)
+    must NOT get deterministic `updates` — reserved for a future LLM label."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {
+            "id": "cry_para_old",
+            "kind": "preference",
+            "created_at": "2026-05-01T09:00:00Z",
+            "source_event_ids": [],
+            "tags": [],
+            "body": "我最喜欢的咖啡豆产地是埃塞俄比亚的耶加雪菲产区,喜欢它清爽的花香和明亮的柑橘调酸质。",
+        },
+        {
+            "id": "cry_para_new",
+            "kind": "preference",
+            "created_at": "2026-06-15T09:00:00Z",
+            "source_event_ids": [],
+            "tags": [],
+            "body": "后来尝试了很多不同的产地之后,现在反而更偏爱云南保山的水洗处理豆子,口感干净清爽完全不带酸味。",
+        },
+    ])
+    index.rebuild_from_store(store)
+
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        _dice_coefficient,
+        run_structural_proposer,
+    )
+
+    conn0 = _conn(index)
+    a_body = "我最喜欢的咖啡豆产地是埃塞俄比亚的耶加雪菲产区,喜欢它清爽的花香和明亮的柑橘调酸质。"
+    b_body = "后来尝试了很多不同的产地之后,现在反而更偏爱云南保山的水洗处理豆子,口感干净清爽完全不带酸味。"
+    conn0.close()
+    assert _dice_coefficient(a_body, b_body) < 0.85, "fixture sanity: dice must stay below θ_high"
+
+    result = run_structural_proposer(str(index.roots.index_path), index=index)
+    assert result["status"] == "ok"
+
+    conn2 = _conn(index)
+    updates_count = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'updates'"
+    ).fetchone()[0]
+    conn2.close()
+    assert updates_count == 0
+
+
+def test_t2_1_12_co_occurs_first_ordering_would_miss_updates_sabotage(tmp_path):
+    """Counterfactual (Section W rule 3) for the ordering fix itself: with
+    the updates check re-positioned AFTER the co_occurs branches (the
+    pre-PR-G1 shape), a near-verbatim same-kind pair gets co_occurs, never
+    updates — proving the priority-ordering change is what makes
+    test_t2_1_9 pass, not some other side effect."""
+    from plugins.memory.memory_os import structural_edge_proposer as sep
+
+    base = {"kind": "note", "tags_json": "[]", "source_event_ids_json": "[]"}
+    record_a = {**base, "id": "cry_sab_a", "created_at": "2026-05-01T09:00:00Z",
+                "body": "这是一段用于反事实验证的近似正文内容,包含足够多的重复字符。"}
+    record_b = {**base, "id": "cry_sab_b", "created_at": "2026-06-15T09:00:00Z",
+                "body": "这是一段用于反事实验证的近似正文内容,包含足够多的重复字符,略作扩充。"}
+    assert sep._dice_coefficient(record_a["body"], record_b["body"]) >= sep._DICE_THRESHOLD_UPDATES
+
+    # Sanity: current (fixed) code detects `updates` for this pair.
+    edges = sep._detect_relation(record_a, record_b)
+    assert [e["relation_type"] for e in edges] == ["updates"]
+
+    # Sabotage: simulate "co_occurs checked first" by temporarily raising
+    # θ_high above 1.0 so the updates branch can never fire — the same
+    # observable effect as moving the check after the co_occurs branches
+    # (the pair falls through to body-similarity co_occurs instead).
+    original_threshold = sep._DICE_THRESHOLD_UPDATES
+    try:
+        sep._DICE_THRESHOLD_UPDATES = 1.1
+        sabotaged_edges = sep._detect_relation(record_a, record_b)
+        assert [e["relation_type"] for e in sabotaged_edges] == ["co_occurs"], (
+            "sabotage must reproduce the pre-fix bug: updates lost to co_occurs"
+        )
+    finally:
+        sep._DICE_THRESHOLD_UPDATES = original_threshold
+
+    # Restored: updates wins again.
+    restored_edges = sep._detect_relation(record_a, record_b)
+    assert [e["relation_type"] for e in restored_edges] == ["updates"]
+
+
+def test_t2_1_13_is_latest_survives_index_rebuild(tmp_path):
+    """PR-G1 domain model: is_latest is derived from active `updates` edges
+    and must give the same answer before and after a full index rebuild
+    from canonical files (rebuildable, never authoritative)."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {
+            "id": "cry_latest_old", "kind": "fact",
+            "created_at": "2026-05-01T00:00:00Z",
+            "source_event_ids": [], "tags": [],
+            "body": "旧版本的记录内容。",
+        },
+        {
+            "id": "cry_latest_new", "kind": "fact",
+            "created_at": "2026-06-01T00:00:00Z",
+            "source_event_ids": [], "tags": [],
+            "body": "新版本的记录内容。",
+        },
+    ])
+    index.rebuild_from_store(store)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_latest_new",
+        to_record_type="crystallized_record", to_record_id="cry_latest_old",
+        relation_type="updates", weight=0.60, proposed_by="structural", state="active",
+    )
+    assert edge and edge.get("edge_id")
+
+    assert index.is_latest_crystallized_record("cry_latest_old") is False
+    assert index.is_latest_crystallized_record("cry_latest_new") is True
+
+    index.rebuild_from_store(store)
+
+    assert index.is_latest_crystallized_record("cry_latest_old") is False, (
+        "is_latest must survive a full rebuild — memory_edges is a "
+        "projection of canonical graph/edges.jsonl"
+    )
+    assert index.is_latest_crystallized_record("cry_latest_new") is True
+
+
+def test_t2_1_16_updates_backfill_cursor_reaches_past_non_qualifying_edges(tmp_path):
+    """Counterfactual: a co_occurs pair that does not qualify stays co_occurs,
+    so an un-cursored "oldest N" scan re-reads the same non-qualifying edges
+    every cycle and never reaches a qualifying pair behind them. co_occurs is
+    ~85% of production's active edges -- far more than one batch."""
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index = _store(tmp_path)
+    records = []
+    for i in range(3):
+        records.append({
+            "id": f"cry_nq_{i}_a", "kind": "note", "created_at": "2026-05-01T00:00:00Z",
+            "source_event_ids": [], "tags": [], "body": f"完全不同的主题甲{i},关于园艺与天气。",
+        })
+        records.append({
+            "id": f"cry_nq_{i}_b", "kind": "note", "created_at": "2026-06-01T00:00:00Z",
+            "source_event_ids": [], "tags": [], "body": f"另一个话题乙{i},讲的是编程语言设计。",
+        })
+    qualifying_body = "待回填的近逐字重述内容,包含足够长的公共前缀文本用于命中阈值。"
+    records.append({
+        "id": "cry_q_a", "kind": "note", "created_at": "2026-05-01T00:00:00Z",
+        "source_event_ids": [], "tags": [], "body": qualifying_body,
+    })
+    records.append({
+        "id": "cry_q_b", "kind": "note", "created_at": "2026-06-01T00:00:00Z",
+        "source_event_ids": [], "tags": [], "body": qualifying_body + "补充说明一句。",
+    })
+    _seed_canonical_crystallized(store, records)
+    index.rebuild_from_store(store)
+
+    # The non-qualifying edges are written first, so they sort ahead of the
+    # qualifying one in any created_at order.
+    for i in range(3):
+        index.write_governed_edge(
+            from_record_type="crystallized_record", from_record_id=f"cry_nq_{i}_a",
+            to_record_type="crystallized_record", to_record_id=f"cry_nq_{i}_b",
+            relation_type="co_occurs", weight=0.45, proposed_by="structural", state="active",
+        )
+    index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_q_a",
+        to_record_type="crystallized_record", to_record_id="cry_q_b",
+        relation_type="co_occurs", weight=0.45, proposed_by="structural", state="active",
+    )
+
+    upgraded = 0
+    for _ in range(3):
+        result = run_structural_updates_backfill(str(index.roots.index_path), index=index, max_per_run=2)
+        upgraded += result["backfill_upgraded_count"]
+
+    assert upgraded == 1
+    conn = _conn(index)
+    updates = conn.execute(
+        "select count(*) from memory_edges where relation_type = 'updates' and state = 'active'"
+    ).fetchone()[0]
+    conn.close()
+    assert updates == 1
+
+
+def test_t2_1_14_updates_backfill_bounded_and_idempotent(tmp_path):
+    """PR-G1 backfill: pre-existing co_occurs pairs that now qualify as
+    `updates` are upgraded, bounded per run, and idempotent (a converted
+    pair never gets touched again since its relation_type is no longer
+    co_occurs)."""
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index = _store(tmp_path)
+    n_pairs = 3
+    records = []
+    for i in range(n_pairs):
+        body = f"待回填的近逐字重述内容编号{i},包含足够长的公共前缀文本用于命中阈值。"
+        body_b = body + "补充说明一句。"
+        records.append({
+            "id": f"cry_bf_{i}_a", "kind": "note",
+            "created_at": "2026-05-01T00:00:00Z",
+            "source_event_ids": [], "tags": [], "body": body,
+        })
+        records.append({
+            "id": f"cry_bf_{i}_b", "kind": "note",
+            "created_at": "2026-06-01T00:00:00Z",
+            "source_event_ids": [], "tags": [], "body": body_b,
+        })
+    _seed_canonical_crystallized(store, records)
+    index.rebuild_from_store(store)
+
+    # Pre-existing co_occurs edges (as if written by a pre-PR-G1 proposer
+    # run) — write_governed_edge's per-pair dedup means a normal proposer
+    # pass could never re-examine these once they exist.
+    for i in range(n_pairs):
+        edge = index.write_governed_edge(
+            from_record_type="crystallized_record", from_record_id=f"cry_bf_{i}_a",
+            to_record_type="crystallized_record", to_record_id=f"cry_bf_{i}_b",
+            relation_type="co_occurs", weight=0.45, proposed_by="structural", state="active",
+        )
+        assert edge and edge.get("edge_id")
+
+    # Bound the run to fewer than n_pairs to prove the cap is honoured.
+    result = run_structural_updates_backfill(
+        str(index.roots.index_path), index=index, max_per_run=2,
+    )
+    assert result["backfill_scanned_count"] == 2
+    assert result["backfill_upgraded_count"] == 2
+    assert result["backfill_skipped_count"] == 0
+
+    conn = _conn(index)
+    updates_count_1 = conn.execute(
+        "select count(*) from memory_edges where relation_type = 'updates' and state = 'active'"
+    ).fetchone()[0]
+    remaining_co_occurs_1 = conn.execute(
+        "select count(*) from memory_edges where relation_type = 'co_occurs' and state = 'active'"
+    ).fetchone()[0]
+    conn.close()
+    assert updates_count_1 == 2
+    assert remaining_co_occurs_1 == 1
+
+    # Second run drains the remainder.
+    result2 = run_structural_updates_backfill(
+        str(index.roots.index_path), index=index, max_per_run=200,
+    )
+    assert result2["backfill_scanned_count"] == 1
+    assert result2["backfill_upgraded_count"] == 1
+
+    # Third run: idempotent — nothing left to scan/upgrade.
+    result3 = run_structural_updates_backfill(
+        str(index.roots.index_path), index=index, max_per_run=200,
+    )
+    assert result3["backfill_scanned_count"] == 0
+    assert result3["backfill_upgraded_count"] == 0
+
+    conn2 = _conn(index)
+    final_updates = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'updates' and state = 'active'"
+    ).fetchone()[0]
+    final_co_occurs = conn2.execute(
+        "select count(*) from memory_edges where relation_type = 'co_occurs' and state = 'active'"
+    ).fetchone()[0]
+    conn2.close()
+    assert final_updates == n_pairs
+    assert final_co_occurs == 0
+
+
+def test_t2_1_15_injection_shows_only_newer_endpoint_of_updates_pair(tmp_path):
+    """PR-G1 latest-wins injection: a third record co-occurs with BOTH the
+    newer and older endpoints of an `updates` pair. Anchoring on that third
+    record must inject only the newer endpoint's neighbor line — the older
+    one's decision outcome is `superseded_by_newer`, never both injected."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {
+            "id": "cry_anchor", "kind": "note",
+            "created_at": "2026-05-15T00:00:00Z",
+            "source_event_ids": [], "tags": [],
+            "body": "锚点记录,与新旧两个版本都存在关联边。",
+        },
+        {
+            "id": "cry_ver_old", "kind": "fact",
+            "created_at": "2026-05-01T00:00:00Z",
+            "source_event_ids": [], "tags": [],
+            "body": "旧版本记录的正文内容,描述了某项设置的初始状态。",
+        },
+        {
+            "id": "cry_ver_new", "kind": "fact",
+            "created_at": "2026-06-01T00:00:00Z",
+            "source_event_ids": [], "tags": [],
+            "body": "新版本记录的正文内容,描述了某项设置更新后的状态。",
+        },
+    ])
+    index.rebuild_from_store(store)
+
+    updates_edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_ver_new",
+        to_record_type="crystallized_record", to_record_id="cry_ver_old",
+        relation_type="updates", weight=0.60, proposed_by="structural", state="active",
+    )
+    assert updates_edge and updates_edge.get("edge_id")
+    for target in ("cry_ver_old", "cry_ver_new"):
+        edge = index.write_governed_edge(
+            from_record_type="crystallized_record", from_record_id="cry_anchor",
+            to_record_type="crystallized_record", to_record_id=target,
+            relation_type="co_occurs", weight=0.50, proposed_by="structural", state="active",
+        )
+        assert edge and edge.get("edge_id")
+
+    lines = _graph_layer_shadow_lines(
+        store, ["cry_anchor"], index=index, seen=set(), source_ids=[], events=[],
+        query="", session_id="t2_1_15",
+    )
+    assert any("新版本记录" in line for line in lines)
+    assert not any("旧版本记录" in line for line in lines), (
+        "the older endpoint of an updates pair must never be injected"
+    )
+
+    # The shadow ledger's `edges` list mirrors the ORIGINAL query_edges()
+    # result (the two co_occurs edges from cry_anchor) — the additional
+    # `updates` lookup used purely to resolve superseded-ness is not itself
+    # a candidate this turn, so its outcome is read off the co_occurs edge
+    # that WOULD have injected the older endpoint.
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    rows = [json.loads(line) for line in shadow_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    last_row = rows[-1]
+    outcomes_by_target = {}
+    for edge_row in last_row["edges"]:
+        outcomes_by_target[edge_row["to_record_id"]] = (edge_row["outcome"], edge_row["injected"])
+    assert outcomes_by_target["cry_ver_old"] == ("superseded_by_newer", False)
+    assert outcomes_by_target["cry_ver_new"][1] is True
+
+
+def _one_qualifying_co_occurs_pair(tmp_path):
+    """A pre-PR-G1 co_occurs edge on a pair that now qualifies as updates."""
+    store, index = _store(tmp_path)
+    body = "待回填的近逐字重述内容,包含足够长的公共前缀文本用于命中阈值。"
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_fail_a", "kind": "note", "created_at": "2026-05-01T00:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body},
+        {"id": "cry_fail_b", "kind": "note", "created_at": "2026-06-01T00:00:00Z",
+         "source_event_ids": [], "tags": [], "body": body + "补充说明一句。"},
+    ])
+    index.rebuild_from_store(store)
+    edge = index.write_governed_edge(
+        from_record_type="crystallized_record", from_record_id="cry_fail_a",
+        to_record_type="crystallized_record", to_record_id="cry_fail_b",
+        relation_type="co_occurs", weight=0.45, proposed_by="structural", state="active",
+    )
+    assert edge and edge.get("edge_id")
+    return store, index, str(edge["edge_id"])
+
+
+def test_t2_1_17_backfill_write_failure_after_invalidation_is_not_a_skip(tmp_path, monkeypatch):
+    """Review BLOCKER counterfactual: the old co_occurs edge is invalidated
+    (one-way) before the updates edge is written. When that write fails the
+    pair has no active structural edge; the old code counted it as an
+    ordinary skip, indistinguishable from "does not qualify"."""
+    from plugins.memory.memory_os import index as index_module
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index, co_edge_id = _one_qualifying_co_occurs_pair(tmp_path)
+    monkeypatch.setattr(index_module, "write_governed_edge", lambda *a, **k: {})
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_failed_count"] == 1
+    assert result["backfill_skipped_count"] == 0
+    assert result["backfill_upgraded_count"] == 0
+    [record] = result["backfill_error_records"]
+    assert record["operation"] == "updates_backfill_write"
+    assert record["error_code"] == "edge_write_failed"
+    assert record["details"]["edge_id"] == co_edge_id
+    conn = _conn(index)
+    state = conn.execute(
+        "select state from memory_edges where edge_id = ?", (co_edge_id,)
+    ).fetchone()[0]
+    active = conn.execute(
+        "select count(*) from memory_edges where state = 'active'"
+    ).fetchone()[0]
+    conn.close()
+    # Proves the test reached the dangerous state it claims to report.
+    assert state == "invalidated"
+    assert active == 0
+
+
+def test_t2_1_18_backfill_invalidation_failure_is_counted_as_failed(tmp_path, monkeypatch):
+    """The other post-qualification branch: transition_edge_state returned {}
+    (canonical append or projection update failed). Also not a skip."""
+    from plugins.memory.memory_os import index as index_module
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_updates_backfill,
+    )
+
+    store, index, co_edge_id = _one_qualifying_co_occurs_pair(tmp_path)
+    monkeypatch.setattr(index_module, "transition_edge_state", lambda *a, **k: {})
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_failed_count"] == 1
+    assert result["backfill_skipped_count"] == 0
+    [record] = result["backfill_error_records"]
+    assert record["operation"] == "updates_backfill_invalidate"
+    assert record["details"]["edge_id"] == co_edge_id
+
+
+def test_t2_1_21_backfill_scan_failure_reports_scan_failed_outcome(tmp_path):
+    """Review follow-up: the candidate scan failing left every count at 0,
+    byte-identical to an idle run. Real failure: the edge table is gone."""
+    import sqlite3 as _sqlite3
+
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        UPDATES_BACKFILL_OUTCOMES,
+        run_structural_updates_backfill,
+    )
+
+    store, index, _ = _one_qualifying_co_occurs_pair(tmp_path)
+    healthy = run_structural_updates_backfill(str(index.roots.index_path), index=index, max_per_run=0)
+    assert healthy["backfill_outcome"] == "completed"
+
+    conn = _sqlite3.connect(str(index.roots.index_path))
+    conn.execute("drop table memory_edges")
+    conn.commit()
+    conn.close()
+
+    result = run_structural_updates_backfill(str(index.roots.index_path), index=index)
+
+    assert result["backfill_outcome"] == "scan_failed"
+    assert result["backfill_outcome"] in UPDATES_BACKFILL_OUTCOMES
+    assert result["backfill_scanned_count"] == 0
+    assert result["backfill_error_records"][0]["operation"] == "updates_backfill_scan"
+
+
+def test_t2_1_19_run_structural_proposer_carries_every_backfill_key(tmp_path):
+    """Census: run_structural_proposer's summary hand-listed the backfill
+    keys and dropped backfill_pass_complete, so every reader saw False."""
+    from plugins.memory.memory_os.structural_edge_proposer import (
+        run_structural_proposer,
+        run_structural_updates_backfill,
+    )
+
+    store, index, _ = _one_qualifying_co_occurs_pair(tmp_path)
+    backfill_keys = set(
+        run_structural_updates_backfill(str(index.roots.index_path), index=index, max_per_run=0)
+    )
+    summary = run_structural_proposer(str(index.roots.index_path), index=index)
+
+    assert summary["backfill_pass_complete"] is True
+    missing = sorted(backfill_keys - set(summary))
+    assert not missing, f"backfill keys dropped by run_structural_proposer: {missing}"
+
+
+def test_t2_1_20_updates_precedes_explicit_reference(tmp_path):
+    """Review SHOULD-FIX 2, decided: when a near-verbatim newer record also
+    cites the older one's id, the pair is labelled updates, not depends_on.
+    prefetch's latest-wins suppression keys on relation_type == "updates", so
+    depends_on-first would switch latest-wins off for exactly the pairs with
+    the strongest supersession evidence."""
+    from plugins.memory.memory_os import structural_edge_proposer as sep
+
+    base = {"kind": "fact", "tags_json": "[]", "source_event_ids_json": "[]"}
+    shared = (
+        "客户的服务器机房在上海张江高科技园区,机柜编号是A区十二号,联系人是运维组的王工,"
+        "平时白天联系比较及时,夜间值班电话由物业统一转接,机柜钥匙放在前台登记领取。"
+    )
+    older = {**base, "id": "cry_ref_old", "created_at": "2026-05-01T09:00:00Z", "body": shared}
+    newer = {**base, "id": "cry_ref_new", "created_at": "2026-06-15T09:00:00Z",
+             "body": shared + "见 cry_ref_old"}
+    assert sep._dice_coefficient(older["body"], newer["body"]) >= sep._DICE_THRESHOLD_UPDATES
+    assert sep._contains_record_ref(newer["body"], "cry_ref_old"), "fixture sanity: explicit reference"
+
+    edges = sep._detect_relation(older, newer)
+
+    assert [e["relation_type"] for e in edges] == ["updates"]
+    assert edges[0]["from_record_id"] == "cry_ref_new"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2858,6 +3455,27 @@ def test_semantic_edges_claim_exploit_slots_before_heavier_co_occurs(tmp_path):
     )
     joined = "\n".join(lines)
     assert "NEIGHBOR_MARK_8" in joined and "NEIGHBOR_MARK_9" in joined
+
+
+def test_updates_supersession_notice_claims_an_exploit_slot(tmp_path):
+    """Review SHOULD-FIX 4 counterfactual: an `updates` edge renders only as a
+    supersession notice (anchor = older endpoint). Treated as co_occurs it
+    sorted behind heavier co_occurs and reached injection only on the days
+    the explore rotation happened to pick it."""
+    from plugins.memory.memory_os.prefetch import _render_graph_layer_lines
+
+    store, anchor, neighbors = _slot_store(tmp_path, 13)
+    edges = [
+        _slot_edge(f"co-{i}", anchor, neighbors[i], "co_occurs", 0.90 - i * 0.01)
+        for i in range(12)
+    ] + [_slot_edge("upd", neighbors[12], anchor, "updates", 0.60)]
+
+    for day in range(30):
+        _, decisions = _render_graph_layer_lines(
+            store, edges, anchor_ids=[anchor], seen=set(), day_ordinal=day,
+        )
+        injected = {str(d["edge"]["edge_id"]) for d in decisions if d.get("injected")}
+        assert "upd" in injected, f"day {day}: supersession notice starved by co_occurs"
 
 
 def test_co_occurs_still_fills_when_semantic_edges_are_scarce(tmp_path):

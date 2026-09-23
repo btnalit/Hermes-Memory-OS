@@ -5031,6 +5031,9 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
+  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿；审查后回填失败单独计数并 WARN、
+  补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins、每个回填出口带封闭集结果码。全量 4172 passed / 13 skipped；五门全绿。**未部署**。
 - `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
   真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
 - `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
@@ -8552,3 +8555,65 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   `judge_backend` / 回落计数待 monitor part 2；开启前建议先在 sannai 小流量试（`fact_judge_max_per_tick` 默认 8 已限流）。
 - **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY` 并由 owner 登记
   `fact_judge_judge_backend=typesafe_jev` 覆盖；部署后可先跑 `scripts/memory_os_jev_probe.py` 做只读验证。
+
+---
+
+## DT — G4 图谱回放评测集 + G1 `updates` 关系与 latest-wins 注入（2026-09-23）
+
+- **背景**：生产上 main 313 对 / sannai 29 对近逐字重复的结晶记录被当成 `co_occurs` 一起注入；图谱没有"新版本取代旧版本"的语义，也没有不依赖主人
+  反馈的离线评测（主人评分 30 天 0 条）。owner 裁定：`updates`（新→旧），确定性生产者只认 Dice ≥ θ_high = 0.85 且同 kind；0.5–0.85 留给 L1
+  之后的 LLM 标签；不改任何记录、不加层、不设逐边审批。
+- **G4**（Sonnet 子代理）：`eval/memory_os/data/graph_replay_cases.jsonl` 38 对**合成**中文样本（近逐字重述 14、低 Dice 改口 10、无关同 kind 8、
+  跨 kind 高重叠 6，按真实 `_dice_coefficient` 校准）；`eval/memory_os/adapters/graph_replay.py` 逐对建隔离 store，跑真实 `run_structural_proposer`
+  与真实 `_graph_layer_shadow_lines`，读回 shadow 行；指标：各子集召回 / 误报、方向准确率、新颖度、覆盖、冗余（`emitted_stub`）、选槽浪费
+  （`target_inactive`）、新旧同注入数、`superseded_by_newer` 数；每个比率带 `sampled | healthy_no_sample`，空分母不伪造 0 / 1。已知局限：2 条记录的
+  隔离样本构造不出"第三方锚点同时连到新旧两版"的形状，由专门的 3 记录单测覆盖。
+- **G1**（Sonnet 子代理）：`_detect_relation` 最先判 `updates`（Dice ≥ 0.85 ∧ 同 kind ∧ 两个 created_at 可解析且不同；方向由 created_at 定），优先于
+  shared_events / depends_on / 正文相似 / temporal 所有 co_occurs 路径——写入边界按无序对去重，只有第一个判出的关系能落库。出生权重
+  `("structural","updates_restatement")=0.60`。`prefetch._render_graph_layer_lines` 选槽前用一次有界的 `index.query_edges(neighbor_ids,
+  relation_types=["updates"])` 把"任一 active `updates` 边的旧端点"整体压下（第三方锚点经 co_occurs 同时连到新旧两版也能压住），outcome
+  `superseded_by_newer`；`MemoryOSIndex.is_latest_crystallized_record` 为纯派生读。消费方全仓核对（edge_weight_feedback / edge_promotion /
+  llm_edge_proposer / 分析与压缩脚本 / monitor），`llm_edge_proposer` 闭集按裁定未动。
+- **主会话审查修掉的一处（饥饿）**：存量回填 `run_structural_updates_backfill` 的候选查询是 `order by created_at limit 200` 且无游标——不满足条件的
+  co_occurs 边保持 co_occurs，下一轮原样再被扫到，于是每轮都重扫同一批最旧的 200 条，排在后面的待回填对永远到不了（生产 active 边约 85% 是
+  co_occurs，远多于一批）。这正是 CLAUDE.md 点名禁止的队首饥饿选法。改为 `(created_at, edge_id)` 键集游标，持久化在
+  `system/structural_updates_backfill_state.json`，扫过即前进（合格与否都前进），新生边在游标推进到时自然被扫到；`backfill_pass_complete` 透传
+  到 cognitive_loop 包装器与 monitor `_edge_fields`；游标写失败记 `error_record`。反事实：3 对不合格边排在 1 对合格边之前、每轮上限 2——旧查询
+  跑 3 轮回填 0 对，修复后 1 对。
+- **基线对比**（同一 38 对样本，每次运行实时计算）：近逐字重述 `updates` 召回 0.0 → 1.0（14/14）；改口 / 无关 / 跨 kind 误报 0 / 0 / 0；方向准确率
+  1.0；平均注入新颖度 0.0503 → 0.0546（不降）；覆盖率 0.526 → 0.342——设计使然：7 对以较新端为锚点，旧端被正确压下为 `superseded_by_newer`
+  而不是作为 co_occurs 注入；新旧同注入 0。
+- **反事实**：子代理 8 条（`updates` 优先级、跨 kind、低 Dice 改口、只注入较新者、`is_latest` 经索引重建仍成立、回填有界幂等、评测空集 no-sample 两条），
+  主会话 1 条（回填游标）。
+- **独立审查（Sonnet）1 BLOCKER + 4 SHOULD-FIX，主会话全部处理**（每条都有破坏即失败的反事实，cp 备份法逐条验证 9/9）：
+  - **BLOCKER：回填"先失活旧边、再写新边"的第二步失败被计成普通 skip。** 失活是单向门（`EDGE_STATE_TRANSITIONS["invalidated"]` 为空），
+    按对去重又不允许先写新边，所以做不成原子；写失败时这一对可能**一条 active 结构边都没有**，却和"不合格"落在同一个计数里。失活本身返回
+    `{}` 的分支同类：canonical 追加失败时游标照样越过、这一对永远停在 co_occurs；canonical 已落而投影更新失败时下次 index_sync 就失活、新边
+    从未写。两支都改计新的 `backfill_failed_count`，各带一条 `error_record`（`updates_backfill_invalidate` / `updates_backfill_write`，details
+    带边 id 与两端记录 id，运维可据此找回这一对）；解析端点时的 sqlite 读失败原先也计 skip，一并改为 failed。monitor 对
+    `backfill_failed_count>0` 出 WARN `graph_structural_updates_backfill_failed`——边步骤计数原本整体是不分级的 INFO，但失败不是良性跳过。
+    不做原子化，理由见上：任何绕过按对去重或放开 `invalidated → active` 的做法都会改写写入边界的契约。
+  - **顺带查出的透传缺口（与 G0 同类，第三次）**：`run_structural_proposer` 的汇总手写列举回填键，**漏了 `backfill_pass_complete`**，
+    包装器与 monitor 读到的恒为默认 False。改为整体展开回填结果；并补上"生产者 → 包装器"的普查测试。既有的 monitor 端普查只追加记录、没建
+    索引，生产者一直走 `cannot_read_crystallized_records` 错误路径，而包装器用默认值把每个回填键都补齐了——"键存在"的健全性断言是空的；
+    现改为先重建索引并断言生产者 `status == "ok"`。
+  - **SHOULD-FIX 2（已裁定，不改顺序）**：`updates` 先于 `depends_on`。核对了注入侧：latest-wins 压制只认 `relation_type == "updates"`，
+    若改成 `depends_on` 优先，恰恰是"新记录显式引用旧记录 id"这种最强的取代证据会失去 latest-wins。用测试钉住并在 `_detect_relation` 注释说明。
+  - **SHOULD-FIX 3**：G4 通过门里的 `stale_version_injection_count` 在两记录隔离样本里结构上不可能非零，门从未衡量 PR-G1 的注入这一半。
+    新增 `latest_wins_report`（以较新端为锚点的正例数 vs 实际被压成 `superseded_by_newer` 的数，当前 7/7），纳入通过门；正例已采样却没有
+    较新端锚点样本时判失败而不是通过。反事实：让 `updates` 查询返回空，评测失败。
+  - **SHOULD-FIX 4**：`updates` 加入 `_GRAPH_SEMANTIC_RELATIONS`——它唯一能渲染的方向是"已被以下内容取代"的提示，按 co_occurs 排序会被
+    更重的共现边挤到探索位，只在轮转碰巧选中的日子出现。反事实：12 条 0.9 共现 + 1 条 0.6 `updates`，连续 30 个 day_ordinal 都必须注入。
+  - **SHOULD-FIX 5**：回填游标假设 `created_at` 随写入单调，已在 docstring 写明；时间戳落在游标之后的边不会被重访，删除状态文件即从头重扫。
+  - **复审（同一审查者）**：以上全部确认解决；另指出一处同类遗漏——第一条候选扫描查询本身失败时各计数都是 0，与空闲的一轮逐字节相同，
+    新 WARN 也不会响。那一刻没有任何东西被扫到，塞一个假计数进 `backfill_failed_count` 不对，改为每个出口都带封闭集结果码
+    `backfill_outcome ∈ UPDATES_BACKFILL_OUTCOMES = {completed, no_roots, scan_failed, resolve_failed}`，monitor 对
+    `scan_failed` / `resolve_failed` 同样出 WARN（`STRUCTURAL_BACKFILL_FAILED_OUTCOMES`，守卫测试钉住它是生产者闭集的子集）。
+    反事实：删掉 `memory_edges` 表制造真实的扫描失败；四条破坏验证（缺结果码 / monitor 不看结果码 / 包装器与白名单漏透传）均先败后过。
+- **测试**：graph_replay +8、graph_layer +8（含 2 条既有测试的夹具相似度下调——其 Dice 本就 ≥0.85，现在应得 `updates`）、monitor 普查 +1；
+  全量 4068 passed / 13 skipped；五门全绿（write-surface 为回填游标状态文件登记 `structural_updates_backfill_cursor_state`）。
+  审查修复后（链尾，已含 DP–DS）：graph_layer +6、cognitive_loop +1、monitor +2（另强化 1 条普查）、graph_replay +1；全量 4172 passed / 13 skipped；五门全绿。
+- **遗留**：`superseded_by_newer` / 回填量 / 新颖度尚未分级（主会话随后接）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界
+  SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时；回填失败时"找回那一对"目前靠 error_record 人工处理，没有自动补边。
+- **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮
+  `backfill_upgraded_count>0`，7 天内 main `superseded_by_newer>0`（sannai 允许 no-sample）。
