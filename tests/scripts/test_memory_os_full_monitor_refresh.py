@@ -307,3 +307,6 @@ def test_parser_default_home_reads_hermes_home(monkeypatch, tmp_path):
     assert build_parser().parse_args([]).hermes_home == tmp_path / "profile"
     monkeypatch.delenv("HERMES_HOME", raising=False)
     assert build_parser().parse_args([]).hermes_home == Path.home() / ".hermes"
+    # set but empty is "not set", not the current directory
+    monkeypatch.setenv("HERMES_HOME", "")
+    assert build_parser().parse_args([]).hermes_home == Path.home() / ".hermes"
