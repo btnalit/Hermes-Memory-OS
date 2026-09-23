@@ -8856,6 +8856,11 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   的明细字典只进入完整 scan/apply 报告，不进 `session_mirror_auto_apply_last_run.json` 的紧凑落盘（该文件的 `counters` 类型约定为纯
   int，只有聚合数 `skipped_by_principal_count` 落盘）；治理阻塞（`governance_validation` 返回 `blocked`）分支不会执行本次新增的持久化
   标记——该分支本身是异常态，被阻塞的批次本来也不会写任何东西，留作已知边界而非缺陷。
+- **主会话集成审查**：核对了 P3 的持久化排除——`seen_sessions` 的全部读者（本文件两处扫描过滤、monitor 一处积压计数）都只做成员判断，
+  不把"在集合里"当"已导入"计数，所以把被排除的 peer / other_human 会话标记进去只会让积压正确排空，不会虚增导入数；标记只在 apply 路径
+  `_write_state` 之前写入，dry-run 保持只读；governance 判 blocked 的早退分支下一轮重试，不丢。未改动的一处命名：镜像准入沿用
+  `FOREGROUND_CONTROL_PRINCIPALS`（与 `sync_turn` 的记忆驱动门同一集合），若将来要让"谁能进记忆"与"谁能控前台"分开，应像 P1 的
+  `OWNER_ACTION_PRINCIPALS` 那样另起名字。本节字母由 DU 改为 DW，使链上节号单调（DU = monitor part 2，DV = P1）。
 - **部署**：随规划全部落地后统一部署；部署后验收：`event_principal_coverage` 在近窗口出现 `marked_event_count>0` 且
   `marked_without_principal_count=0`；两 profile 的 `session_mirror` 若曾经镜像过 mailbox/群内他人会话，新版本上线后不再新增（历史已
   写入的旧事件不回填，只影响新写入）。
