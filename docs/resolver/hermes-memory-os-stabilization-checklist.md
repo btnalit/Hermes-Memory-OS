@@ -5034,8 +5034,17 @@ sannai-community 仓库 README。）
 - `33d674b..HEAD`：P2+P3（DW）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
   `session_mirror` 加身份门（先于 `[:limit]` 切片，防饥饿）+ 持久排除非主人会话（防永远重扫）；monitor 新增 `event_principal_coverage`
   自包含区块（空样本报 healthy_no_sample、legacy 恒 INFO、缺主体的已标记事件 WARN/生产 FAIL）。全量 4179 passed。**未部署**。
+- `33d674b..HEAD`：P1（DV）——owner action 核心层主体自检：`parse_owner_review_reply` 与 `owner_review_surface_report` 新增
+  `principal` 形参并在模块内部自查 `OWNER_ACTION_PRINCIPALS`（owner/unknown 放行，peer_agent/other_human/system 拒绝且落审计），
+  未传 principal 时按拒绝/脱敏处理而非放行；review surface 与每轮系统提示词注入的审阅摘要对非主人隐去 `oa_`/`ppmt_` token。
+  全量 4172 passed / 13 skipped / 0 failed。**未部署**。
+- `33d674b..HEAD`：monitor 接线 part 2（DU）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
+  两个既有 accessor（不再手写路径/副本）；新增 `lane_backend_transport_summary` 展示 fact_judge 的 `judge_backend` / Jev 回落计数
+  （全部回落时 WARN，默认关闭恒 INFO）与 SFE 的 `input_source` / `group_sessions_*` 计数（INFO only）；`llm_route_unexpected` 因跨两个
+  越界文件才能落地而不实现，记为遗留。全量 4179 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
-  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿。全量 4068 passed。**未部署**。
+  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿；审查后回填失败单独计数并 WARN、
+  补齐漏透传的 `backfill_pass_complete`、评测通过门纳入 latest-wins、每个回填出口带封闭集结果码。全量 4172 passed / 13 skipped；五门全绿。**未部署**。
 - `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
   真实 key 实测 7 次调用通过；任何 Jev 失败回落到 call_llm 路径并计数。全量 4110 passed。**未部署、未开启**。
 - `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
@@ -8587,12 +8596,188 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   而不是作为 co_occurs 注入；新旧同注入 0。
 - **反事实**：子代理 8 条（`updates` 优先级、跨 kind、低 Dice 改口、只注入较新者、`is_latest` 经索引重建仍成立、回填有界幂等、评测空集 no-sample 两条），
   主会话 1 条（回填游标）。
+- **独立审查（Sonnet）1 BLOCKER + 4 SHOULD-FIX，主会话全部处理**（每条都有破坏即失败的反事实，cp 备份法逐条验证 9/9）：
+  - **BLOCKER：回填"先失活旧边、再写新边"的第二步失败被计成普通 skip。** 失活是单向门（`EDGE_STATE_TRANSITIONS["invalidated"]` 为空），
+    按对去重又不允许先写新边，所以做不成原子；写失败时这一对可能**一条 active 结构边都没有**，却和"不合格"落在同一个计数里。失活本身返回
+    `{}` 的分支同类：canonical 追加失败时游标照样越过、这一对永远停在 co_occurs；canonical 已落而投影更新失败时下次 index_sync 就失活、新边
+    从未写。两支都改计新的 `backfill_failed_count`，各带一条 `error_record`（`updates_backfill_invalidate` / `updates_backfill_write`，details
+    带边 id 与两端记录 id，运维可据此找回这一对）；解析端点时的 sqlite 读失败原先也计 skip，一并改为 failed。monitor 对
+    `backfill_failed_count>0` 出 WARN `graph_structural_updates_backfill_failed`——边步骤计数原本整体是不分级的 INFO，但失败不是良性跳过。
+    不做原子化，理由见上：任何绕过按对去重或放开 `invalidated → active` 的做法都会改写写入边界的契约。
+  - **顺带查出的透传缺口（与 G0 同类，第三次）**：`run_structural_proposer` 的汇总手写列举回填键，**漏了 `backfill_pass_complete`**，
+    包装器与 monitor 读到的恒为默认 False。改为整体展开回填结果；并补上"生产者 → 包装器"的普查测试。既有的 monitor 端普查只追加记录、没建
+    索引，生产者一直走 `cannot_read_crystallized_records` 错误路径，而包装器用默认值把每个回填键都补齐了——"键存在"的健全性断言是空的；
+    现改为先重建索引并断言生产者 `status == "ok"`。
+  - **SHOULD-FIX 2（已裁定，不改顺序）**：`updates` 先于 `depends_on`。核对了注入侧：latest-wins 压制只认 `relation_type == "updates"`，
+    若改成 `depends_on` 优先，恰恰是"新记录显式引用旧记录 id"这种最强的取代证据会失去 latest-wins。用测试钉住并在 `_detect_relation` 注释说明。
+  - **SHOULD-FIX 3**：G4 通过门里的 `stale_version_injection_count` 在两记录隔离样本里结构上不可能非零，门从未衡量 PR-G1 的注入这一半。
+    新增 `latest_wins_report`（以较新端为锚点的正例数 vs 实际被压成 `superseded_by_newer` 的数，当前 7/7），纳入通过门；正例已采样却没有
+    较新端锚点样本时判失败而不是通过。反事实：让 `updates` 查询返回空，评测失败。
+  - **SHOULD-FIX 4**：`updates` 加入 `_GRAPH_SEMANTIC_RELATIONS`——它唯一能渲染的方向是"已被以下内容取代"的提示，按 co_occurs 排序会被
+    更重的共现边挤到探索位，只在轮转碰巧选中的日子出现。反事实：12 条 0.9 共现 + 1 条 0.6 `updates`，连续 30 个 day_ordinal 都必须注入。
+  - **SHOULD-FIX 5**：回填游标假设 `created_at` 随写入单调，已在 docstring 写明；时间戳落在游标之后的边不会被重访，删除状态文件即从头重扫。
+  - **复审（同一审查者）**：以上全部确认解决；另指出一处同类遗漏——第一条候选扫描查询本身失败时各计数都是 0，与空闲的一轮逐字节相同，
+    新 WARN 也不会响。那一刻没有任何东西被扫到，塞一个假计数进 `backfill_failed_count` 不对，改为每个出口都带封闭集结果码
+    `backfill_outcome ∈ UPDATES_BACKFILL_OUTCOMES = {completed, no_roots, scan_failed, resolve_failed}`，monitor 对
+    `scan_failed` / `resolve_failed` 同样出 WARN（`STRUCTURAL_BACKFILL_FAILED_OUTCOMES`，守卫测试钉住它是生产者闭集的子集）。
+    反事实：删掉 `memory_edges` 表制造真实的扫描失败；四条破坏验证（缺结果码 / monitor 不看结果码 / 包装器与白名单漏透传）均先败后过。
 - **测试**：graph_replay +8、graph_layer +8（含 2 条既有测试的夹具相似度下调——其 Dice 本就 ≥0.85，现在应得 `updates`）、monitor 普查 +1；
   全量 4068 passed / 13 skipped；五门全绿（write-surface 为回填游标状态文件登记 `structural_updates_backfill_cursor_state`）。
-- **遗留**：`updates` 抢占 `depends_on`（显式 ID 引用）是子代理的判断，尚无两者同时成立的真实样本；`superseded_by_newer` / 回填量 / 新颖度尚未
-  分级（monitor part 2）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界 SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时。
+  审查修复后（链尾，已含 DP–DS）：graph_layer +6、cognitive_loop +1、monitor +2（另强化 1 条普查）、graph_replay +1；全量 4172 passed / 13 skipped；五门全绿。
+- **遗留**：`superseded_by_newer` / 回填量 / 新颖度尚未分级（主会话随后接）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界
+  SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时；回填失败时"找回那一对"目前靠 error_record 人工处理，没有自动补边。
 - **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮
   `backfill_upgraded_count>0`，7 天内 main `superseded_by_newer>0`（sannai 允许 no-sample）。
+
+---
+
+## DU — monitor 接线 part 2：主体普查统一 accessor、J1 回落、L1 路由、SFE 计数（2026-09-23）
+
+- **背景**：monitor part 1（DP）接了 C3/P0 主体普查/G0 三项，明确留下四项给 part 2：P0 嵌入式采集器仍手写 `state.db` 路径与本地
+  `PRINCIPAL_MACHINE_SESSION_SOURCES` 副本（DP 遗留）；J1 的 `judge_backend` / 回落计数 / 回落详情样本尚无 monitor 读者（DS 遗留）；L1 的
+  `llm_transport` / provider / model 对 fact_judge、session_fact_extraction 两条 lane 尚未展示，规划 `llm_route_unexpected` 待评估（DN 遗留）；
+  SFE 的 `input_source` / `sessions_skipped_by_principal` / `group_sessions_scanned` / `group_sessions_without_user_suffix` 四个新计数已产出
+  但未接 monitor（DR 遗留）。本 PR（Sonnet 单代理，范围仅 monitor + 其测试 + `lane_contracts.py`）逐项接线，不改任何生产者。
+- **① 主体普查统一 accessor**：嵌入式采集器 `principal_binding_summary` 的 `db_path = os.path.join(_hermes_home, "state.db")` 改为
+  `state_db_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))`——与同一采集器文件里 `lane_input_freshness_summary` 已经
+  在用的 accessor 完全一致（CLAUDE.md 的"路径字面量各处重写"漂移类）；本地 `_classify_principal_binding` 的 `ruled_sources` 计算改从
+  `principal.py` 现读 `MACHINE_SESSION_SOURCES`（与同函数里 `LOCAL_OWNER_SOURCES` / `API_SELF_DECLARED_SOURCES` / `MAILBOX_SOURCE` 三个已有
+  import 同源），模块级 `PRINCIPAL_MACHINE_SESSION_SOURCES = frozenset(...)` 副本删除。两处均只改实现，输出键名与既有分级语义不变。
+- **② J1 回落可见性 + ③ L1 路由展示（合并实现，新采集器 `lane_backend_transport_summary`）**：fact_judge 自身没有逐 tick 的账本（只有逐候选
+  `verdicts.jsonl`），其 `judge_backend` / `judge_backend_fallback_count` / `_fallback_reasons` / `_fallback_detail_sample` /
+  `llm_transport` / `llm_provider` / `llm_model` 只存在于共享的 `execution_gate_envelopes.jsonl` 账本里该 lane_id 的最新一条 `completion`
+  记录的 `result_summary`（`memory_os_fact_judge_lane.py::_write_execution_report` 写入）——新采集器经 `execution_gate_records_path` +
+  `read_jsonl_tail`（有界倒序扫描，`max_records=5000` 与既有 `_execution_gate_helper_completion_summary` 同量级）定位。
+  session_fact_extraction 有自己的逐 run 账本（`system-modules/session_fact_extraction/runs.jsonl`），改为直接读其最新一条记录（同一批字段 +
+  `input_source` / `sessions_skipped_by_principal` / `group_sessions_scanned` / `group_sessions_without_user_suffix`）。`classify_snapshot`
+  新增一段：两条 lane 各出一条 INFO（`fact_judge_backend_state` / `session_fact_extraction_backend_state`，无样本时降级为 `_no_sample`）；
+  仅当 `judge_backend=="typesafe_jev"` 且本 tick `judged_count>0` 且 `judge_backend_fallback_count>=judged_count`（本 tick 判定的候选全部
+  回落）时另出 WARN `fact_judge_backend_fallback_all`（Jev 静默失活，而非一次性抖动）——默认关闭（`hermes_default`）恒为 INFO，`judged_count`
+  守卫防止空 tick 的 `0>=0` 假阳性。`judge_backend_fallback_detail_sample` 的可信度已核实：`jev_backend.py` 的 HTTP 错误 detail 只取
+  `exc.read()`（远端 API 自己的错误响应体），`api_key` 只出现在出站 `Authorization` 头里、从未进入任何 `detail=` 构造；样本在
+  jev_backend→fact_judge→本采集器三层各裁一次（200/160/160/200 字符）。SFE 的四个新计数刻意不分级（INFO only），与
+  `session_fact_extraction.py` 自己"group-chat tripwire"docstring 的处置一致。`fact_judge_backend_fallback_all` 登记进
+  `CLEAN_HOST_WARN_CLASSIFICATIONS`（`expected_clean_host` / `warn_if_production`——Jev 默认关闭，clean-host 不可能命中）。
+- **`llm_route_unexpected` 前置条件核实（规划 L1 行，未实现）**：先查 `LlmCallResult`（`low_clue_recall.py`）是否已经暴露"应答模型"——
+  它暴露的 `model` 字段实为 `route_info.get("model") or model or getattr(response, "model", "")` 的合并结果，混合了"调用方要的模型"与
+  "响应声称的模型"，且 `_call_hermes_runtime_model_hermes_result` 内部确实算出了调用前的期望模型（`_resolve_hermes_default_runtime(config)
+  ["model"]`），但这个值在函数里被直接丢弃，从未进入 `LlmCallResult`。即便在 `low_clue_recall.py`（本次派工单唯一允许为此项改动的文件）里
+  补一个 `expected_model` 字段，fact_judge.py 的 `_call_diagnostics`（本次派工单标为只读）与 session_fact_extraction.py 里几乎同形的内联
+  diagnostics 代码各自手写一份"从 LlmCallResult 转报告字段"的白名单，不会自动转发新字段——要让 WARN 真正落到 monitor，必须同时改这两个
+  lane 文件的报告聚合逻辑，而它们不在本次允许编辑的范围内。因此按派工单条款：不实现，作为证据充分的缺口记录（见"遗留"），不强行在
+  `low_clue_recall.py` 单点加一个够不到 monitor 的计数器。
+- **反事实**（全部用 cp 备份做"破坏即失败、恢复即通过"验证，未用 `git checkout --`）：① `state_db_path` 改回字面量拼接后
+  `test_principal_binding_summary_uses_state_db_path_accessor_not_a_rebuilt_literal` FAIL（读到 `no_state_db` 而非 `ok`），恢复后 PASS；
+  ② `ruled_sources` 改回本地字面量 `frozenset({"cron","subagent"})` 后 `test_classify_principal_binding_ruled_sources_track_principal_
+  machine_session_sources_live` FAIL（WARN 未出现），恢复后 PASS；③ 采集器"取最新一条"的 `reversed()` 去掉后
+  `test_lane_backend_transport_summary_fact_judge_picks_the_latest_completion` FAIL（读到旧记录的 `hermes_default` 而非新记录的
+  `typesafe_jev`），恢复后 PASS；④ WARN 条件去掉 `judge_backend=="typesafe_jev"` 与 `judged_count>0` 两个守卫后，
+  `test_fact_judge_backend_fallback_all_never_warns_when_default_off` 与 `..._does_not_warn_on_empty_tick` 均 FAIL，恢复后 PASS；⑤
+  `CLEAN_HOST_WARN_CLASSIFICATIONS` 里的新条目删除后 `test_fact_judge_backend_fallback_all_is_warn_if_production_on_clean_host` FAIL
+  （`clean_host_warn_unclassified` 命中该码），恢复后 PASS。
+- **词表钉死**：两条测试直接调用真实 `run_fact_judge_lane` / `run_session_fact_extraction_lane`（真实 store，非手写 fixture）断言其返回字典
+  包含本采集器所读的全部键；另两条集成测试用真实生产者写出真实账本记录（含 SFE 所需的 ExecutionGate permit 信封）再经采集器读回，核对字段
+  与值——不是手造 JSON 断言字段存在。
+- **测试**：monitor +21（含上述 5 类反事实、2 条词表钉死、2 条真生产者集成、latest-wins 选取、no-sample、INFO-only 边界、clean-host 归类）；
+  `test_memory_os_3_200_monitor.py` 单文件 321 passed；连带 `lane_contracts` / `fact_judge` / `session_fact_extraction` / `principal`
+  四个文件 320 passed；全量 4179 passed / 13 skipped / 0 failed（未复现已知 Windows 并发 flake）；五门全绿（import-cycle 0 环 /
+  write-surface `unclassified_count=0` / static-hygiene `pass` / public-checkout `--strict` `PASS` / `git diff --check` 无输出）。
+- **遗留**：`llm_route_unexpected`（应答模型 ≠ 主模型时的 WARN）未实现——见上方"前置条件核实"，需要 owner 决定是否值得为它单独改
+  fact_judge.py / session_fact_extraction.py 的报告聚合逻辑（跨两个 lane 文件的改动，且两处已各自手写字段白名单，不共享一处"转发全部
+  LlmCallResult 字段"的口子，这本身也是可以指出的技术债——一次 seam 升级要吃两次改动）；`session_fact_extraction.py` 不在本次允许编辑名单，
+  只读用于核实字段来源；monitor 里 `execution_gate_envelopes.jsonl` 路径字面量已有 ≥3 处手写副本（`_records_path` /
+  `_execution_gate_helper_completion_summary` / `session_mirror_auto_apply_permit_integrity`），本次新增的 `lane_backend_transport_summary`
+  改用了真正的 `execution_gate_records_path` accessor，但未回头统一那三处既有副本（超出本次派工单范围，记为技术债）。
+- **主会话集成审查**：子代理在同一个采集器里又手写了 `memory-os/system-modules/session_fact_extraction/runs.jsonl` 字面量——恰是本节
+  第 1 项要消灭的那一类；同文件 C0 的连续失败采集器还各有一份 `runs.jsonl` 与 `fact_judge/verdicts.jsonl` 字面量（规则 5 同类）。三处全部
+  改走生产者 accessor（`session_fact_extraction._runs_path` / `fact_judge._verdicts_path`，私有跨模块导入按 CLAUDE.md 的既有先例）；
+  C0 采集器导入失败时报 `path_accessor_import_failed`，不静默。反事实：把两个 accessor 同时挪到别的目录，两个采集器都必须跟着读到——
+  三处字面量逐一改回，测试逐一失败（cp 备份法 3/3）。本节字母由 DW 改为 DU，使链上节号单调（P1 = DV，P2+P3 = DW）。
+- **部署**：随规划全部落地后统一部署，不改任何生产者/写路径，纯只读接线，无需重启 gateway；部署后验收：`fact_judge_backend_state` /
+  `session_fact_extraction_backend_state` 两条 INFO 在 main / sannai 均能读到最近一次 tick 的 `llm_transport=hermes_call_llm`；若 owner 开启
+  `fact_judge_judge_backend=typesafe_jev`，观察 `fact_judge_backend_fallback_all` 是否出现（预期不出现，出现即 Jev 生产环境静默失活）。
+
+---
+
+## DV — P1：owner action 核心层主体自检（2026-09-23）
+
+- **背景**：规划 §3 Phase 2 P1（`docs/plans/2026-09-23-memory-os-next-phase-plan.md`）：DO（P0-lite）已经让 `__init__.py` 的
+  owner-review ingress（`_process_owner_review_reply_ingress`）在调用 `parse_owner_review_reply` 之前先查 `self._turn_principal`，
+  但那只是**调用方**的自律——`owner_actions.py` 这个权威模块本身对principal一无所知，任何将来绕过该入口、直接拿到 store 就调用
+  `parse_owner_review_reply` / `owner_review_surface_report` 的路径都不会被拒绝。P1 要求权威判定进模块本身（"authority lives inside
+  the authority module"），并让只读的 review surface 对非主人隐去 `oa_` token（token 本身就足以在别处驱动一次 approve/reject）。
+- **根因**：两个函数原本都没有 `principal` 形参，调用方给什么、模块就信什么；`owner_review_surface_report` 把 `_render_review_item` /
+  `_attach_proposal_followup_apply_actions` 等生成的真实 `oa_`/`ppmt_` token 原样吐给任何调用者，包括 `system_prompt_block()` 每轮无条件
+  注入的 `session_approval.build_session_review_block` / `build_session_feedback_block`（不看是谁在说话）。
+- **修复**（主会话直接实现，未走子代理）：
+  - `principal.py` 新增 `OWNER_ACTION_PRINCIPALS = frozenset({PRINCIPAL_OWNER, PRINCIPAL_UNKNOWN})`——与 `FOREGROUND_CONTROL_PRINCIPALS`
+    当前同值但**分开命名**（owner action 授权与前台控制资格是两个概念，今天恰好取值一致，不应该共用一个名字，以免未来单独收紧一个时误伤另一个）。
+    `unknown` 被保留是 owner 裁定的权衡：未配置身份的平台上主人自己的回复也会解析成 `unknown`，若拒绝 `unknown` 就会把主人自己锁在门外；
+    以 `unknown` 身份执行的批准仍然带着该 principal 落审计，对 monitor 可见，不是静默放行。
+  - `owner_actions.parse_owner_review_reply` 新增关键字参数 `principal: str = ""`，函数入口第一件事就是
+    `if principal not in OWNER_ACTION_PRINCIPALS`——先于任何解析 / digest 解析工作，拒绝时经既有 `append_audit` 写
+    `action=owner_action_principal_rejected, status=rejected`（记录 owner_id / 打码后的 channel / principal / apply，不含 token），
+    并返回 `_reply_result(status="rejected", reason="owner_action_principal_rejected", ...)`。**默认值 `""` 不在
+    `OWNER_ACTION_PRINCIPALS` 里，因此"忘记传 principal"与"显式传非主人 principal"结果完全一样——拒绝**，不是陷阱式放行（W 规则 4）。
+  - `owner_review_surface_report` 改造成一层薄包装：真正的实现搬到 `_owner_review_surface_report_impl`（签名不变），新的公开函数多一个
+    `principal: str = ""`，调用 impl 后若 `principal not in OWNER_ACTION_PRINCIPALS` 就跑 `_redact_owner_action_tokens`——一个递归遍历
+    dict/list/tuple/str 的通用脱敏器，用正则 `oa_[0-9a-f]{8,32}` / `ppmt_[A-Za-z0-9_-]+`（大小写不敏感）把命中的 token 替换成
+    `oa_[redacted]` / `ppmt_[redacted]`（保留前缀，呼应既有 `_redact_permanent_action_tokens` 的写法）。选递归遍历而非逐字段白名单，
+    是因为 token 出现在 `action_tokens` 字典值、`owner_utterance_examples` 文案、`agent_tool_calls` 参数、proposal-followup /
+    expression-feedback / memory-sources-feedback 各操作各自的形状里，字段名单必然漏掉没预见到的形状。owner/unknown 直接拿到 impl
+    的原始返回值，逐字节不变。
+  - **调用点普查**（每处按 W 规则 2 grep 确认）：
+    - `__init__.py`：`_process_owner_review_reply_ingress` 内 `parse_owner_review_reply` 调用改传 `principal=self._turn_principal`
+      （防御纵深——ingress 已经先挡过一次非主人，这里是模块自己再挡一次）；`handle_tool_call` 的 `memory_os_review_surface` 工具入口同样
+      传 `principal=self._turn_principal`；`system_prompt_block()` 里每轮注入的 `build_session_review_block(self._store)` /
+      `build_session_feedback_block(self._store)` 补上 `principal=self._turn_principal`——这是本次審查主动扩大的一处：不这么做的话，
+      即便工具入口被拒，非主人仍能在系统提示词里读到明文 token（这条路径从不经过 `owner_review_surface_report` 的显式工具调用）。
+    - `session_approval.py`：`build_session_review_block` / `build_session_feedback_block` 各加 `principal: str = ""` 并透传给
+      `owner_review_surface_report`；同文件的 `has_pending_approval_actions` / `get_digest_summary` 只读取计数字段（不含 token），
+      且在项目里没有生产调用方（仅被自己模块与测试引用），未改动。
+    - `cli.py`：`reply` 与 `surface` 两个子命令分别传 `principal=PRINCIPAL_OWNER`——本机 CLI 按 2026-09-23 裁定视为主人（能上本机 shell
+      的人权限本就高于对话层 owner-review 门要挡的对象），与 `principal.LOCAL_OWNER_SOURCES` 的既有裁定一致。`memory permanent
+      approve/reject/defer` 子命令（`cli.py:1907`）直接调 `apply_owner_action`，同样是本机 CLI，未改动（同一条裁定覆盖）。
+  - **同类缺陷排查（W 规则 5）**：全仓 grep `apply_owner_action(` 的生产调用方只有四处——`cli.py` 两处（本机 CLI，已如上）、
+    `owner_actions.py` 内 `parse_owner_review_reply` 与 `_parse_permanent_promotion_reply` 各一处（均在本次新增的 principal 门之后，
+    非主人到不了这里）。`route_approved_proposal_followup_to_ops_gate` / `apply_approved_proposal_execution_decision` /
+    `auto_route_safe_proposal_followups_to_ops_gate` / `route_pending_approved_proposal_followups_to_ops_gate` /
+    `acknowledge_owner_review_delivery_receipt` / `deliver_owner_review_digest_once` 的生产调用方也只有 `cli.py`（本机）——没有发现
+    第二条能被非主人对话触达的 owner-action 入口。
+- **反事实**（cp 备份 → 破坏 → 跑新测试确认 FAIL → 用备份恢复 → 确认 PASS，未用 `git checkout --`）：
+  - 把 `parse_owner_review_reply` 的门改成 `if False and principal not in OWNER_ACTION_PRINCIPALS` → 新增的 4 个拒绝类测试全部
+    FAIL（`assert 'ok' == 'rejected'`）；恢复后全部 PASS。
+  - 把 `owner_review_surface_report` 的分支改成 `if True or principal in OWNER_ACTION_PRINCIPALS` → 新增的 2 个脱敏类测试全部 FAIL
+    （真实 token 而非 `oa_[redacted]`）；恢复后全部 PASS。
+- **测试**：`tests/plugins/memory/test_memory_os_owner_actions.py` 新增 9 个（`parse_owner_review_reply` 对 peer_agent /
+  other_human / system 三种非主人 principal 的参数化拒绝测试 + 落审计断言、未传 principal 时的默认拒绝测试、owner / unknown 两种
+  principal 的放行测试、review surface 对非主人隐藏 token 的测试、未传 principal 时默认脱敏的测试、owner 与 unknown 两种 principal
+  输出逐字节相同的测试）；`tests/plugins/memory/test_memory_os_principal.py` 新增 1 个（钉死 `OWNER_ACTION_PRINCIPALS` 精确等于
+  `{owner, unknown}`）。改造 `owner_review_surface_report` 的默认拒绝行为后，5 个测试文件里原本假设"直接调用即视为主人"的 36 处
+  既有调用点补上了 `principal="owner"`（`test_memory_os_owner_actions.py` 17+10、`test_memory_os_candidate_clusters.py` 1、
+  `test_memory_os_external_evidence_owner_action.py` 1、`test_memory_os_living_memory_delivery.py` 1、
+  `test_memory_os_permanent_promotion_digest.py` 2；`test_memory_os_owner_digest_agenda.py` 的 4 处调用只读 `review_item_id` /
+  `target_id` / `next_offsets` 等非 token 字段，脱敏后逐字节仍然一致，未改动）。全量 4172 passed / 13 skipped / 0 failed
+  （857s，本轮未复现已知的 Windows 并发 flake）；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0`——本次改动只调用
+  既有的 `append_audit`，未新增裸写入面 / static-hygiene / public-checkout `--strict` PASS / `git diff --check` 干净）。
+- **假设与权衡（供 owner 复核）**：`unknown` 允许执行 owner action 是刻意沿用 DO 的兼容态设计，不是本次新引入的口子——但值得
+  owner 再次确认：这意味着"平台未配置主人身份"时，任何解析为 `unknown` 的作者（包括未配置身份的群聊场景）理论上仍可批准/拒绝
+  candidate、撤销结晶记录等——与 DO 的现状完全一致，P1 只是把同一权衡从"仅在 ingress 生效"扩展为"在权威模块内也生效"，未扩大也未
+  收窄这个口子。
+- **遗留**：`apply_owner_action`（CLAUDE.md 称为 OwnerActionProcessor 的核心）本身仍不做 principal 自检——本次核实过它没有可被非主人
+  对话触达的生产调用路径，但如果将来有人新增一条不经过 `parse_owner_review_reply` 的调用方，仍需要重复本次的普查；`session_approval.py`
+  的 `build_session_review_block` / `build_session_feedback_block` 读取的 `surface.get("action_required", [])` /
+  `surface.get("feedback", [])` 顶层键与 `owner_review_surface_report` 实际返回的 `sections["action_required"]` 结构不匹配（既有代码，
+  与本次改动无关，未修）；规划 Phase 2 的 P2（事件带 author/principal）、P3（session_mirror 主体过滤）仍未做。
+- **主会话集成审查**：`unknown` 可执行 owner action 这一取舍之所以能接受，前提是审计能把它与已核实的主人区分开——`OWNER_ACTION_PRINCIPALS`
+  的注释也这么写，并指向 `parse_owner_review_reply`。核对发现**这个前提不成立**：模块内部只在拒绝时写审计，成功路径不记主体；provider
+  入口 `owner_review_reply_ingress` 只在拒绝分支带 `principal`，成功分支没有。于是未配置平台上以 `unknown` 执行的审批，在审计里与主人
+  的审批逐字节相同。修复：入口成功审计补上 `principal`，注释改指真实位置；反事实（未配置平台、主人轮解析为 `unknown`、审计必须带
+  `principal=unknown`）cp 备份法先败后过。另记两处局限（未修）：系统提示词若被 Hermes 按会话缓存，其脱敏只反映构建那一刻的发言者
+  （与 P1 之前相比不更差，但不是逐轮关闭）；`apply_owner_action` 本身仍无主体自检，当前仅本地 CLI 可达。
+- **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：非主人（群里其他
+  人类 / 同行 bot / cron 轮）尝试通过 `memory_os_review_reply` 执行 owner action 时得到 `status=rejected` 且 `write_audit` 里能看到
+  `owner_action_principal_rejected`；非主人视角的 `memory_os_review_surface` 与系统提示词里的审阅摘要不再出现可用的 `oa_` token。
 
 ---
 

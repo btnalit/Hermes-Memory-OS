@@ -413,6 +413,7 @@ def test_ppmt_owner_reply_uses_same_host_ingress_and_preserves_token_case(tmp_pa
         channel="telegram",
         apply=False,
         require_recorded_digest=True,
+        principal="owner",
     )
     assert dry_run["status"] == "ok"
     assert dry_run["dry_run"] is True
@@ -426,6 +427,7 @@ def test_ppmt_owner_reply_uses_same_host_ingress_and_preserves_token_case(tmp_pa
         channel="telegram",
         apply=True,
         require_recorded_digest=True,
+        principal="owner",
     )
     assert applied["status"] == "ok"
     assert applied["owner_action_result"]["status"] == "approved"

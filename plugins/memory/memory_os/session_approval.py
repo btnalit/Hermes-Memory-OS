@@ -33,16 +33,24 @@ def build_session_review_block(
     store: MemoryOSStore,
     *,
     profile: str = "default",
+    principal: str = "",
 ) -> str:
     """Build a review block for the main session system prompt.
 
     Returns a human-readable block that surfaces pending review items
     in the main session, not as raw CLI output.
+
+    ``principal`` is forwarded to ``owner_review_surface_report`` (P1,
+    2026-09-23 next-phase plan): this block is injected into every turn's
+    system prompt regardless of who is speaking, so a non-owner/non-unknown
+    principal must see the same review summary with its live ``oa_`` tokens
+    redacted, not just the tool-call surface.
     """
     try:
         surface = owner_review_surface_report(
             store,
             operation="overview",
+            principal=principal,
         )
     except Exception:
         return ""
@@ -87,16 +95,24 @@ def build_session_feedback_block(
     store: MemoryOSStore,
     *,
     profile: str = "default",
+    principal: str = "",
 ) -> str:
     """Build a feedback block for the main session.
 
     Surfaces expression feedback or memory sources feedback that can
     be processed directly in the session.
+
+    ``principal`` is forwarded to ``owner_review_surface_report`` (P1,
+    2026-09-23 next-phase plan) for the same reason as
+    ``build_session_review_block``: this block is injected every turn
+    regardless of speaker, so live ``oa_`` tokens must redact for a
+    non-owner/non-unknown principal.
     """
     try:
         surface = owner_review_surface_report(
             store,
             operation="memory_sources_feedback_context",
+            principal=principal,
         )
     except Exception:
         return ""

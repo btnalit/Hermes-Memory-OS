@@ -111,7 +111,7 @@ def test_legacy_expiry_tokens_are_not_a_direct_permanent_write_route(tmp_path):
     store = _store(tmp_path)
 
     result = owner_actions_module.parse_owner_review_reply(
-        store, "memory approve oa_confirm_cry_1", owner_id="owner", channel="cli", apply=True
+        store, "memory approve oa_confirm_cry_1", owner_id="owner", channel="cli", apply=True, principal="owner"
     )
 
     assert result["status"] in {"needs_clarification", "unsupported", "error"}

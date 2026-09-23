@@ -1053,6 +1053,41 @@ def test_edge_weight_feedback_wrapper_passes_through_every_producer_key(tmp_path
     assert not missing, f"edge_weight_feedback keys dropped by the cognitive_loop wrapper: {missing}"
 
 
+def test_structural_edge_proposer_wrapper_passes_through_every_producer_key(tmp_path):
+    """Same census for PR-G1's structural proposer, whose backfill counters
+    cross the same hand-listed wrapper (backfill_failed_count is the one a
+    missed entry would hide: it is the only signal of a pair left unlinked)."""
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    store = _init_store(tmp_path)
+    frontmatter = {
+        "schema_version": "memory-os.crystallized.v0", "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z", "approval_purpose": "test",
+        "approval_note": "test seed", "source_event_ids": [], "tags": [],
+        "sensitivity": "private", "hindsight_indexed": False, "bridge_state": "active",
+    }
+    for suffix, created_at in (("a", "2026-06-01T00:00:00Z"), ("b", "2026-06-02T00:00:00Z")):
+        store.append_crystallized_record(
+            f"cry_wrap_{suffix}.md",
+            {**frontmatter, "id": f"cry_wrap_{suffix}", "kind": "note", "created_at": created_at},
+            f"census body {suffix}",
+        )
+    # Without an index the producer returns its two-key error shape and the
+    # census would pass vacuously.
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    runner = CognitiveLoopRunner(store)
+    context: dict = {}
+    intentionally_dropped = {"begin_at"}
+
+    summary = runner._structural_edge_proposer(context)
+
+    producer_keys = set(context["structural_edge_proposer_result"])
+    assert context["structural_edge_proposer_result"]["status"] == "ok"
+    assert "backfill_failed_count" in producer_keys, "sanity: the real producer ran its backfill pass"
+    missing = sorted(producer_keys - intentionally_dropped - set(summary))
+    assert not missing, f"structural_edge_proposer keys dropped by the cognitive_loop wrapper: {missing}"
+
+
 def test_edge_provenance_wrapper_passes_through_write_failed_count(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).
