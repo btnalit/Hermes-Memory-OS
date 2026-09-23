@@ -12,7 +12,8 @@ from typing import Any
 from .audit import append_audit
 from .ids import new_event_id
 from .jsonl_io import build_error_record, read_json_state_result
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .principal import PRINCIPAL_SYSTEM
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 
 
@@ -259,6 +260,10 @@ class StateSourceMirror:
             body_policy="summary_only",
             hashes={"source_sha256": source["source_sha256"]},
             promotion_state="raw",
+            # P2: this mirrors hash/size/mtime metadata of allowlisted external
+            # state files -- mechanical, never a human author.
+            principal=PRINCIPAL_SYSTEM,
+            principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
         )
 
 

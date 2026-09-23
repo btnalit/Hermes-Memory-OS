@@ -218,7 +218,11 @@ from plugins.memory.memory_os.principal import (
     resolve_principal,
 )
 from plugins.memory.memory_os.roots import state_db_path
-from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from plugins.memory.memory_os.schema import (
+    EVENT_PRINCIPAL_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION,
+    EventEnvelope,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.structural_write_gate import append_governed_jsonl
 
@@ -721,6 +725,11 @@ def _build_provenance_event(
         body_policy="bounded_summary",
         hashes={},
         promotion_state="raw",
+        # P2: first-class mirror of the same value already carried in
+        # safe_ref["principal"] above (owner/unknown -- non-owner sessions
+        # never reach this function).
+        principal=str(principal or ""),
+        principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
     )
 
 

@@ -21,7 +21,8 @@ from .execution_gate import (
     start_execution_gate_envelope,
 )
 from .ids import new_event_id
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .principal import PRINCIPAL_SYSTEM
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 
 
@@ -110,6 +111,11 @@ def external_intake(
         body_policy="summary_only",
         hashes={},
         promotion_state="raw",
+        # P2: external evidence has no Hermes-side turn author -- it is a
+        # tainted, provider-driven ingest, never a human author (see the
+        # module's tainting/immunity-wall docstring above).
+        principal=PRINCIPAL_SYSTEM,
+        principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
     )
 
     store.append_event(event)

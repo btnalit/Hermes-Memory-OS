@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from .audit import append_audit
 from .ids import new_event_id
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .principal import PRINCIPAL_SYSTEM
+from .schema import EVENT_PRINCIPAL_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 
 
@@ -266,6 +267,10 @@ class ShadowJournalIngestion:
             body_policy="summary_only",
             hashes={"shadow_record_sha256": _record_hash(data)},
             promotion_state="raw",
+            # P2: shadow-journal producers are non-agent, high-frequency
+            # machine spools (module docstring) -- never a human author.
+            principal=PRINCIPAL_SYSTEM,
+            principal_schema_version=EVENT_PRINCIPAL_SCHEMA_VERSION,
         )
 
     def _load_state(self) -> dict[str, Any]:
