@@ -488,3 +488,53 @@ def test_session_scoped_recent_events_knob_registered():
     assert knob["default"] is True
     assert knob["kind"] == "lane_switch"
     assert knob["allowed"] == [True, False]
+
+
+# ── W2: llm_transport knob (hermes_call_llm default, legacy_wire rollback) ──
+
+
+def test_llm_transport_knob_registered():
+    """W2: llm_transport must be in OVERRIDABLE_KNOBS, string-enum lane_switch
+    (same shape as llm_contradiction_candidate_source)."""
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+    assert "llm_transport" in OVERRIDABLE_KNOBS
+    knob = OVERRIDABLE_KNOBS["llm_transport"]
+    assert knob["module"] == "low_clue_recall"
+    assert knob["default"] == "hermes_call_llm"
+    assert knob["kind"] == "lane_switch"
+    assert knob["allowed"] == ["hermes_call_llm", "legacy_wire"]
+    assert knob["meta"] is False
+
+
+def test_llm_transport_knob_round_trips_through_register_and_resolve(tmp_path):
+    """W2: an owner override on llm_transport must actually be resolvable --
+    not just present in the registry."""
+    from plugins.memory.memory_os.knob_overrides import register_override, resolve_knob
+
+    store_root = tmp_path / "system"
+    store_root.mkdir(parents=True, exist_ok=True)
+
+    assert resolve_knob(
+        "llm_transport", default="hermes_call_llm", _store_root=store_root,
+    ) == "hermes_call_llm"
+
+    register_override(
+        "llm_transport", "legacy_wire",
+        prior="hermes_call_llm", proposed_by="test", approved_via="test",
+        expires_at="", _store_root=store_root,
+    )
+    assert resolve_knob(
+        "llm_transport", default="hermes_call_llm", _store_root=store_root,
+    ) == "legacy_wire"
+
+
+def test_llm_transport_knob_rejects_unregistered_value():
+    """W2: only 'hermes_call_llm' / 'legacy_wire' are valid override values."""
+    from plugins.memory.memory_os.knob_overrides import register_override
+
+    with pytest.raises(ValueError, match="not in allowed"):
+        register_override(
+            "llm_transport", "openai_direct",
+            prior="hermes_call_llm", proposed_by="test", approved_via="test",
+            expires_at="",
+        )

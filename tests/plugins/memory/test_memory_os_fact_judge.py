@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -142,8 +143,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "user preference for concise answers"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "user preference for concise answers"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True
@@ -159,8 +160,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "technical decision recorded"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "technical decision recorded"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True
@@ -175,8 +176,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": false, "reason": "casual greeting, not durable"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": false, "reason": "casual greeting, not durable"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -191,8 +192,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": false, "reason": "transient emotional state"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": false, "reason": "transient emotional state"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -207,8 +208,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": false, "reason": "task instruction, not durable"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": false, "reason": "task instruction, not durable"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -223,8 +224,8 @@ class TestJudgeCandidate:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "factual knowledge about user"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "factual knowledge about user"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True
@@ -246,8 +247,8 @@ class TestJudgeFailSafe:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -263,8 +264,8 @@ class TestJudgeFailSafe:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="This is not JSON at all, just some text.",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="This is not JSON at all, just some text."),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -280,8 +281,8 @@ class TestJudgeFailSafe:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"something": "else"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"something": "else"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -297,7 +298,7 @@ class TestJudgeFailSafe:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
             side_effect=RuntimeError("network failure"),
         ):
             result = judge_candidate(candidate)
@@ -328,8 +329,8 @@ class TestJudgeFailSafe:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": false, "reason": "ambiguous statement, unsure"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": false, "reason": "ambiguous statement, unsure"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
@@ -658,8 +659,8 @@ class TestFactJudgeNonRegression:
         original_sensitivity = candidate.sensitivity
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             judge_candidate(candidate)
 
@@ -758,8 +759,8 @@ class TestRunFactJudgeLane:
         _write_candidate(store, c2)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             result = run_fact_judge_lane(store)
 
@@ -788,7 +789,7 @@ class TestRunFactJudgeLane:
         _write_durable_verdict(store, c1.candidate_id, durable_fact=True)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_call:
             result = run_fact_judge_lane(store)
 
@@ -819,8 +820,8 @@ class TestLeanCapturePrompt:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "colloquial decision about strategy"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "colloquial decision about strategy"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True, (
@@ -841,8 +842,8 @@ class TestLeanCapturePrompt:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "framework definition, reusable context"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "framework definition, reusable context"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True, (
@@ -859,8 +860,8 @@ class TestLeanCapturePrompt:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": false, "reason": "greeting and casual chat, not durable"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": false, "reason": "greeting and casual chat, not durable"}'),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False, (
@@ -888,10 +889,10 @@ class TestJudgeRetryAndHeuristic:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
             side_effect=[
-                "",   # first call: empty response
-                '{"durable_fact": true, "reason": "user preference for Rust"}',  # retry: valid
+                LlmCallResult(text="", failure_reason="llm_empty_content"),
+                LlmCallResult(text='{"durable_fact": true, "reason": "user preference for Rust"}'),
             ],
         ):
             result = judge_candidate(candidate)
@@ -914,8 +915,8 @@ class TestJudgeRetryAndHeuristic:
 
         # All calls return non-JSON — retries exhausted → heuristic fallback
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="Just some random text, not JSON at all.",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="Just some random text, not JSON at all."),
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is True, (
@@ -939,11 +940,11 @@ class TestJudgeRetryAndHeuristic:
         )
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
             side_effect=[
-                "",           # empty
-                "not json",   # non-JSON
-                "",           # empty again (3 total = 1 initial + 2 retries)
+                LlmCallResult(text="", failure_reason="llm_empty_content"),
+                LlmCallResult(text="not json"),
+                LlmCallResult(text="", failure_reason="llm_empty_content"),
             ],
         ):
             result = judge_candidate(candidate)
@@ -1117,8 +1118,8 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Remembered from event: I prefer Rust for backend services.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference for Rust"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference for Rust"}'),
         ):
             result = judge_candidate(candidate)
             assert result["failure_reason"] is None, (
@@ -1131,8 +1132,8 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Session data: the project deadline is next month.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
         ):
             result = judge_candidate(candidate)
             assert result["failure_reason"] == "llm_empty_content", (
@@ -1146,8 +1147,8 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Session data: the project deadline is next month.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="This is not JSON, just plain text output.",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="This is not JSON, just plain text output."),
         ):
             result = judge_candidate(candidate)
             assert result["failure_reason"] == "llm_parse_failed", (
@@ -1160,8 +1161,8 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Session data: the project deadline is next month.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"something": "else"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"something": "else"}'),
         ):
             result = judge_candidate(candidate)
             assert result["failure_reason"] == "llm_missing_key", (
@@ -1174,7 +1175,7 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Session data: the project deadline is next month.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
             side_effect=RuntimeError("network timeout"),
         ):
             result = judge_candidate(candidate)
@@ -1188,7 +1189,7 @@ class TestJudgeCandidateFailureTelemetry:
         candidate = _candidate(body="Remembered from event: I prefer Rust.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_call:
             result = judge_candidate(candidate, heuristic_only=True)
 
@@ -1228,8 +1229,8 @@ class TestRunFactJudgeLaneBoundedDrain:
             _write_candidate(store, c)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             result = run_fact_judge_lane(store)
 
@@ -1258,8 +1259,8 @@ class TestRunFactJudgeLaneBoundedDrain:
         _write_durable_verdict(store, c1.candidate_id, durable_fact=True)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             result = run_fact_judge_lane(store)
 
@@ -1286,8 +1287,8 @@ class TestRunFactJudgeLaneErrorCount:
             _write_candidate(store, c)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             result = run_fact_judge_lane(store)
 
@@ -1308,8 +1309,8 @@ class TestRunFactJudgeLaneErrorCount:
             _write_candidate(store, c)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
         ):
             result = run_fact_judge_lane(store)
 
@@ -1373,9 +1374,9 @@ class TestJudgeCandidateConfigOverride:
         candidate = _candidate(body="Remembered from event: I prefer Python.")
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_call:
-            mock_call.return_value = '{"durable_fact": true, "reason": "preference"}'
+            mock_call.return_value = LlmCallResult(text='{"durable_fact": true, "reason": "preference"}')
             judge_candidate(candidate, config={"max_tokens": 2048})
 
         call_config = mock_call.call_args[0][1]
@@ -1438,9 +1439,9 @@ class TestRunFactJudgeLaneSafeKnobParsing:
 
         from plugins.modules.governance.fact_judge import run_fact_judge_lane
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_llm:
-            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            mock_llm.return_value = LlmCallResult(text='{"durable_fact": true, "reason": "preference"}')
             result = run_fact_judge_lane(store)
 
         # LLM was called — heuristic_only was NOT enabled by the string "true"
@@ -1464,9 +1465,9 @@ class TestRunFactJudgeLaneSafeKnobParsing:
 
         from plugins.modules.governance.fact_judge import run_fact_judge_lane
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_llm:
-            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            mock_llm.return_value = LlmCallResult(text='{"durable_fact": true, "reason": "preference"}')
             result = run_fact_judge_lane(store)
 
         # "false" is a non-empty string → bool("false") == True, but
@@ -1488,9 +1489,9 @@ class TestRunFactJudgeLaneSafeKnobParsing:
 
         from plugins.modules.governance.fact_judge import run_fact_judge_lane
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_llm:
-            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            mock_llm.return_value = LlmCallResult(text='{"durable_fact": true, "reason": "preference"}')
             run_fact_judge_lane(store)
 
         assert mock_llm.called, (
@@ -1508,7 +1509,7 @@ class TestRunFactJudgeLaneSafeKnobParsing:
 
         from plugins.modules.governance.fact_judge import run_fact_judge_lane
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
         ) as mock_llm:
             run_fact_judge_lane(store)
 
@@ -1558,8 +1559,8 @@ class TestAppendVerdictFailureReasonPersistence:
         _write_candidate(store, candidate)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value="",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
         ):
             run_fact_judge_lane(store)
 
@@ -1579,7 +1580,7 @@ class TestAppendVerdictFailureReasonPersistence:
         _write_candidate(store, candidate)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
             side_effect=RuntimeError("connection refused"),
         ):
             run_fact_judge_lane(store)
@@ -1600,8 +1601,8 @@ class TestAppendVerdictFailureReasonPersistence:
         _write_candidate(store, candidate)
 
         with patch(
-            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
-            return_value='{"durable_fact": true, "reason": "preference"}',
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model_result",
+            return_value=LlmCallResult(text='{"durable_fact": true, "reason": "preference"}'),
         ):
             run_fact_judge_lane(store)
 

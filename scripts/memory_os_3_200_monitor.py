@@ -7783,6 +7783,12 @@ def cognitive_loop_step_evidence():
       # above, already generic across edge steps).
       "llm_call_count", "llm_call_ok_count", "llm_call_failure_count",
       "llm_call_failure_reasons",
+      # L1: typed transport diagnostics + the provider/model Hermes actually
+      # routed to (the -900k incident was invisible because nothing showed
+      # which model the call reached).
+      "llm_transport", "llm_transport_failures_by_reason",
+      "llm_transport_provider", "llm_transport_model",
+      "llm_usage_prompt_tokens", "llm_usage_completion_tokens",
       # edge_weight_feedback cursor-alignment visibility: a ledger-cursor
       # desync (future graph_layer_shadow.jsonl compaction) goes dark in
       # `outcome` whenever the run also reinforced/forgot edges that same

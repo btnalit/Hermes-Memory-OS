@@ -657,7 +657,7 @@ def run_contradiction_lane(
 
     # ── 2. LLM claim extraction + contradiction judgment ──────────────
     from .low_clue_recall import (
-        _call_hermes_runtime_model,
+        _call_hermes_runtime_model_result,
         _extract_json_object,
         _resolve_hermes_default_runtime,
     )
@@ -682,6 +682,14 @@ def run_contradiction_lane(
     if index is not None and not dry_run:
         edge_writer = index
 
+    # W2: typed LLM transport diagnostics, aggregated across this run's calls.
+    llm_transport_failures_by_reason: dict[str, int] = {}
+    llm_transport_provider = ""
+    llm_transport_model = ""
+    llm_transport_name = ""
+    llm_usage_prompt_tokens = 0
+    llm_usage_completion_tokens = 0
+
     for pair in candidate_pairs[:max_pairs]:
         rec_a = pair["a"]
         rec_b = pair["b"]
@@ -695,8 +703,10 @@ def run_contradiction_lane(
         )
 
         try:
-            response = _call_hermes_runtime_model(prompt, llm_config)
+            call_result = _call_hermes_runtime_model_result(prompt, llm_config)
         except Exception as _exc:
+            # Defensive only: _call_hermes_runtime_model_result is designed
+            # to never raise (every failure is a typed LlmCallResult).
             error_records.append(_build_error_record(
                 component="llm_contradiction_lane",
                 operation="hermes_runtime_call",
@@ -707,21 +717,40 @@ def run_contradiction_lane(
             ))
             continue
 
-        if not response or not response.strip():
-            # Backlog 14: "" is how _call_hermes_runtime_model reports most
-            # failures (see Completion Is Not Output). A bare continue makes a
-            # run where every call came back empty indistinguishable from
-            # "genuinely no contradictions", so the empty reply is recorded
-            # like the exception path above.
+        # ── W2 transport diagnostics ─────────────────────────────────────
+        if call_result.failure_reason:
+            llm_transport_failures_by_reason[call_result.failure_reason] = (
+                llm_transport_failures_by_reason.get(call_result.failure_reason, 0) + 1
+            )
+        if call_result.provider:
+            llm_transport_provider = call_result.provider
+        if call_result.model:
+            llm_transport_model = call_result.model
+        llm_transport_name = call_result.transport
+        if call_result.usage:
+            llm_usage_prompt_tokens += int(call_result.usage.get("prompt_tokens") or 0)
+            llm_usage_completion_tokens += int(call_result.usage.get("completion_tokens") or 0)
+        # ───────────────────────────────────────────────────────────────
+
+        if not call_result.text or not call_result.text.strip():
+            # Backlog 14: "" is how the transport reports most failures (see
+            # Completion Is Not Output). A bare continue makes a run where
+            # every call came back empty indistinguishable from "genuinely
+            # no contradictions", so the empty reply is recorded like the
+            # exception path above. Prefer the transport's own typed reason
+            # (e.g. llm_http_4xx, llm_timeout) when available; it is still
+            # always "the pair could not be judged" from this lane's view.
             error_records.append(_build_error_record(
                 component="llm_contradiction_lane",
                 operation="hermes_runtime_call",
-                error_code="llm_empty_content",
+                error_code=call_result.failure_reason or "llm_empty_content",
                 severity="warning",
                 recoverable=True,
                 details={"record_a": pair["a"]["id"], "record_b": pair["b"]["id"]},
             ))
             continue
+
+        response = call_result.text
 
         # Parse LLM response. Converge on the project's canonical parser
         # (_extract_json_object) for contract consistency with
@@ -830,4 +859,11 @@ def run_contradiction_lane(
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
         "error_records": error_records,
+        # W2: typed LLM transport diagnostics (ADD-only).
+        "llm_transport_failures_by_reason": llm_transport_failures_by_reason,
+        "llm_transport_provider": llm_transport_provider,
+        "llm_transport_model": llm_transport_model,
+        "llm_transport": llm_transport_name,
+        "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
+        "llm_usage_completion_tokens": llm_usage_completion_tokens,
     }

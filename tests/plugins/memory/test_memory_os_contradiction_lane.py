@@ -23,6 +23,7 @@ from plugins.memory.memory_os.llm_contradiction_lane import (
     _find_entity_candidates,
     run_contradiction_lane,
 )
+from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 
 
 # ── Test doubles ──────────────────────────────────────────────────────────────
@@ -376,8 +377,8 @@ def test_nested_json_extraction_from_markdown_fenced_llm_output(tmp_path: Path) 
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value=fenced_reply,
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text=fenced_reply),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(
@@ -1022,8 +1023,8 @@ def test_empty_llm_reply_is_recorded_not_silently_skipped(tmp_path: Path) -> Non
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value="",
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
@@ -1087,8 +1088,8 @@ def test_unbalanced_brace_in_claim_value_is_parsed_via_extract_json_object(
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value=malformed_reply,
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text=malformed_reply),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(
@@ -1139,8 +1140,8 @@ def test_garbage_llm_reply_is_recorded_not_silently_skipped(tmp_path: Path) -> N
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value="Sorry, I cannot help with that request.",
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="Sorry, I cannot help with that request."),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
@@ -1194,8 +1195,8 @@ def test_non_dict_json_reply_is_recorded_not_a_crash(tmp_path: Path) -> None:
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value="[1, 2, 3]",
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="[1, 2, 3]"),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
@@ -1275,8 +1276,8 @@ def test_valid_json_with_trailing_prose_brace_is_dropped_not_parsed(tmp_path: Pa
         "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
         return_value={"ok": True},
     ), patch(
-        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
-        return_value=reply_with_trailing_prose,
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text=reply_with_trailing_prose),
     ):
         mock_judge.return_value = {"available": True}
         result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)

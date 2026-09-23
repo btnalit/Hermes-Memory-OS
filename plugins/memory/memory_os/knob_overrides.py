@@ -477,6 +477,23 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # ── W2: LLM call surface migration ──────────────────────────────────
+    # Selects which transport low_clue_recall._call_hermes_runtime_model_result
+    # uses. Default "hermes_call_llm" borrows Hermes' own
+    # agent.auxiliary_client.call_llm seam (provider resolved explicitly,
+    # model normalization/alias-stripping left to Hermes -- owner ruling
+    # 2026-09-10: Memory-OS must not special-case provider model aliases).
+    # "legacy_wire" is the pre-W2 hand-rolled chat_completions/codex_responses/
+    # anthropic_messages clients, kept reachable only for rollback.
+    "llm_transport": {
+        "module": "low_clue_recall",
+        "default": "hermes_call_llm",
+        "kind": "lane_switch",
+        "allowed": ["hermes_call_llm", "legacy_wire"],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────

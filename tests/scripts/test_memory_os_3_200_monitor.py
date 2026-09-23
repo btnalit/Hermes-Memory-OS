@@ -9019,6 +9019,7 @@ def test_llm_call_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypa
     from plugins.memory.memory_os.roots import MemoryOSRoots
     from plugins.memory.memory_os.store import MemoryOSStore
     from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 
     roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
     store = MemoryOSStore(roots)
@@ -9056,7 +9057,10 @@ def test_llm_call_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypa
     )
     # Every reply is empty -> every _call_llm outcome is "empty_llm_response"
     # -> real run_llm_proposer marks the run degraded/llm_degraded.
-    monkeypatch.setattr(llm_edge_proposer, "_call_hermes_runtime_model", lambda prompt, config: "")
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(text="", failure_reason="llm_empty_content"),
+    )
 
     runner = CognitiveLoopRunner(store)
     wrapper_summary = runner._llm_edge_proposer({})
@@ -9086,6 +9090,13 @@ def test_llm_call_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypa
     assert surfaced["llm_call_ok_count"] == 0
     assert surfaced["llm_call_failure_count"] == 1
     assert surfaced["llm_call_failure_reasons"] == {"empty_llm_response": 1}
+    # Census: every key the real wrapper publishes must reach the monitor.
+    # L1's six transport keys were carried by the wrapper yet dropped by
+    # _edge_fields, and the per-key asserts above could not notice.
+    not_carried = {"schema_version"}
+    missing = sorted(set(wrapper_summary) - not_carried - set(surfaced))
+    assert not missing, f"llm_edge_proposer keys dropped by the monitor's _edge_fields: {missing}"
+    assert surfaced["llm_transport_failures_by_reason"] == {"llm_empty_content": 1}
 
     # And it renders as ungraded INFO, not a new WARN/FAIL, via the real
     # classify_snapshot path.

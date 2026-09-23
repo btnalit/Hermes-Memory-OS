@@ -14,6 +14,7 @@ from pathlib import Path
 from plugins.memory.memory_os.crystallized import read_candidate_queue
 from plugins.memory.memory_os.jsonl_io import read_jsonl
 from plugins.memory.memory_os.knob_overrides import register_override
+from plugins.memory.memory_os.low_clue_recall import LlmCallResult
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.cognition.session_fact_extraction import (
@@ -97,16 +98,20 @@ def _write_session_file(
     return path
 
 
-def _fake_llm_always_durable(prompt: str, config: dict) -> str:
-    return json.dumps({"has_durable_fact": True, "fact": "extracted durable fact text", "reason": "test"})
+def _fake_llm_always_durable(prompt: str, config: dict) -> LlmCallResult:
+    return LlmCallResult(
+        text=json.dumps({"has_durable_fact": True, "fact": "extracted durable fact text", "reason": "test"})
+    )
 
 
-def _fake_llm_no_fact(prompt: str, config: dict) -> str:
-    return json.dumps({"has_durable_fact": False, "fact": "", "reason": "no durable content"})
+def _fake_llm_no_fact(prompt: str, config: dict) -> LlmCallResult:
+    return LlmCallResult(
+        text=json.dumps({"has_durable_fact": False, "fact": "", "reason": "no durable content"})
+    )
 
 
-def _fake_llm_empty(prompt: str, config: dict) -> str:
-    return ""
+def _fake_llm_empty(prompt: str, config: dict) -> LlmCallResult:
+    return LlmCallResult(text="", failure_reason="llm_empty_content")
 
 
 _LONG_MARKER_TEXT = "prefer " + ("y" * (MESSAGE_ELIGIBILITY_THRESHOLD_CHARS + 20))
@@ -139,7 +144,7 @@ def test_long_message_over_threshold_is_extracted_short_message_is_not(tmp_path,
         ],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -167,7 +172,7 @@ def test_session_with_only_short_messages_yields_no_facts(tmp_path, monkeypatch)
         messages=[{"role": "user", "content": _SHORT_TEXT}, {"role": "assistant", "content": "好的"}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -197,7 +202,7 @@ def test_llm_empty_content_is_typed_failure_not_silent_success(tmp_path, monkeyp
         messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
 
@@ -231,7 +236,7 @@ def test_llm_empty_content_with_no_marker_produces_no_fact_but_is_still_counted(
         messages=[{"role": "user", "content": _LONG_NO_MARKER_TEXT}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
 
@@ -263,7 +268,7 @@ def test_fingerprint_ledger_prevents_reprocessing_next_run(tmp_path, monkeypatch
         messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -292,7 +297,7 @@ def test_appending_to_a_processed_session_makes_it_eligible_again(tmp_path, monk
     _add_gate_envelope(store, envelope_2)
 
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -355,7 +360,7 @@ def test_selection_is_newest_first_not_lexicographic_head_of_queue(tmp_path, mon
         mtime=now,
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -385,7 +390,7 @@ def test_max_sessions_per_tick_bounds_work(tmp_path, monkeypatch):
             mtime=now - i,
         )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -437,7 +442,7 @@ def test_run_report_and_fingerprints_are_persisted_artifacts(tmp_path, monkeypat
         messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -458,7 +463,7 @@ def test_run_report_and_fingerprints_are_persisted_artifacts(tmp_path, monkeypat
 
 def test_extract_fact_from_message_defers_without_marker(monkeypatch):
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
     result = extract_fact_from_message(_LONG_NO_MARKER_TEXT)
@@ -478,7 +483,7 @@ def test_extract_fact_from_message_defers_rather_than_manufacturing_on_marker(mo
     manufacturing here is a governance problem, not just noise.
     """
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
     result = extract_fact_from_message(_LONG_MARKER_TEXT)
@@ -493,10 +498,10 @@ def test_extract_fact_from_message_llm_missing_key_retries_then_defers(monkeypat
 
     def _malformed(prompt, config):
         calls["count"] += 1
-        return json.dumps({"fact": "no boolean key here"})
+        return LlmCallResult(text=json.dumps({"fact": "no boolean key here"}))
 
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _malformed,
     )
     result = extract_fact_from_message(_LONG_MARKER_TEXT)
@@ -507,7 +512,7 @@ def test_extract_fact_from_message_llm_missing_key_retries_then_defers(monkeypat
 
 def test_extract_fact_from_message_clean_success_has_no_failure_reason(monkeypatch):
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
     result = extract_fact_from_message(_LONG_NO_MARKER_TEXT)
@@ -524,7 +529,7 @@ def test_extract_fact_from_message_empty_input_is_not_a_model_failure(monkeypatc
         raise AssertionError("LLM must not be called for empty input")
 
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _should_not_be_called,
     )
     result = extract_fact_from_message("   ")
@@ -559,7 +564,7 @@ def test_appended_session_does_not_duplicate_earlier_facts(tmp_path, monkeypatch
     envelope_id = "xgate_test_sfe_append_stable"
     store = _store_with_gate(tmp_path, envelope_id)
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 
@@ -623,7 +628,7 @@ def test_skipped_already_processed_count_survives_a_stat_failure(tmp_path, monke
     envelope_id = "xgate_test_sfe_stat_fail"
     store = _store_with_gate(tmp_path, envelope_id)
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_no_fact,
     )
 
@@ -742,7 +747,7 @@ def test_llm_failure_leaves_session_retryable_and_next_tick_recovers_the_fact(tm
 
     # Tick 1: model is down.
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
     first = run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
@@ -759,7 +764,7 @@ def test_llm_failure_leaves_session_retryable_and_next_tick_recovers_the_fact(tm
 
     # Tick 2: model recovers, same unchanged file.
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
     _add_gate_envelope(store, envelope_id + "_2")
@@ -792,7 +797,7 @@ def test_deferral_is_bounded_and_abandonment_is_recorded(tmp_path, monkeypatch):
         mtime=1_700_002_000.0,
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_empty,
     )
 
@@ -859,7 +864,7 @@ def test_new_ledgers_are_retention_registered_and_timestamp_readable(tmp_path, m
         messages=[{"role": "user", "content": _LONG_NO_MARKER_TEXT}],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
     run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
@@ -914,7 +919,7 @@ def test_candidates_cite_a_real_provenance_event(tmp_path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model",
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
         _fake_llm_always_durable,
     )
 

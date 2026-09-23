@@ -60,9 +60,9 @@ bias):
     permanently starved by whichever file sorts first lexicographically.
 
 LLM integration follows ``plugins/modules/governance/fact_judge.py``: the same
-private cross-module import of ``_call_hermes_runtime_model`` /
-``_extract_json_object`` from ``low_clue_recall.py``, and the same typed retry
-failure reasons (``llm_exception`` / ``llm_empty_content`` /
+private cross-module import of ``_call_hermes_runtime_model_result`` /
+``_extract_json_object`` from ``low_clue_recall.py`` (W2), and the same typed
+retry failure reasons (``llm_exception`` / ``llm_empty_content`` /
 ``llm_parse_failed`` / ``llm_missing_key``).
 
 It deliberately DIVERGES from fact_judge on the fallback, and the reason is
@@ -99,10 +99,38 @@ from typing import Any
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.ids import new_event_id
 from plugins.memory.memory_os.jsonl_io import build_error_record, read_jsonl
-from plugins.memory.memory_os.low_clue_recall import _call_hermes_runtime_model, _extract_json_object
+from plugins.memory.memory_os.low_clue_recall import (
+    LlmCallResult,
+    _call_hermes_runtime_model_result,
+    _extract_json_object,
+)
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.structural_write_gate import append_governed_jsonl
+
+
+def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
+    """Typed transport diagnostics to fold onto an extraction result (W2).
+
+    ``llm_transport_failure_reason`` is the RAW closed-set reason from
+    :class:`LlmCallResult` -- distinct from this module's own
+    ``failure_reason`` vocabulary (llm_exception/llm_empty_content/
+    llm_parse_failed/llm_missing_key), which additionally covers post-
+    transport parsing/schema failures the transport layer knows nothing
+    about. Kept in a separate field so the two vocabularies never collide.
+    """
+    if call_result is None:
+        return {}
+    diagnostics: dict[str, Any] = {
+        "llm_transport_failure_reason": call_result.failure_reason,
+        "llm_provider": call_result.provider,
+        "llm_model": call_result.model,
+        "llm_transport": call_result.transport,
+    }
+    if call_result.usage:
+        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
+        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
+    return diagnostics
 
 
 def session_fact_extraction_manifest() -> dict[str, Any]:
@@ -410,21 +438,35 @@ def extract_fact_from_message(
     )
 
     last_failure: str | None = None
+    last_call_result: LlmCallResult | None = None
     for attempt in range(1 + MAX_EXTRACT_RETRIES):
         try:
-            response_text = _call_hermes_runtime_model(prompt, effective)
+            call_result = _call_hermes_runtime_model_result(prompt, effective)
         except Exception:
+            # Defensive only: _call_hermes_runtime_model_result is designed to
+            # never raise (every failure is a typed LlmCallResult).
+            last_failure = "llm_exception"
+            if attempt < MAX_EXTRACT_RETRIES:
+                continue
+            break
+        last_call_result = call_result
+
+        if call_result.failure_reason == "llm_empty_content":
+            last_failure = "llm_empty_content"
+            if attempt < MAX_EXTRACT_RETRIES:
+                continue
+            break
+        if call_result.failure_reason:
+            # Any other typed transport failure -- collapse to this module's
+            # pre-existing "llm_exception" bucket (matching the pre-W2
+            # behavior where every non-empty-response failure was a bare "").
+            # The raw, finer-grained reason survives in _call_diagnostics.
             last_failure = "llm_exception"
             if attempt < MAX_EXTRACT_RETRIES:
                 continue
             break
 
-        if not response_text:
-            last_failure = "llm_empty_content"
-            if attempt < MAX_EXTRACT_RETRIES:
-                continue
-            break
-
+        response_text = call_result.text
         try:
             parsed = _extract_json_object(response_text)
         except Exception:
@@ -452,6 +494,7 @@ def extract_fact_from_message(
                 "fact": "",
                 "reason": str(parsed.get("reason") or "")[:200],
                 "failure_reason": None,
+                **_call_diagnostics(call_result),
             }
 
         fact = parsed.get("fact")
@@ -466,6 +509,7 @@ def extract_fact_from_message(
             "fact": _clip(fact.strip(), 500),
             "reason": str(parsed.get("reason") or "")[:200],
             "failure_reason": None,
+            **_call_diagnostics(call_result),
         }
 
     # All retries exhausted. Defer -- do not manufacture a fact.
@@ -474,6 +518,7 @@ def extract_fact_from_message(
         "fact": "",
         "reason": "llm_unavailable_extraction_deferred",
         "failure_reason": last_failure,
+        **_call_diagnostics(last_call_result),
     }
 
 
@@ -676,6 +721,14 @@ def run_session_fact_extraction_lane(
             "llm_calls": 0,
             "llm_failures_by_reason": {},
             "fallback_used_count": 0,
+            # W2: typed LLM transport diagnostics (ADD-only; llm_failures_by_reason
+            # above keeps its pre-W2 meaning/vocabulary unchanged).
+            "llm_transport_failures_by_reason": {},
+            "llm_provider": "",
+            "llm_model": "",
+            "llm_transport": "",
+            "llm_usage_prompt_tokens": 0,
+            "llm_usage_completion_tokens": 0,
             # Deferral visibility: without these, an LLM outage and a genuinely
             # fact-free batch both read as "0 facts extracted".
             "sessions_deferred_llm_failure": 0,
@@ -754,6 +807,13 @@ def run_session_fact_extraction_lane(
     llm_calls = 0
     llm_failures_by_reason: dict[str, int] = {}
     fallback_used_count = 0
+    # W2: typed LLM transport diagnostics, aggregated across this tick's calls.
+    llm_transport_failures_by_reason: dict[str, int] = {}
+    llm_provider = ""
+    llm_model = ""
+    llm_transport = ""
+    llm_usage_prompt_tokens = 0
+    llm_usage_completion_tokens = 0
     sessions_deferred_llm_failure = 0
     sessions_abandoned_after_max_attempts = 0
     # (fingerprint, status, attempt) -- status decides whether the session is
@@ -853,6 +913,22 @@ def run_session_fact_extraction_lane(
                 # fingerprinted as done -- otherwise the facts are lost for good.
                 session_llm_failed = True
 
+            # ── W2 transport diagnostics ────────────────────────────────
+            transport_reason = str(result.get("llm_transport_failure_reason") or "")
+            if transport_reason:
+                llm_transport_failures_by_reason[transport_reason] = (
+                    llm_transport_failures_by_reason.get(transport_reason, 0) + 1
+                )
+            if result.get("llm_provider"):
+                llm_provider = str(result["llm_provider"])
+            if result.get("llm_model"):
+                llm_model = str(result["llm_model"])
+            if result.get("llm_transport"):
+                llm_transport = str(result["llm_transport"])
+            llm_usage_prompt_tokens += int(result.get("llm_usage_prompt_tokens") or 0)
+            llm_usage_completion_tokens += int(result.get("llm_usage_completion_tokens") or 0)
+            # ─────────────────────────────────────────────────────────────
+
             if not result.get("has_durable_fact"):
                 continue
 
@@ -938,6 +1014,12 @@ def run_session_fact_extraction_lane(
         "llm_calls": llm_calls,
         "llm_failures_by_reason": llm_failures_by_reason,
         "fallback_used_count": fallback_used_count,
+        "llm_transport_failures_by_reason": llm_transport_failures_by_reason,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_transport": llm_transport,
+        "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
+        "llm_usage_completion_tokens": llm_usage_completion_tokens,
         "sessions_deferred_llm_failure": sessions_deferred_llm_failure,
         "sessions_abandoned_after_max_attempts": sessions_abandoned_after_max_attempts,
         "skipped": False,

@@ -1057,6 +1057,16 @@ class CognitiveLoopRunner:
             "llm_call_failure_reasons": result.get("llm_call_failure_reasons", {}),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
+            # W2: typed LLM transport diagnostics -- must survive this
+            # whitelist too, or they silently vanish before the monitor's
+            # own _edge_fields whitelist ever sees them (same shape as the
+            # D2b hazard noted above).
+            "llm_transport_failures_by_reason": result.get("llm_transport_failures_by_reason", {}),
+            "llm_transport_provider": result.get("llm_transport_provider", ""),
+            "llm_transport_model": result.get("llm_transport_model", ""),
+            "llm_transport": result.get("llm_transport", ""),
+            "llm_usage_prompt_tokens": result.get("llm_usage_prompt_tokens", 0),
+            "llm_usage_completion_tokens": result.get("llm_usage_completion_tokens", 0),
         }
 
     def _vector_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:

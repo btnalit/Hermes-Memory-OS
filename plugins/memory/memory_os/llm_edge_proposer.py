@@ -1,6 +1,6 @@
 """LLM-class edge proposer — uses the Hermes runtime LLM for semantic analysis.
 
-Phase 2.3 — calls the configured LLM (via low_clue_recall._call_hermes_runtime_model)
+Phase 2.3 — calls the configured LLM (via low_clue_recall._call_hermes_runtime_model_result)
 to determine relationships between crystallized record pairs.
 
 R1 (owner 决策 2026-08-06): all relation types are auto-active — the graph
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .audit import append_audit
-from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
+from .low_clue_recall import LlmCallResult, _call_hermes_runtime_model_result, _resolve_hermes_default_runtime
 
 
 # Default LLM judge config (mirrors low_clue_recall.DEFAULT_CONFIG["llm_judge"]).
@@ -78,6 +78,29 @@ If "none", still respond with valid JSON showing relation_type "none"."""
 # ── LLM call ───────────────────────────────────────────────────────────────
 
 
+def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
+    """Typed transport diagnostics to fold onto a ``_call_llm`` result (W2).
+
+    ``llm_transport_failure_reason`` is the RAW closed-set reason from
+    :class:`LlmCallResult` -- distinct from this module's own ``outcome``
+    vocabulary (llm_call_exception/empty_llm_response/parse_failed/
+    not_a_dict/invalid_confidence), which additionally covers post-transport
+    parsing/schema failures the transport layer knows nothing about.
+    """
+    if call_result is None:
+        return {}
+    diagnostics: dict[str, Any] = {
+        "llm_transport_failure_reason": call_result.failure_reason,
+        "llm_provider": call_result.provider,
+        "llm_model": call_result.model,
+        "llm_transport": call_result.transport,
+    }
+    if call_result.usage:
+        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
+        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
+    return diagnostics
+
+
 def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, Any]:
     """Call the configured Hermes LLM to determine relationship between two records.
 
@@ -106,18 +129,32 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
     )
 
     try:
-        response = _call_hermes_runtime_model(prompt, _DEFAULT_LLM_CONFIG)
+        call_result = _call_hermes_runtime_model_result(prompt, _DEFAULT_LLM_CONFIG)
     except Exception:
+        # Defensive only: _call_hermes_runtime_model_result is designed to
+        # never raise (every failure is a typed LlmCallResult).
         return {
             "relation_type": "none", "confidence": 0.0,
             "reasoning": "llm_call_exception", "outcome": "llm_call_exception",
         }
 
-    if not response or not response.strip():
+    if call_result.failure_reason == "llm_empty_content" or not call_result.text.strip():
         return {
             "relation_type": "none", "confidence": 0.0,
             "reasoning": "empty_llm_response", "outcome": "empty_llm_response",
+            **_call_diagnostics(call_result),
         }
+    if call_result.failure_reason:
+        # Any other typed transport failure -- collapse to this module's
+        # pre-existing "llm_call_exception" bucket (matching the pre-W2
+        # behavior where every non-empty-response failure was a bare "").
+        return {
+            "relation_type": "none", "confidence": 0.0,
+            "reasoning": "llm_call_exception", "outcome": "llm_call_exception",
+            **_call_diagnostics(call_result),
+        }
+
+    response = call_result.text
 
     # Parse JSON from response (handle wrapping markdown code fences)
     json_str = response.strip()
@@ -132,12 +169,14 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
         return {
             "relation_type": "none", "confidence": 0.0,
             "reasoning": "parse_failed", "outcome": "parse_failed",
+            **_call_diagnostics(call_result),
         }
 
     if not isinstance(parsed, dict):
         return {
             "relation_type": "none", "confidence": 0.0,
             "reasoning": "not_a_dict", "outcome": "not_a_dict",
+            **_call_diagnostics(call_result),
         }
 
     rtype = str(parsed.get("relation_type", "none")).strip().lower()
@@ -156,6 +195,7 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
         return {
             "relation_type": "none", "confidence": 0.0,
             "reasoning": "invalid_confidence", "outcome": "invalid_confidence",
+            **_call_diagnostics(call_result),
         }
     reasoning = str(parsed.get("reasoning", ""))
 
@@ -164,6 +204,7 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
         "confidence": min(max(confidence, 0.0), 1.0),
         "reasoning": reasoning,
         "outcome": "ok",
+        **_call_diagnostics(call_result),
     }
 
 
@@ -321,6 +362,13 @@ def run_llm_proposer(
     llm_call_count = 0
     llm_ok_count = 0
     llm_failure_reasons: dict[str, int] = {}
+    # W2: typed LLM transport diagnostics, aggregated across this run's calls.
+    llm_transport_failures_by_reason: dict[str, int] = {}
+    llm_transport_provider = ""
+    llm_transport_model = ""
+    llm_transport_name = ""
+    llm_usage_prompt_tokens = 0
+    llm_usage_completion_tokens = 0
 
     for i in range(len(records)):
         if pairs >= _MAX_PAIRS:
@@ -348,6 +396,21 @@ def run_llm_proposer(
                 llm_ok_count += 1
             else:
                 llm_failure_reasons[call_outcome] = llm_failure_reasons.get(call_outcome, 0) + 1
+            # ── W2 transport diagnostics ─────────────────────────────────
+            transport_reason = str(llm_result.get("llm_transport_failure_reason") or "")
+            if transport_reason:
+                llm_transport_failures_by_reason[transport_reason] = (
+                    llm_transport_failures_by_reason.get(transport_reason, 0) + 1
+                )
+            if llm_result.get("llm_provider"):
+                llm_transport_provider = str(llm_result["llm_provider"])
+            if llm_result.get("llm_model"):
+                llm_transport_model = str(llm_result["llm_model"])
+            if llm_result.get("llm_transport"):
+                llm_transport_name = str(llm_result["llm_transport"])
+            llm_usage_prompt_tokens += int(llm_result.get("llm_usage_prompt_tokens") or 0)
+            llm_usage_completion_tokens += int(llm_result.get("llm_usage_completion_tokens") or 0)
+            # ─────────────────────────────────────────────────────────────
             rtype = llm_result.get("relation_type", "none")
             confidence = llm_result.get("confidence", 0.0)
 
@@ -422,6 +485,14 @@ def run_llm_proposer(
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
         "llm_model": _resolve_runtime().get("model", "unknown"),
+        # W2: typed LLM transport diagnostics (ADD-only; llm_call_failure_reasons
+        # above keeps its pre-W2 "outcome" vocabulary/meaning unchanged).
+        "llm_transport_failures_by_reason": llm_transport_failures_by_reason,
+        "llm_transport_provider": llm_transport_provider,
+        "llm_transport_model": llm_transport_model,
+        "llm_transport": llm_transport_name,
+        "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
+        "llm_usage_completion_tokens": llm_usage_completion_tokens,
     }
 
     if audit_path:

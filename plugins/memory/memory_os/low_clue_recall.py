@@ -12,7 +12,10 @@ import hashlib
 import os
 import re
 import sys
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,53 @@ from .store import MemoryOSStore
 
 
 SCHEMA_VERSION = "memory-os.low_clue_recall.v0"
+
+# ── LLM transport (W2: migrate off hand-rolled wire clients) ────────────
+# Two transports for the same call surface:
+#   - "hermes_call_llm" (default): Hermes' own agent.auxiliary_client.call_llm,
+#     which resolves/normalizes provider+model itself (owner ruling
+#     2026-09-10: Memory-OS must not strip provider-private model aliases
+#     such as Hermes' "-900k" context-variant suffix).
+#   - "legacy_wire": the pre-W2 hand-rolled chat_completions/codex_responses/
+#     anthropic_messages clients below, kept reachable only via the
+#     ``llm_transport`` knob for rollback.
+LLM_TRANSPORT_HERMES_CALL_LLM = "hermes_call_llm"
+LLM_TRANSPORT_LEGACY_WIRE = "legacy_wire"
+
+# Closed set for LlmCallResult.failure_reason. "" means success.
+LLM_CALL_FAILURE_REASONS = frozenset(
+    {
+        "",
+        "llm_transport_unavailable",
+        "llm_http_4xx",
+        "llm_timeout",
+        "llm_empty_content",
+        "llm_exception",
+        "llm_missing_key",
+    }
+)
+
+
+@dataclass(frozen=True)
+class LlmCallResult:
+    """Typed result of one LLM call through the Hermes runtime model seam.
+
+    ``failure_reason`` is drawn from ``LLM_CALL_FAILURE_REASONS`` -- "" on
+    success. Never raises; every failure path (transport unavailable, HTTP
+    4xx/429, timeout, empty content, other exception, missing credential) is
+    represented here instead of collapsing to a bare "" the way the legacy
+    ``_call_hermes_runtime_model`` string return does (see CLAUDE.md
+    "Completion Is Not Output").
+    """
+
+    text: str = ""
+    failure_reason: str = ""
+    detail: str = ""
+    provider: str | None = None
+    model: str | None = None
+    latency_ms: float | None = None
+    usage: dict[str, int] | None = None
+    transport: str = LLM_TRANSPORT_HERMES_CALL_LLM
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -36,6 +86,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tokens": 1024,
         "max_candidates": 4,
         "on_error": "deterministic_fallback",
+        "llm_transport": LLM_TRANSPORT_HERMES_CALL_LLM,
     },
 }
 
@@ -251,6 +302,8 @@ def normalize_low_clue_recall_config(config: dict[str, Any] | None) -> dict[str,
     judge["enabled"] = bool(judge.get("enabled"))
     judge["mode"] = str(judge.get("mode") or "none")
     judge["provider"] = str(judge.get("provider") or "hermes_default")
+    if judge.get("llm_transport") not in (LLM_TRANSPORT_HERMES_CALL_LLM, LLM_TRANSPORT_LEGACY_WIRE):
+        judge["llm_transport"] = LLM_TRANSPORT_HERMES_CALL_LLM
     try:
         judge["timeout_ms"] = max(int(judge.get("timeout_ms") or 8000), 100)
     except (TypeError, ValueError):
@@ -1073,13 +1126,29 @@ def _run_hermes_default_judge(payload: dict[str, Any], config: dict[str, Any]) -
         "Return only JSON with keys: status, selected_candidate_id, confidence, reason_codes.\n"
         f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
     )
-    response_text = _call_hermes_runtime_model(prompt, config)
-    if not response_text:
-        return {"status": "skipped", "reason_codes": ["judge_empty_response"], **runtime_fields}
-    parsed = _extract_json_object(response_text)
+    call_result = _call_hermes_runtime_model_result(prompt, config)
+    if not call_result.text:
+        return {
+            "status": "skipped",
+            "reason_codes": ["judge_empty_response"],
+            "llm_transport_failure_reason": call_result.failure_reason,
+            "llm_transport": call_result.transport,
+            **runtime_fields,
+        }
+    parsed = _extract_json_object(call_result.text)
     if not isinstance(parsed, dict):
-        return {"status": "error", "reason_codes": ["judge_non_json"], **runtime_fields}
+        return {
+            "status": "error",
+            "reason_codes": ["judge_non_json"],
+            "llm_transport": call_result.transport,
+            **runtime_fields,
+        }
     parsed.update({key: value for key, value in runtime_fields.items() if value})
+    parsed.setdefault("llm_provider", call_result.provider)
+    parsed.setdefault("llm_model", call_result.model)
+    parsed.setdefault("llm_transport", call_result.transport)
+    if call_result.usage:
+        parsed.setdefault("llm_usage", call_result.usage)
     return parsed
 
 
@@ -1099,26 +1168,374 @@ def _judge_runtime_fields(availability: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_hermes_runtime_model(prompt: str, config: dict[str, Any]) -> str:
-    try:
-        resolved = _resolve_hermes_default_runtime(config)
-        if not resolved.get("ok"):
-            return ""
-        runtime = dict(resolved.get("runtime") or {})
-        api_mode = str(runtime.get("api_mode") or "")
-        model = str(runtime.get("model") or resolved.get("model") or "")
-        if not model:
-            return ""
-        timeout = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
+    """Thin compatibility wrapper over :func:`_call_hermes_runtime_model_result`.
+
+    Kept for callers that only need the text (e.g. ad-hoc scripts/tests
+    referencing the original seam). Every in-repo governance lane should call
+    the result API directly instead, so a typed failure is never collapsed
+    back to an indistinguishable "".
+    """
+    return _call_hermes_runtime_model_result(prompt, config).text
+
+
+def _call_hermes_runtime_model_result(prompt: str, config: dict[str, Any]) -> LlmCallResult:
+    """Call the configured LLM and return a typed :class:`LlmCallResult`.
+
+    Dispatches on the ``llm_transport`` config key (registered as the
+    ``llm_transport`` knob in knob_overrides.OVERRIDABLE_KNOBS):
+      - "hermes_call_llm" (default): borrows Hermes' own
+        ``agent.auxiliary_client.call_llm`` seam, which resolves/normalizes
+        the provider+model itself. Never raises.
+      - "legacy_wire": the pre-W2 hand-rolled per-api-mode HTTP clients
+        below, reachable only for rollback.
+    """
+    transport = _resolve_llm_transport(config)
+    if transport == LLM_TRANSPORT_LEGACY_WIRE:
+        return _call_hermes_runtime_model_legacy_result(prompt, config)
+    return _call_hermes_runtime_model_hermes_result(prompt, config)
+
+
+def _resolve_llm_transport(config: dict[str, Any] | None) -> str:
+    """Pick the transport: an owner-registered ``llm_transport`` knob override
+    wins (it is the rollback switch), then the caller's config, then the
+    default.
+
+    Callers pass their own lane config, which never names a transport, so a
+    knob consulted only through ``config`` would be registered yet read by
+    nothing. The override store is resolved against the running profile's
+    HERMES_HOME -- every LLM lane runs in a cron helper process that sets it.
+    """
+    configured = str((config or {}).get("llm_transport") or LLM_TRANSPORT_HERMES_CALL_LLM)
+    from .knob_overrides import resolve_knob
+    from .roots import MemoryOSRoots
+
+    resolved = str(resolve_knob("llm_transport", configured, roots=MemoryOSRoots.from_profile()) or "")
+    if resolved not in (LLM_TRANSPORT_HERMES_CALL_LLM, LLM_TRANSPORT_LEGACY_WIRE):
+        return LLM_TRANSPORT_HERMES_CALL_LLM
+    return resolved
+
+
+def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]) -> LlmCallResult:
+    """Transport: Hermes' own ``agent.auxiliary_client.call_llm``.
+
+    Always passes an explicit, resolved ``provider`` (production ruling
+    2026-09-23: with an explicit provider Hermes only crosses to another
+    provider on payment/quota/429 errors, so an unresolved/auto provider
+    would silently change routing behavior). ``model`` is left ``None``
+    unless the caller's config names one explicitly -- Hermes resolves and
+    strips its own private aliases (e.g. the "-900k" context-variant
+    suffix) internally; Memory-OS must never do that stripping itself
+    (owner ruling 2026-09-10).
+    """
+    resolved = _resolve_hermes_default_runtime(config)
+    if not resolved.get("ok"):
+        return LlmCallResult(
+            failure_reason="llm_transport_unavailable",
+            detail=_clip(str(resolved.get("code") or "runtime_resolve_failed"), 160),
+            transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+        )
+    provider = resolved.get("provider")
+    provider = str(provider) if provider else None
+    explicit_model = config.get("model")
+    model = explicit_model.strip() if isinstance(explicit_model, str) and explicit_model.strip() else None
+
+    # The call itself must run inside the import scope: call_llm lazily
+    # imports agent.* / hermes_cli.* / tools.* at call time (verified on
+    # production Hermes' auxiliary_client.py), so restoring sys.path before
+    # calling would turn every call into an ImportError.
+    with _hermes_call_llm_scope() as (call_llm, import_detail):
+        if call_llm is None:
+            return LlmCallResult(
+                failure_reason="llm_transport_unavailable",
+                detail=_clip(import_detail or "agent.auxiliary_client_import_failed", 160),
+                provider=provider,
+                model=model,
+                transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+            )
+
+        timeout_s = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
         max_tokens = int(config.get("max_tokens") or 1024)
+        temperature = config.get("temperature", 0)
+        route_info: dict[str, Any] = {}
+        latency_info: dict[str, Any] = {}
+        start = time.monotonic()
+        try:
+            response = call_llm(
+                None,
+                provider=provider,
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout_s,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                route_info=route_info,
+                latency_info=latency_info,
+            )
+        except Exception as exc:  # never propagate a wire exception -- fail closed with a typed reason
+            latency_ms = round((time.monotonic() - start) * 1000.0, 1)
+            reason, detail = _classify_call_llm_exception(exc)
+            return LlmCallResult(
+                failure_reason=reason,
+                detail=detail,
+                provider=str(route_info.get("provider") or provider) if (route_info.get("provider") or provider) else None,
+                model=str(route_info.get("model") or model) if (route_info.get("model") or model) else None,
+                latency_ms=latency_ms,
+                transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+            )
+        latency_ms = round((time.monotonic() - start) * 1000.0, 1)
+
+        resolved_provider = str(route_info.get("provider") or provider or "") or None
+        resolved_model = str(route_info.get("model") or model or getattr(response, "model", "") or "") or None
+        usage = _usage_to_dict(getattr(response, "usage", None))
+
+        text = ""
+        try:
+            choices = getattr(response, "choices", None) or []
+            if choices:
+                message = getattr(choices[0], "message", None)
+                text = str(getattr(message, "content", "") or "") if message is not None else ""
+        except Exception:
+            text = ""
+
+        if not text:
+            return LlmCallResult(
+                failure_reason="llm_empty_content",
+                detail="empty_choices_or_content",
+                provider=resolved_provider,
+                model=resolved_model,
+                latency_ms=latency_ms,
+                usage=usage,
+                transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+            )
+
+        return LlmCallResult(
+            text=text,
+            provider=resolved_provider,
+            model=resolved_model,
+            latency_ms=latency_ms,
+            usage=usage,
+            transport=LLM_TRANSPORT_HERMES_CALL_LLM,
+        )
+
+
+def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]) -> LlmCallResult:
+    """Transport: the pre-W2 hand-rolled per-api-mode wire clients.
+
+    Reachable only via the ``llm_transport="legacy_wire"`` knob override, for
+    rollback. Unlike the hermes_call_llm transport, the three wire helpers
+    below still collapse their own failures to "" internally (unchanged, to
+    avoid touching well-tested legacy code this migration is retiring), so
+    this transport can only distinguish success / llm_empty_content /
+    llm_transport_unavailable -- it does not regain the finer-grained
+    HTTP/timeout/credential typing the hermes_call_llm transport provides.
+    """
+    resolved = _resolve_hermes_default_runtime(config)
+    if not resolved.get("ok"):
+        return LlmCallResult(
+            failure_reason="llm_transport_unavailable",
+            detail=_clip(str(resolved.get("code") or "runtime_resolve_failed"), 160),
+            transport=LLM_TRANSPORT_LEGACY_WIRE,
+        )
+    runtime = dict(resolved.get("runtime") or {})
+    api_mode = str(runtime.get("api_mode") or "")
+    model = str(runtime.get("model") or resolved.get("model") or "")
+    provider = resolved.get("provider")
+    provider = str(provider) if provider else None
+    if not model:
+        return LlmCallResult(
+            failure_reason="llm_empty_content",
+            detail="no_model_resolved",
+            provider=provider,
+            transport=LLM_TRANSPORT_LEGACY_WIRE,
+        )
+    timeout = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
+    max_tokens = int(config.get("max_tokens") or 1024)
+    start = time.monotonic()
+    text = ""
+    try:
         if api_mode == "chat_completions":
-            return _call_openai_chat(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
-        if api_mode == "codex_responses":
-            return _call_openai_responses(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
-        if api_mode == "anthropic_messages":
-            return _call_anthropic_messages(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
+            text = _call_openai_chat(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
+        elif api_mode == "codex_responses":
+            text = _call_openai_responses(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
+        elif api_mode == "anthropic_messages":
+            text = _call_anthropic_messages(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
+        else:
+            return LlmCallResult(
+                failure_reason="llm_transport_unavailable",
+                detail=f"unsupported_api_mode:{api_mode}",
+                provider=provider,
+                model=model,
+                transport=LLM_TRANSPORT_LEGACY_WIRE,
+            )
+    except Exception as exc:  # the wire helpers already swallow internally; defensive only
+        return LlmCallResult(
+            failure_reason="llm_exception",
+            detail=_clip(str(exc), 160),
+            provider=provider,
+            model=model,
+            transport=LLM_TRANSPORT_LEGACY_WIRE,
+        )
+    latency_ms = round((time.monotonic() - start) * 1000.0, 1)
+    if not text:
+        return LlmCallResult(
+            failure_reason="llm_empty_content",
+            provider=provider,
+            model=model,
+            latency_ms=latency_ms,
+            transport=LLM_TRANSPORT_LEGACY_WIRE,
+        )
+    return LlmCallResult(
+        text=text,
+        provider=provider,
+        model=model,
+        latency_ms=latency_ms,
+        transport=LLM_TRANSPORT_LEGACY_WIRE,
+    )
+
+
+def _usage_to_dict(usage: Any) -> dict[str, int] | None:
+    """Extract {"prompt_tokens", "completion_tokens"} from a usage object/dict.
+
+    ``task=None`` disables Hermes' own usage accounting for this call, so
+    Memory-OS must capture ``resp.usage`` itself for lane reports.
+    """
+    if usage is None:
+        return None
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if prompt_tokens is None and completion_tokens is None and isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+    result: dict[str, int] = {}
+    try:
+        if prompt_tokens is not None:
+            result["prompt_tokens"] = int(prompt_tokens)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if completion_tokens is not None:
+            result["completion_tokens"] = int(completion_tokens)
+    except (TypeError, ValueError):
+        pass
+    return result or None
+
+
+def _classify_call_llm_exception(exc: Exception) -> tuple[str, str]:
+    """Map an exception from ``call_llm`` to a closed-set failure reason.
+
+    Class-based checks first (openai.APIStatusError.status_code 4xx/429 ->
+    llm_http_4xx; an auth-shaped status/exception -> llm_missing_key;
+    APITimeoutError/httpx.TimeoutException/TimeoutError -> llm_timeout;
+    ImportError / "No LLM provider configured" -> llm_transport_unavailable),
+    string-content sniffing last, generic llm_exception as the final
+    fallback. Never raises.
+    """
+    detail = _clip(f"{type(exc).__name__}: {exc}", 160)
+    type_name = type(exc).__name__
+    status_code = getattr(exc, "status_code", None)
+
+    if isinstance(exc, ImportError):
+        return "llm_transport_unavailable", detail
+    if isinstance(exc, RuntimeError) and "no llm provider configured" in str(exc).lower():
+        return "llm_transport_unavailable", detail
+    if status_code == 401 or "authentication" in type_name.lower():
+        return "llm_missing_key", detail
+    if isinstance(status_code, int) and 400 <= status_code < 500:
+        return "llm_http_4xx", detail
+    if isinstance(exc, TimeoutError) or "timeout" in type_name.lower():
+        return "llm_timeout", detail
+    try:
+        import httpx  # optional dependency, mirrors the transport openai/httpx use
+
+        if isinstance(exc, httpx.TimeoutException):
+            return "llm_timeout", detail
     except Exception:
-        return ""
-    return ""
+        pass
+
+    message = str(exc).lower()
+    if any(term in message for term in ("api key", "api_key", "unauthorized", "authentication")):
+        return "llm_missing_key", detail
+    if "timed out" in message or "timeout" in message:
+        return "llm_timeout", detail
+    if "429" in message or "rate limit" in message or "quota" in message:
+        return "llm_http_4xx", detail
+    return "llm_exception", detail
+
+
+@contextmanager
+def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
+    """Import ``agent.auxiliary_client.call_llm`` and keep the import state
+    alive for the body of the ``with`` block, fail-closed on failure.
+
+    The caller MUST invoke ``call_llm`` inside the block: Hermes' client does
+    its own function-level imports (``agent.*``, ``hermes_cli.*``,
+    ``tools.*``) at call time, which only resolve while the Hermes root is on
+    ``sys.path``. Restoring the import state before the call -- the original
+    shape of this helper -- turns every call into an ImportError.
+
+    Mirrors the defensive sys.path/sys.modules scope
+    :func:`_resolve_hermes_default_runtime` uses for ``hermes_cli`` (evict a
+    phantom namespace ``agent`` package, prepend HERMES_AGENT_ROOT or
+    ``/usr/local/lib/hermes-agent``, restore both on exit) but is
+    self-contained rather than shared with that function, since that
+    function's own restore-on-exception behavior is independently tested and
+    should not be disturbed by this migration.
+
+    Yields (call_llm, "") on success, or (None, detail) on failure. Import
+    failure here is FAIL-CLOSED for the hermes_call_llm transport -- it is
+    never a signal to fall back to the legacy wire path (owner ruling
+    2026-09-10: no provider-specific adaptation lives in Memory-OS; the
+    legacy wire stays reachable only via the explicit ``llm_transport`` knob).
+    """
+    original_sys_path = list(sys.path)
+    original_agent_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if (name == "agent" or name.startswith("agent."))
+        and getattr(module, "__file__", None) is not None
+    }
+    try:
+        call_llm: Any | None = None
+        detail = ""
+        try:
+            from agent.auxiliary_client import call_llm
+        except Exception:
+            call_llm = None
+
+        if call_llm is None:
+            for _name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+                _mod = sys.modules.get(_name)
+                if _mod is not None and getattr(_mod, "__file__", None) is None:
+                    del sys.modules[_name]
+            explicit_root = os.environ.get("HERMES_AGENT_ROOT")
+            candidates = [explicit_root, "/usr/local/lib/hermes-agent"]
+            for candidate in candidates:
+                if not candidate or not Path(candidate).exists():
+                    continue
+                if candidate in sys.path:
+                    sys.path.remove(candidate)
+                _insert_pos = 0
+                if sys.path and (
+                    Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
+                ).exists():
+                    _insert_pos = 1
+                sys.path.insert(_insert_pos, candidate)
+                if explicit_root:
+                    break
+            try:
+                from agent.auxiliary_client import call_llm
+            except Exception as exc:
+                call_llm = None
+                detail = f"{type(exc).__name__}: {exc}"[:160]
+        yield call_llm, detail
+    finally:
+        sys.path[:] = original_sys_path
+        for name in list(sys.modules):
+            if name == "agent" or name.startswith("agent."):
+                if name not in original_agent_modules:
+                    del sys.modules[name]
+        for name, module in original_agent_modules.items():
+            sys.modules.setdefault(name, module)
 
 
 def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:

@@ -19,9 +19,38 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, read_candidate_queue
-from plugins.memory.memory_os.low_clue_recall import _call_hermes_runtime_model, _extract_json_object
+from plugins.memory.memory_os.low_clue_recall import (
+    LlmCallResult,
+    _call_hermes_runtime_model_result,
+    _extract_json_object,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
 
+
+def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
+    """Typed transport diagnostics to fold onto a verdict/report (W2).
+
+    ``llm_transport_failure_reason`` is the RAW closed-set reason from
+    :class:`LlmCallResult` -- distinct from this module's own
+    ``failure_reason`` vocabulary (llm_exception/llm_empty_content/
+    llm_parse_failed/llm_missing_key), which additionally covers post-
+    transport parsing/schema failures the transport layer knows nothing
+    about. Kept in a separate field so the two vocabularies never collide
+    (e.g. the transport's llm_missing_key means "credential missing";
+    this module's llm_missing_key means "durable_fact key missing").
+    """
+    if call_result is None:
+        return {}
+    diagnostics: dict[str, Any] = {
+        "llm_transport_failure_reason": call_result.failure_reason,
+        "llm_provider": call_result.provider,
+        "llm_model": call_result.model,
+        "llm_transport": call_result.transport,
+    }
+    if call_result.usage:
+        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
+        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
+    return diagnostics
 
 
 def fact_judge_manifest() -> dict[str, Any]:
@@ -263,22 +292,39 @@ def judge_candidate(
 
     # Retry loop: empty / non-JSON / missing-key responses get retried
     last_failure: str | None = None
+    last_call_result: LlmCallResult | None = None
     for attempt in range(1 + MAX_JUDGE_RETRIES):  # 1 initial + N retries
         try:
-            response_text = _call_hermes_runtime_model(prompt, effective_config)
+            call_result = _call_hermes_runtime_model_result(prompt, effective_config)
         except Exception:
+            # Defensive only: _call_hermes_runtime_model_result is designed to
+            # never raise (every failure is a typed LlmCallResult), but this
+            # guard is kept so a genuinely unexpected exception still degrades
+            # to the heuristic fallback instead of crashing the lane.
             last_failure = "llm_exception"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
-            # All retries exhausted on exception → fall through to heuristic
             break
+        last_call_result = call_result
 
-        if not response_text:
+        if call_result.failure_reason == "llm_empty_content":
             last_failure = "llm_empty_content"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             break
+        if call_result.failure_reason:
+            # Any other typed transport failure (transport_unavailable,
+            # http_4xx, timeout, missing_key/credential, exception) --
+            # this module's own "llm_exception" bucket covers all of them,
+            # matching the pre-W2 behavior where the legacy wire collapsed
+            # every non-empty-response failure to a bare "". The raw,
+            # finer-grained reason survives in _call_diagnostics below.
+            last_failure = "llm_exception"
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            break
 
+        response_text = call_result.text
         try:
             parsed = _extract_json_object(response_text)
         except Exception:
@@ -302,11 +348,17 @@ def judge_candidate(
 
         # Successful parse with valid durable_fact
         reason = str(parsed.get("reason") or "")[:200]
-        return {"durable_fact": durable, "reason": reason, "failure_reason": None}
+        return {
+            "durable_fact": durable,
+            "reason": reason,
+            "failure_reason": None,
+            **_call_diagnostics(call_result),
+        }
 
     # All attempts exhausted — fall back to deterministic heuristic
     verdict = _heuristic_durable(candidate)
     verdict["failure_reason"] = last_failure
+    verdict.update(_call_diagnostics(last_call_result))
     return verdict
 
 
@@ -379,6 +431,13 @@ def run_fact_judge_lane(
     durable_count = 0
     skipped_count = 0
     error_count = 0
+    # W2: typed transport diagnostics, aggregated across this tick's calls.
+    llm_transport_failures_by_reason: dict[str, int] = {}
+    llm_provider = ""
+    llm_model = ""
+    llm_transport = ""
+    llm_usage_prompt_tokens = 0
+    llm_usage_completion_tokens = 0
 
     for candidate in candidates:
         if candidate.candidate_id in already_judged:
@@ -411,6 +470,22 @@ def run_fact_judge_lane(
             error_count += 1
         # ─────────────────────────────────────────────────────────────────
 
+        # ── W2 transport diagnostics ────────────────────────────────────
+        transport_reason = str(verdict.get("llm_transport_failure_reason") or "")
+        if transport_reason:
+            llm_transport_failures_by_reason[transport_reason] = (
+                llm_transport_failures_by_reason.get(transport_reason, 0) + 1
+            )
+        if verdict.get("llm_provider"):
+            llm_provider = str(verdict["llm_provider"])
+        if verdict.get("llm_model"):
+            llm_model = str(verdict["llm_model"])
+        if verdict.get("llm_transport"):
+            llm_transport = str(verdict["llm_transport"])
+        llm_usage_prompt_tokens += int(verdict.get("llm_usage_prompt_tokens") or 0)
+        llm_usage_completion_tokens += int(verdict.get("llm_usage_completion_tokens") or 0)
+        # ─────────────────────────────────────────────────────────────────
+
         _append_verdict(
             store,
             candidate_id=candidate.candidate_id,
@@ -435,6 +510,14 @@ def run_fact_judge_lane(
         "actual_execute": False,
         "actual_identity_write": False,
         "actual_crystallized_approval": False,
+        # W2: typed LLM transport diagnostics (ADD-only; does not replace
+        # error_count/failure_reason, which keep their pre-W2 meaning).
+        "llm_transport_failures_by_reason": llm_transport_failures_by_reason,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_transport": llm_transport,
+        "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
+        "llm_usage_completion_tokens": llm_usage_completion_tokens,
     }
 
 
