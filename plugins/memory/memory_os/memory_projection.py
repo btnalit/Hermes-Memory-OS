@@ -175,8 +175,11 @@ def compact_memory_projection_records(
             "started_at": started.isoformat().replace("+00:00", "Z"),
             "completed_at": completed.isoformat().replace("+00:00", "Z"),
             "input_count": len(records),
-            "output_count": len(kept),
-            "archived_count": len(archived),
+            # On write_failed the live ledger still holds every input record
+            # (the rewrite never landed), so report what is on disk, not the
+            # split that was intended.
+            "output_count": len(records) if write_failed else len(kept),
+            "archived_count": 0 if write_failed else len(archived),
             "archive_path": archive_rel,
             "keep_latest_status_per_source": keep_latest,
             "retention_class_counts": retention_class_counts,

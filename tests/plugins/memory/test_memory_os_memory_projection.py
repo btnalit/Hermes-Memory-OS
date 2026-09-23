@@ -273,6 +273,9 @@ def test_memory_projection_compaction_write_failure_is_recorded_and_non_destruct
     # The live file must still contain every original record: the failed
     # rewrite must never have partially applied.
     assert path.read_text(encoding="utf-8") == original_text
+    # ...and the report describes that on-disk state, not the intended split.
+    assert report["output_count"] == report["input_count"]
+    assert report["archived_count"] == 0
 
 
 def test_memory_projection_compaction_serializes_with_concurrent_append(tmp_path, monkeypatch):

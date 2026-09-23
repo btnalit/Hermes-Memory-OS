@@ -282,7 +282,11 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
             "plugins.memory.memory_os.memory_projection.memory_projection_compactions_path (per-run closed-outcome report)",
         ),
         disposition="report_only",
-        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + ("memory_projection_retention_compaction_missing",),
+        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
+            "memory_projection_retention_compaction_missing",
+            "memory_projection_retention_compaction_failed",
+            "memory_projection_retention_compaction_stale",
+        ),
     ),
     # Single-member groups
     "owner_review_digest": LaneContract(

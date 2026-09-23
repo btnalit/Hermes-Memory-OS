@@ -8434,6 +8434,9 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   `loop_health_view.LOOP_MEMBERS`（归入 memory 环，与 working_cleanup / state_source_mirror 同类）。根因是 CLAUDE.md 的"加 lane 改六处"
   清单没列出按 lane 双向普查的三张表（`LANE_LAST_RUN_EVIDENCE`、`LOOP_MEMBERS`、C0 的 `LANE_CONTRACTS`），子代理照清单做、定向测试全绿，
   只有全量能抓到；清单已补上这三张表。
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修两处：lane 契约的 `monitor_codes` 漏登记本 PR 新增的 `_failed` / `_stale`（C0 普查只查
+  "声明 ⊆ 发射"，反方向靠人）；`write_failed` 报告里的 `output_count` / `archived_count` 报的是计划拆分而非磁盘现状——活文件其实原样未动，
+  现改为 `output_count = input_count`、`archived_count = 0`（破坏即失败的反事实已验证）。
 - **测试**：projection +4、monitor +4，`test_active_closure_profile_installs_eight_hermes_cron_jobs` 按其 docstring 约定的方式把 lane 数 22→23；
   全量 4061 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
 - **部署**：随规划全部落地后统一部署；**必须重新生成注册表快照**并核对 `memory_projection_compaction` 出现在 `tick_daily` 成员里。部署前的历史
