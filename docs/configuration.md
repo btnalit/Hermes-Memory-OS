@@ -145,8 +145,10 @@ Optional preset flags:
 --llm-judge-preset none|report-only|bounded-vote
 ```
 
-`--llm-judge-preset report-only` reuses the existing Hermes provider/model
-configuration and is the default for automated installs. The resolved provider
+`--llm-judge-preset none` is the default for automated installs and deploys:
+the judge stays off and the guard is deterministic. `report-only` (and
+`bounded-vote` / `active`) opt in and reuse the existing Hermes provider/model
+configuration. The resolved provider
 and model are checked dynamically at judge-call time, so changing the Hermes
 default model is picked up without writing a Memory-OS model override. If the
 adapter becomes unavailable after a Hermes upgrade or model change, Memory-OS

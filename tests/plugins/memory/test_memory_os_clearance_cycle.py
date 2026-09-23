@@ -1115,3 +1115,37 @@ def test_non_dict_json_reply_does_not_crash_and_is_not_counted_as_evaluated(
     )
     assert unknown_reason == "judge_unavailable"
     assert conflict_refs == []
+
+
+# ── Judge availability is the clearance lane's own, not low-clue's ────────
+
+
+def test_clearance_judge_available_when_low_clue_judge_is_off(tmp_path: Path) -> None:
+    """Counterfactual for 2026-09-22: the gate read the profile's
+    ``low_clue_recall`` section, so the new install default (low-clue judge
+    off) would have failed every clearance record closed to
+    ``judge_unavailable`` although the clearance call never used that config.
+    The config is written by the real installer, not by hand."""
+    from unittest.mock import patch
+
+    from plugins.memory.memory_os.clearance_cycle import _check_llm_available
+    from scripts.install_memory_os_plugin import _write_low_clue_recall_config
+
+    _write_low_clue_recall_config(tmp_path, preset="none", dry_run=False)
+    roots = FakeRoots(tmp_path)
+
+    class _Store:
+        pass
+
+    store = _Store()
+    store.roots = roots
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True, "provider": "hermes_default", "model": "m", "api_mode": "chat_completions"},
+    ):
+        assert _check_llm_available(store) is True
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": False, "code": "runtime_unavailable"},
+    ):
+        assert _check_llm_available(store) is False

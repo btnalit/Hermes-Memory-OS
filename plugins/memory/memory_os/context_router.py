@@ -211,11 +211,15 @@ class ContextSection:
         return len(_redact(self.text))
 
 
-def plan_context_route(query: str, *, current_task_anchor: str | None = None) -> dict[str, Any]:
+def plan_context_route(
+    query: str, *, current_task_anchor: str | None = None, author_class: str = ""
+) -> dict[str, Any]:
     text = _normalize(query)
     lower = text.lower()
     reason_codes: list[str] = []
-    ingress = _classify_ingress(query, current_task_anchor=current_task_anchor)
+    # Same author as the provider's ingress decision for this turn, so the
+    # router never routes another agent's turn as foreground control.
+    ingress = _classify_ingress(query, current_task_anchor=current_task_anchor, author_class=author_class)
     if ingress.route:
         result = _route(ingress.route, hard_route=ingress.hard_route, reason_codes=list(ingress.reason_codes))
         if ingress.open_issue:
@@ -251,10 +255,11 @@ def route_context_sections(
     *,
     sections: list[ContextSection],
     current_task_anchor: str | None = None,
+    author_class: str = "",
     budget_chars: int,
     mode: str = "dry_run",
 ) -> dict[str, Any]:
-    route = plan_context_route(query, current_task_anchor=current_task_anchor)
+    route = plan_context_route(query, current_task_anchor=current_task_anchor, author_class=author_class)
     selected: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     used_budget = 0

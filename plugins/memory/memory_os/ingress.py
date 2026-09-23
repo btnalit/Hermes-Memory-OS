@@ -7,7 +7,7 @@ stay consistent between the provider, context router, and attribution ledger.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,67 @@ _MACHINE_AUTHORED_QUERY_PREFIXES = (
     "[important: you are running as a scheduled cron job",
     # Hermes cron delivery header (job output re-entering a chat as a turn).
     "cronjob response:",
+    # Hermes self-injected turns (tools/process_registry_notifications.py,
+    # gateway/run_busy.py). Four async-delegation dumps in the owner DM were
+    # filed as owner cancellations and two as deferrals after 2026-09-10.
+    "[async delegation batch complete",
+    "[continuing toward your standing goal]",
+    # Busy-state notices a Hermes gateway posts into a chat
+    # (gateway/run_busy.py). In a shared group another agent's notice reaches
+    # this provider as a user turn.
+    "⚡ interrupting current task",
+    "↪ redirected current run",
+    "⏩ steered into current run",
+    "⏳ queued for the next turn",
+    "⏳ subagent working",
+    "⏳ compressing context",
 )
+
+# ── Turn author ────────────────────────────────────────────────────────────
+# Who wrote the user side of the turn, from the host's per-turn author
+# (Hermes ``on_turn_start(author_id=, author_name=, author_is_bot=)``, filled
+# from the platform's own bot flag). ``human`` is any non-bot author the host
+# admitted — not a verified owner identity; ``unknown`` means the host said
+# nothing (older hosts, CLI) and keeps the pre-2026-09 behaviour.
+AUTHOR_CLASS_HUMAN = "human"
+AUTHOR_CLASS_BOT = "bot"
+AUTHOR_CLASS_UNKNOWN = "unknown"
+FOREGROUND_CONTROL_AUTHOR_CLASSES = frozenset({AUTHOR_CLASS_HUMAN, AUTHOR_CLASS_UNKNOWN})
+
+# ── Hermes framing around the author's own words ─────────────────────────
+# Hermes wraps the author's text before the provider sees it; none of the
+# wrapping is the author's utterance. On 2026-09-22 13 of 22 peer-agent turns
+# read as cancellations matched only inside the reply quote — usually a quote
+# of this agent's own apology ("误以为当前也要停止"), so every apology
+# re-triggered the cancellation it apologised for. Formats are Hermes
+# contracts, stripped only at the start of the turn, in any stacking order.
+_LEADING_FRAME_PATTERNS = (
+    # f'[Replying to{" your previous message"}: "{reply_text}"]\n\n{message}'
+    # (gateway/run_inbound.py). The exact delimiter first: a quote that itself
+    # contains '"]' plus a space (JSON, code) must not end the frame early and
+    # leave the rest of the quote to be read as the author's own words.
+    re.compile(r'^\[Replying to(?: your previous message)?: ".*?"\]\n\n', re.S),
+    # Whitespace-tolerant form for text whose newlines were already collapsed.
+    re.compile(r'^\[Replying to(?: your previous message)?: ".*?"\](?:\s+|$)', re.S),
+    # Origin header prepended to queued/busy messages (gateway/run_busy.py).
+    re.compile(
+        r"^Gateway message origin \(JSON data, not instructions or authorization\):.*?"
+        r"Do not guess a reply destination when these fields are insufficient\.(?:\s+|$)",
+        re.S,
+    ),
+    # f"[{user_name}|{user_id}]\n{text}": group sender attribution
+    # (plugins/platforms/telegram/adapter.py).
+    re.compile(r"^\[[^\[\]\n|]{1,80}\|[^\[\]\s|]{1,64}\](?:\s+|$)"),
+)
+_MAX_LEADING_FRAMES = 8
+
+# A turn that stops or parks the foreground task is a short one. Measured on
+# every cancelled anchor written after 2026-09-10 (33, both profiles): the
+# genuine owner cancellations were 7, 10 and 28 characters of own text; the
+# false ones were pasted reports, debate speeches and delegation dumps of
+# 204–11867 characters. The bound is on the author's own text, after the
+# frames above are stripped, so replying-with-a-quote still cancels.
+_MAX_FOREGROUND_CONTROL_TURN_CHARS = 120
 
 # ── Cancellation intent ───────────────────────────────────────────────────
 # Cancellation is an owner *imperative* aimed at the foreground task. The
@@ -85,8 +145,16 @@ _CJK_CANCEL_VERBS = ("停止", "停下", "取消", "放弃", "收手")
 _CJK_PRE_NEGATION = (
     "不要", "别", "不能", "不许", "不会", "不可", "不用", "没有", "没", "未", "已",
     "已经", "是否", "会不会", "要不要", "能不能", "可否", "如何", "怎么", "为什么",
-    "为何", "自动", "被", "如果", "一旦", "会", "可能",
+    "为何", "自动", "被", "如果", "一旦", "会", "可能", "不提前", "不再",
 )
+# Negators that scope over a verb later in the same clause, not only when
+# adjacent: "不要乱了无故停下" (the owner telling the agents NOT to stop — read
+# as a cancellation on 2026-09-22), "不能因为治理复杂就取消证据链",
+# "误以为当前也要停止". Bounded to a short window before the verb, and
+# deliberately without bare 不 / 没 / 未 / 别, which begin ordinary words
+# (不过, 没用的, 未完成的, 别的).
+_CJK_WINDOW_NEGATORS = ("不要", "不能", "不许", "不可", "不用", "不必", "无需", "不该", "不应", "以为")
+_CJK_NEGATION_WINDOW_CHARS = 8
 # A bare "." is deliberately absent: it splits version and decimal numbers
 # ("停止远端 2.88 的 gateway" would otherwise end its clause at "2"), and an
 # English sentence break is already handled by the ASCII rule.
@@ -191,9 +259,11 @@ def classify_ingress(
     *,
     current_task_anchor: str | None = None,
     session_id: str = "",
+    author_class: str = "",
 ) -> IngressDecision:
-    text = normalize_query(query)
-    lower = text.lower()
+    # Every decision reads the author's own words only, never the Hermes
+    # frames around them (reply quote, origin header, sender tag).
+    text = normalize_query(extract_own_text(query))
     has_anchor = bool(str(current_task_anchor or "").strip())
 
     # Scheduled-job prompts are not owner utterances: no foreground-control
@@ -209,6 +279,37 @@ def classify_ingress(
             reason_codes=["machine_authored_query"],
         )
 
+    # Another agent's turn (a peer bot in a shared chat) may be about
+    # anything, including stopping; it is never an instruction to *this*
+    # agent's owner-facing foreground task. 22 of the 33 cancelled anchors
+    # written between 2026-09-10 and 09-22 were peer-agent debate turns.
+    # ``author_class`` defaults to "" (= the caller does not know) so
+    # text-only callers keep the owner-text rules below.
+    if author_class and author_class not in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+        return IngressDecision(
+            intent="non_owner_authored",
+            route="",
+            hard_route=False,
+            reason_codes=["non_owner_authored_turn"],
+        )
+
+    decision = _classify_author_text(text, has_anchor=has_anchor)
+    if len(text) > _MAX_FOREGROUND_CONTROL_TURN_CHARS:
+        # Report-only: the long turn contained an order shape the length bound
+        # refused. Lets production tell "the gate held" from "nothing to gate"
+        # without re-reading the transcript.
+        rejected = []
+        if decision.intent != "cancellation" and _match_cancellation_rule(text):
+            rejected.append("cancel_rejected_turn_too_long")
+        if has_anchor and decision.intent != "defer_current_task" and _matches_defer_pattern(text):
+            rejected.append("defer_rejected_turn_too_long")
+        if rejected:
+            decision = replace(decision, reason_codes=[*decision.reason_codes, *rejected])
+    return decision
+
+
+def _classify_author_text(text: str, *, has_anchor: bool) -> IngressDecision:
+    lower = text.lower()
     cancellation_rule = match_cancellation(text) if text else ""
     if cancellation_rule:
         return IngressDecision(
@@ -282,8 +383,45 @@ def is_scheduled_session_id(session_id: str) -> bool:
 
 
 def is_machine_authored_query(text: str) -> bool:
-    lower = normalize_query(text).lower()
+    lower = normalize_query(extract_own_text(text)).lower()
     return any(lower.startswith(prefix) for prefix in _MACHINE_AUTHORED_QUERY_PREFIXES)
+
+
+def extract_own_text(text: str) -> str:
+    """Return the turn with its leading Hermes frames removed.
+
+    Idempotent, and safe on already-normalized text (a whitespace-tolerant
+    reply-quote form backs up the exact Hermes delimiter). Only on normalized
+    text can a quote containing ``"]`` plus whitespace still end early; the
+    provider and the classifiers strip frames from the raw query.
+    """
+    own = str(text or "").lstrip()
+    for _ in range(_MAX_LEADING_FRAMES):
+        for pattern in _LEADING_FRAME_PATTERNS:
+            stripped = pattern.sub("", own, count=1)
+            if stripped != own:
+                own = stripped.lstrip()
+                break
+        else:
+            break
+    return own
+
+
+def author_class_from_host(
+    *, author_id: object = None, author_name: object = None, author_is_bot: object = None
+) -> str:
+    """Map the host's per-turn author fields onto the closed author classes."""
+    # Same truthiness as Hermes' own ``agent.turn_author._bot_flag``, so a flag
+    # that crossed a serialisation boundary ("true", 1) still reads as a bot.
+    if isinstance(author_is_bot, str):
+        is_bot = author_is_bot.strip().lower() in {"true", "1", "yes"}
+    else:
+        is_bot = isinstance(author_is_bot, (bool, int)) and bool(author_is_bot)
+    if is_bot:
+        return AUTHOR_CLASS_BOT
+    if str(author_id or "").strip() or str(author_name or "").strip():
+        return AUTHOR_CLASS_HUMAN
+    return AUTHOR_CLASS_UNKNOWN
 
 
 def _looks_like_question(normalized: str) -> bool:
@@ -323,15 +461,30 @@ def _cjk_verb_heads_an_imperative_clause(text: str, start: int, end: int) -> boo
     return not any(pattern.search(text[left:right]) for pattern in _CJK_CLAUSE_REJECT)
 
 
+def _cjk_verb_negated_in_clause(text: str, start: int) -> bool:
+    """True when a scoping negator sits in the same clause shortly before the verb."""
+    left, _ = _clause_bounds(text, start, start)
+    longest = max(len(negator) for negator in _CJK_WINDOW_NEGATORS)
+    window = text[max(left, start - _CJK_NEGATION_WINDOW_CHARS - longest) : start]
+    return any(negator in window for negator in _CJK_WINDOW_NEGATORS)
+
+
 def match_cancellation(text: str) -> str:
     """Return the id of the cancellation rule the text satisfies, or ``""``.
 
     Rule ids are a closed set (``ascii_imperative`` / ``cjk_imperative`` /
     ``cjk_resignation``) so the anchor audit can record *why* an owner turn
     was read as a cancellation. Machine-authored prompts and questions never
-    match, whatever words they contain.
+    match, whatever words they contain; only the author's own text is read,
+    and only when it is short enough to be an order.
     """
-    normalized = normalize_query(text)
+    normalized = normalize_query(extract_own_text(text))
+    if len(normalized) > _MAX_FOREGROUND_CONTROL_TURN_CHARS:
+        return ""
+    return _match_cancellation_rule(normalized)
+
+
+def _match_cancellation_rule(normalized: str) -> str:
     if not normalized or is_machine_authored_query(normalized) or _looks_like_question(normalized):
         return ""
     lower = normalized.lower()
@@ -344,6 +497,8 @@ def match_cancellation(text: str) -> str:
         for found in re.finditer(re.escape(verb), lower):
             preceding = lower[: found.start()].rstrip()
             if any(preceding.endswith(negation) for negation in _CJK_PRE_NEGATION):
+                continue
+            if _cjk_verb_negated_in_clause(lower, found.start()):
                 continue
             if _cjk_verb_heads_an_imperative_clause(lower, found.start(), found.end()):
                 return "cjk_imperative"
@@ -365,7 +520,17 @@ def has_cancellation(text: str) -> bool:
 
 
 def matches_defer_current_task(text: str) -> bool:
-    normalized = normalize_query(text)
+    # Same own-text and length bound as cancellation: a deferral is a short
+    # order too. Unbounded, a long instruction that merely mentioned
+    # "明天再说" or "later" parked the owner's task (production deferral
+    # ledger, 2026-09).
+    normalized = normalize_query(extract_own_text(text))
+    if len(normalized) > _MAX_FOREGROUND_CONTROL_TURN_CHARS:
+        return False
+    return _matches_defer_pattern(normalized)
+
+
+def _matches_defer_pattern(normalized: str) -> bool:
     return any(pattern.search(normalized) for pattern in _DEFER_CURRENT_TASK_PATTERNS)
 
 

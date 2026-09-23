@@ -221,20 +221,30 @@ class TestExplicitPolicy:
         assert decision.candidate_allowed is False
         assert decision.skip_reason == "index_only"
 
-    def test_conversation_turn_with_explicit_index_only_keeps_own_branch(self):
-        """conversation_turn branch wins over explicit_policy fallback.
+    @pytest.mark.parametrize("policy", ["index_only", "evidence_only", "candidate_surface", "ignore"])
+    def test_conversation_turn_with_explicit_non_driving_policy_stays_out_of_memory(self, policy):
+        """An explicit non-driving policy wins over the conversation_turn branch.
 
-        drive_policy reflects the explicit value but candidate_allowed comes
-        from the branch default=True (unless candidate_explicit is set).
+        Changed 2026-09-22: this used to pin "branch wins" — a path no producer
+        exercised until sync_turn began marking peer-agent turns and
+        cancellation exchanges index_only. Honouring the branch there turned
+        every "收到，已停止" into eligible lingering memory.
         """
         decision = classify_event_for_inner_drive(
             _event(
                 kind="conversation_turn",
-                safe_ref={"drive_policy": "index_only"},
+                safe_ref={"drive_policy": policy},
             )
         )
-        assert decision.drive_policy == "index_only"
-        assert decision.candidate_allowed is True  # from branch, not fallback
+        assert decision.drive_policy == policy
+        assert decision.working_kind == ""
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == policy
+
+    def test_conversation_turn_without_policy_still_lingers(self):
+        decision = classify_event_for_inner_drive(_event(kind="conversation_turn"))
+        assert decision.drive_policy == "eligible"
+        assert decision.working_kind == "lingering"
 
 
 # ── source_class extraction ─────────────────────────────────────────────

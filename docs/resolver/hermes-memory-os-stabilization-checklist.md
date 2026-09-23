@@ -5031,6 +5031,17 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `bea1737..HEAD`：同行 agent 的话被当成主人指令（DJ）——群里三个 Hermes agent 辩论，Memory-OS 把
+  "user 轮"等同"主人话语"：DG 后 33 条 cancelled 锚点 30 条误判（22 条 peer 发言，13 条取消词只在
+  `[Replying to]` 引文里、多为本 agent 自己的道歉——道歉被引用再触发取消的回环）。修法：接收 Hermes
+  早已提供的逐轮作者（`on_turn_start` / `sync_turn(turn_author=)`），bot 作者不得驱动前台控制与 owner-review；
+  判定只读剥掉 Hermes 帧后的本人文本 + 整轮 ≤120 字 + 窗口否定 + 机器前导语补全；跨会话恢复挪到首个
+  前台控制轮，peer / 非 primary 会话的 pre-compress 与 session-end 不再碰主人锚点；peer 轮与取消往来
+  不进 lingering/候选。独立提交 `f2607b8`：llm_judge 安装/部署默认关闭，clearance 可用性与 low-clue
+  配置解耦。生产语料回放 33/33 正确、历史 167 条零新增命中；14 项反事实逐项成立；+56 测试，全量
+  3782 passed / 13 skipped / 0 failed（基线 3726，零回归），五门全绿。独立评审 FIX-FIRST 5 项已修（DJ.9），
+  全量 3784 passed / 13 skipped / 0 failed。**owner 裁定：合并后不部署，等规划全部落地后统一部署**。
+
 - `2a7f806..HEAD`：选择策略分叉（DI）——`2a7f806` 把
   SessionMirror 的选择策略劈成两半（审查面过滤 + 最近优先，执行面完全不过滤），于是
   摘要offer一条、手动 apply 因指纹不符恒 `scope_mismatch` 死锁、毕业 lane **根本不比对
@@ -8011,3 +8022,174 @@ session_mirror 测试 fixture 集体刷新为"近期 + 已完成"：floor 现在
 同一目录，拿到 `EDQUOT` 才实锤。删掉 venv 与已消费的后台 transcript 后恢复。
 教训：**排查"工具整体失效"时，先换一条不共用同一资源的代码路径取错误信息**；以及
 不要在会话 scratch 里建 venv。
+
+## DJ — 同行 agent 的话被当成主人指令：群聊辩论"一直停止"（2026-09-22）
+
+- **触发**：owner 转来一个较弱模型的两份诊断（monitor 四个 FAIL；群里 RAG 辩论 agent
+  "一直停止"），要求逐项核实真伪、找根因、经顾问讨论最优修法；并要求
+  `low_clue_recall.llm_judge` 安装/部署默认关闭（后续拟接 TypeSafe Jev 这类结构化判定模型）。
+- **生产与仓库无漂移**（先核这个，因为报告称"已修改源码并重装"）：两个 profile 的网关插件目录、
+  runtime 副本、`/opt` 全部逐字节等于 GitHub `bea1737`；`continuity.py` 全机 md5 相同且自
+  08-05 未变。报告里"我改了 freshness 源码"在任何安装副本中都不存在。
+
+### DJ.1 弱模型报告逐项定性
+
+| 说法 | 定性 | 依据 |
+|---|---|---|
+| freshness ledger 源码 bug，已修复重装 | **不实** | 无任何安装副本被改；ledger 只写 stale 是 disclose-only 设计，monitor 只进 passed/info，产生不了 FAIL |
+| 当前 4 个 FAIL（55C/55G/retention/v7） | **不复现** | main 最新 artifact 只有 `shell_alias_no_env_failed`，55C/55G/retention 均 PASS；两 profile 都复现不出这四个码的组合 |
+| 55C/55G wandering_mind 契约冲突 | **潜伏真缺陷** | monitor（`memory_os_3_200_monitor.py:136-142/288-296`）仍要求 07-15 已退役的 source；现在能 PASS 全靠 `memory_projection_status` 无界读历史残留记录，compaction 一旦生效即翻 FAIL。**另立项** |
+| retention compaction 未接生产 | **属实** | `compact_memory_projection_records` 唯一生产调用方是手工 CLI；main 的 PASS 靠 06-03 一次手工运行，sannai 永久 FAIL；monitor 谓词"曾经压缩过"永不过期（Completion Is Not Output 形状）。**另立项** |
+| grounded_expression_judge 是 v7 必需组件冲突 | **不实** | main 已由 `legacy_retired` 豁免；sannai 有 56 条真实 verdict（问题是分布退化 WARN） |
+| 取消判定器把普通中文判成取消 | **部分属实，但不是主因** | 长距否定确实漏（"不要乱了无故停下"），但 30 条误判里只有 1 条是这一类 |
+| 误判写 cancelled 锚点 + foreground-only | **属实** | 机制描述正确 |
+| "已停止"回复进 working memory 再被召回 | **属实** | main `lingering.json` 7 条 active 的"收到，本场RAG辩论前台任务已取消/已停止"，标签 `foreground, eligible` |
+| 跨 session 污染，应按 chat/thread/session 隔离锚点 | **现象属实，修法错误** | 真因是**非主人会话**触碰主人状态；按 session 隔离会拆掉会话轮换的跨会话连续性（主人本来就只有一个前台任务） |
+
+### DJ.2 真根因（生产语料定量，不是推断）
+
+DG 部署（09-10）后两 profile 共写 **33** 条 cancelled 锚点，逐条关联 Hermes `state.db` 原消息：
+
+| 类别 | main | sannai | 判定 |
+|---|---|---|---|
+| 同行 agent（对方辩手 bot / 主持 bot）的辩论发言或忙碌提示 | 9 | 13 | 误判；其中 **13 条取消词只在 `[Replying to: "…"]` 引文里** |
+| Hermes 自注入 `[ASYNC DELEGATION BATCH COMPLETE …]`（主人 DM 会话） | 4 | 0 | 误判（DG 已观察到此类，只收了 cron 前导语） |
+| 主人会话里粘贴的 bot 输出 / 长公告 | 2 | 1 | 误判 |
+| 主人本人，长距否定（"不要乱了无故停下，…继续!"） | 0 | 1 | **反向执行主人意图** |
+| 主人真实取消（7 / 10 / 28 字） | 1 | 2 | 正确 |
+
+- **一级根因：Memory-OS 把"user 轮"等同于"主人话语"**。一个 Telegram 群里三个 agent 互相辩论，
+  Hermes 给每个发言者开独立会话（`agent:main:telegram:group:<chat_id>:<sender_id>`），同行 agent 的
+  每句话都以 user 轮进入 provider。宿主**早已提供作者**：`on_turn_start(author_id, author_name,
+  author_is_bot)` 在同一线程紧接 prefetch 之前调用、`sync_turn(turn_author=…)` 只发给签名接收它的
+  provider——Memory-OS 的 `on_turn_start` 丢弃了 kwargs，`sync_turn` 不接这个参数，所以宿主根本不发。
+- **放大器一：引文回环**。Hermes 把被回复的消息原文拼进 query（`gateway/run_inbound.py:1517`）。
+  误判 → agent 道歉"误以为当前也要停止" → 下一位发言者回复这条道歉 → 引文再次触发取消。
+- **放大器二：peer 会话的生命周期写主人状态**。`initialize` 在 peer 会话里恢复主人锚点（把主人任务
+  注入同行 agent 的上下文）并写 superseded 墓碑，`on_session_end` 再把它写成 completed、安全网扫盘
+  废止其余 active——与 DG.2/DG.3 同一家族，只是会话类型从 cron 换成了 peer。
+- **放大器三：控制面往来进工作记忆**。`inner_drive` 对 `conversation_turn` 分支无视显式 `drive_policy`，
+  每个"收到，已停止"都成为 eligible lingering，按词项重叠在下一场辩论被召回。
+- **同族（Rule 5）**：`matches_defer_current_task` 同样对全文做子串匹配（`later` 会命中 `collateral`），
+  main 延期账本里有长篇主人指令与 `[ASYNC DELEGATION…]` 被记成"主人延后任务"。
+
+### DJ.3 修复（经顾问评审后定稿）
+
+- `ingress.py`
+  - **作者门**：`classify_ingress(author_class=)`，`bot` → `non_owner_authored`（route 空、无任何前台控制）。
+    作者类闭集 `human / bot / unknown`；`human` 只是"宿主放行的非 bot"，**不是**经核验的主人身份
+    （allowlist 顾问建议推迟，先用 audit 里的 `author_id` 积累数据）；`unknown`（老宿主/CLI）保持旧行为。
+  - **本人文本**：`extract_own_text` 剥掉开头的 Hermes 帧（引文、`Gateway message origin`、`[name|id]`），
+    所有判定与锚点任务文本只读作者自己的话。
+  - **整轮长度界**：本人文本 ≤ **120** 字才可能是取消/延期命令（真实取消 7/10/28 字，误判 204–11867 字）；
+    被界拒但含取消形状时记 `cancel_rejected_turn_too_long`（report-only）。
+  - **机器前导语**补 `[async delegation batch complete`、`[continuing toward your standing goal]` 与
+    六个网关忙碌提示（`gateway/run_busy.py` 原文）。
+  - **窗口否定**：同一子句内动词前 ≤8 字出现 `不要/不能/不许/不可/不用/不必/无需/不该/不应/以为` 即阻断；
+    刻意不收裸 `不/没/未/别`（`不过`、`没用的`、`别的` 会误杀）；紧邻表补 `不提前/不再`。
+  - 延期判定走同一套本人文本 + 长度界。
+- `__init__.py`（provider）
+  - `on_turn_start` 记录本轮作者；**跨会话恢复从 `initialize` 挪到首个前台控制轮**
+    （`_note_foreground_control_turn`，一次性 latch）；`_may_write_foreground_state()` =
+    有过前台控制轮 ∧ 非机器会话，门住 `on_pre_compress` 写入与 `on_session_end` 扫盘安全网。
+  - `agent_context != "primary"`（Hermes subagent/cron/flush）视同机器会话：不恢复、不写、refresh 直接返回
+    （反事实测试当场抓到：原先只靠 cron session-id 判定，subagent 仍会写取消锚点）。
+  - `sync_turn` 接收 `turn_author`（worker 异步执行，`on_turn_start` 的值可能已属下一轮）；peer 轮、
+    非 cron 会话里的机器帧、取消/延期往来标 `drive_policy=index_only` + `candidate_allowed=False`；
+    摘要只用本人文本。
+  - owner-review 回复入口对 `bot` 作者拒绝（`non_owner_author`，落 audit）——owner action 是主人信任边界。
+  - `active_task_anchor_recorded` audit 增 `author_class`；新 audit `ingress_foreground_control_skipped`。
+- `inner_drive.py`：`conversation_turn` 分支尊重显式非驱动策略（`_NON_DRIVING_POLICIES` 与通用分支共用）。
+  原特征化测试钉的是"分支优先"——一条从来没有生产者走过的路径，按新契约改写。
+- `context_router.py` / `prefetch.py`：`author_class` 透传到 `plan_context_route`，router 与 provider 对同一轮
+  给出同一判定（DG 删 router 私有词表副本的同一原则）。
+
+### DJ.4 顾问评审（Fable 子代理；`advisor` 工具本轮不可用）
+
+采纳：作者门 + 帧剥离为结构性修复；单一布尔量代替"tainted session"状态机；D 只做有界窗口否定词；
+E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot` 永不到达也成立"的第二道门；
+`author_class` 闭集进 audit、`unknown` 不并入 `human`（部署后若 Telegram 会话多为 `unknown`，说明作者门没生效）。
+拒绝：弱模型的 chat/session 级锚点隔离、Principal dataclass、清理历史记录。
+**偏离一处**：顾问建议 llm_judge 默认值单独开 PR；实际做成**同一 PR 内的独立提交** `f2607b8`
+（文件集不相交、有自己的反事实，部署单元本就是整仓 HEAD，分两个 PR 只会在本清单上制造合并冲突）。
+
+### DJ.5 验证
+
+- **生产语料回放（文本层单独，不借助作者门）**：33 条中 30 条误判全部拒绝、3 条真实取消全部保留。
+  全部历史非 cron cancelled（main 143 + sannai 24 条可关联原文）：**新规则零新增命中**；新拒绝的短文本
+  只有 5 条，逐条都是该拒的（主持 bot 引文、两条忙碌提示、仅引文命中、主人"不要…停下…继续"）。
+- **反事实（逐项破坏，cp 备份，禁用 `git checkout --`）**：14 个修复点各自单独破坏，其列出的**每一条**测试
+  都单独 FAIL、恢复后 PASS。第一轮"帧剥离"一项**不成立**——夹具引文太长，被长度界顺带挡住，测试并没
+  证明剥离本身必要；补了"短引文 + 取消祈使句"与"长引文 + 主人短命令"两类夹具后成立。
+- **测试**：+56（ingress 46→87、新文件 turn_author 8、inner_drive 42→46、clearance 18→19、deploy 47→49）；
+  既有测试按新生命周期调整：`zombie_anchor_fix` / `compaction_stability` 的 `_init_provider` 与
+  `current_task_anchor` 的 11 处构造补"主人首轮 `on_turn_start`"（真实 Hermes 中压缩与会话结束总发生在某轮之后）。
+  全量（临时目录全部走 D 盘，C 盘已满——首轮全量因 ENOSPC 失真作废）：**3782 passed / 13 skipped / 0 failed**；
+  同一 runner 上基线 `bea1737` 为 3726 / 13 / 0，**净增 56 = 本节新增测试数，零回归**。
+- 五门：import-cycle pass / write-surface `unclassified_count=0` / static-hygiene pass /
+  public-checkout `--strict` PASS（4/0/0）/ `git diff --check` clean。
+
+### DJ.6 刻意不做 / 已知残留
+
+- **不清理**：main `lingering.json` 的 7 条"已停止"项权重 0.28–0.35、半衰期 18h、<0.10 过期，约 1.5 天内自然消失；
+  历史 cancelled 锚点为终态。
+- **宿主时序残留**：Hermes 的 `run_turn_start_compaction` 先于 `on_turn_start`。进程内某会话的首轮若触发预压缩，
+  此时尚无作者信号，按"无信号不写"处理——网关重启后续接的长会话首轮那一次压缩不持久化锚点，同一轮紧接的
+  恢复 + refresh 会补回。
+- **共享群会话**（Hermes 若配置为群内不按发送者分会话）：`on_pre_compress` 从全体 user 消息建锚，可能取到
+  peer 文本；当前两 profile 均按发送者分会话，未处理。
+- **未核实**：两个同行 bot 在宿主侧是否真的 `author_is_bot=True`（用户名以 bot 结尾，几乎必然；
+  但无日志证据）——这正是部署验收第一项要看的。文本层已独立关闭全部语料，作者门是其上的结构层。
+- **Rule 5 同族、本批未修（依赖主人身份白名单，列入后续规划 P 阶段）**：`session_mirror._session_record`
+  把 `role=="user"` 一律当主人话语导入（peer bot 的 Hermes 会话同样会被镜像成主人对话）；
+  `session_fact_extraction` 抽取事实不看 role/author；`owner_actions.apply_owner_action` /
+  `parse_owner_review_reply` 核心层不校验调用者身份（本批的 bot 门缝在调用方）；`human` 只是"非 bot"，
+  群里被放行的非主人人类仍可通过前台控制与 owner-review 入口；`EventEnvelope` 无 author 字段。
+- 另立项：retention compaction 生产 lane、wandering_mind 退役 source 的 monitor 豁免、sannai
+  `full_monitor_refresh` 自 08-12 无持久化 artifact（子代理顺带发现，未核实成因）。
+
+### DJ.7 llm_judge 默认关闭（独立提交 `f2607b8`）
+
+- 三个入口此前都默认开启判官：`deploy_memory_os.py` / `install_memory_os_plugin.py` 默认 `active`（bounded_vote），
+  交互式 `install_memory_os.sh` 默认 `report-only`；三份文档对默认值的说法互相矛盾。现统一为 `none`
+  （low-clue lane 本身仍开，走确定性 guard；prefetch 本来就不调判官）。
+- 部署判官探针在 preset=none 时返回新封闭状态 `not_requested`，按 PASS 类登记；否则通用 `skipped→WARN`
+  会让每次默认部署都带一条 WARN。
+- **耦合**：`clearance_cycle._check_llm_available` 借 profile 的 `low_clue_recall` 配置节判断可用性，而 clearance
+  实际调用一直用自带配置——直接翻默认值会让所有 clearance 记录静默 fail-closed 成 `judge_unavailable`。
+  改为用 clearance 自己的 `_CLEARANCE_JUDGE_CONFIG`（与逐对调用同一份）。
+- 反事实：还原两处修复 → 4 条测试 FAIL，恢复 → PASS。夹具由真实安装器 `_write_low_clue_recall_config` 生成。
+- **Jev 接缝（后续，未做）**：Jev 是 Choice/Score/Noul 三原语的结构化判定模型。正确的缝是 judge 配置已有的
+  `provider` 字段 + 统一的 verdict 契约（label / confidence / failure_reason），`hermes_default` 只是其中一个实现；
+  这不违反"Memory-OS 不做 provider 特例"的裁定（那条禁的是给 Hermes 运行时调用剥别名）。
+
+### DJ.8 部署要求与验收信号
+
+- provider 侧改动：**两个 profile 的网关都要重启**；心跳/cron 为独立进程无需重启。部署后下一次部署会把
+  两 profile 的 `low_clue_recall` 段重写为 `none` 预设（judge 关 ≠ lane 关）。
+- 48h 验收：① `active_task_anchor_recorded` 中 `status=cancelled ∧ author_class=bot` = 0，Telegram 群会话
+  `author_class=unknown` 占比≈0（否则作者门未生效）；② `ingress_foreground_control_skipped` 在群会话计数 > 0；
+  ③ `lingering.json` 无 peer 来源新条目；④ 锚点账本不再出现同行 bot 会话（session_id 以其发送者 id 结尾）写出的
+  superseded/completed；⑤ 主人以"引用回复 + 停止"取消仍产出 `author_class=human, ingress_rule=cjk_imperative`；
+  ⑥ 一场受监督的辩论中无"已停止/已取消"道歉；⑦ 部署 postcheck 出现 `llm_judge_probe_not_requested`、无判官 WARN。
+
+### DJ.9 独立评审（PR #82）与修复
+
+- 评审方：独立 Sonnet 子代理（未见作者推理，只读代码 + CLAUDE.md + 本节），结论 **FIX-FIRST**：1 MAJOR / 3 MINOR / 1 NIT，全部处理：
+  - **MAJOR** `sync_turn` 在宿主不传 `turn_author` 时回退到 `on_turn_start` 的值，后台 worker 下可能已属下一轮。宿主侧已核实网关每轮都传
+    （`run_turn_runner.py:1573`、`run_agent.py:898`），不改逻辑；事件 `safe_ref` 增 `author_source`（`turn_author` / `turn_start_fallback`），
+    部署后可逐事件看回退是否真的发生（并入 DJ.8 验收①）。
+  - **MINOR** 延期被长度界拒绝时无记录，与取消不对称 → 补 `defer_rejected_turn_too_long`（仅在有前台任务时）；provider 审计取全部
+    `*_rejected_turn_too_long` 码。
+  - **MINOR** 引文帧正则非贪婪早停：引文自身含 `"]` + 空白时，引文剩余部分会被当成本人话语。改为先匹配 Hermes 精确分隔符 `"]
+
+`，
+    宽松式只作已归一化文本的兜底。反事实夹具：引文 `配置写成 ["a"] 然后停止吧` 在旧式下判出 `cjk_imperative`。
+  - **MINOR** `docs/quickstart.md` 写成 `skipped`，与代码新状态 `not_requested` 漂移 → 改正。
+  - **NIT** `author_is_bot is True` 过严 → 与 Hermes 自己的 `_bot_flag` 同口径（`"true"`/`1` 也算 bot）。
+- **公开仓库卫生**：本 PR 引入的真实 Telegram 账号 id、bot 用户名与群名（测试夹具与本节）全部换成占位值；主人 id 此前已出现在 main 的
+  旧测试里，本 PR 不再新增。
+- **规划文档纳入追踪**：`docs/plans/2026-09-23-memory-os-next-phase-plan.md`（owner 要求；`docs/plans/` 默认被忽略，用 `git add -f`；内容不含账号 id）。
+- **反事实**：5 项逐项单独破坏，对应测试各自 FAIL、恢复后 PASS。
+- **测试**：+2（ingress 新增短引文含 `"]` 的夹具、turn_author 新增延期拒绝审计用例；其余断言并入既有测试）；全量 **3784 passed / 13 skipped / 0 failed**（上轮 3782，基线 3726，累计 +58）；五门全绿（public-checkout `--strict` PASS 4/0/0）。
+- **部署**：owner 裁定合并后不部署，等下一阶段规划全部落地后统一部署并执行 DJ.8 验收。

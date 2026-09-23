@@ -287,14 +287,28 @@ def run_clearance_cycle(
 # ── Clearance judge helpers ──────────────────────────────────────────────
 
 
+# The clearance judge's own call config. The availability gate below and the
+# per-pair call in ``_judge_against_permanents`` must use the same one.
+_CLEARANCE_JUDGE_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    "mode": "bounded_vote",
+    "provider": "hermes_default",
+    "temperature": 0,
+    "timeout_ms": 15000,
+    "max_tokens": 512,
+    "on_error": "deterministic_fallback",
+}
+
+
 def _check_llm_available(store: Any | None = None) -> bool:
     """Check whether the LLM runtime is available for contradiction judging.
 
-    Reads the live low-clue-recall config from *store* when available,
-    falling back to the on-disk ``config.json``.  Extracts the
-    ``low_clue_recall`` sub-section before passing to the availability
-    check — the top-level ``config.json`` keys (``session_mirror``, etc.)
-    are not valid fields for ``normalize_low_clue_recall_config``.
+    Judged against the clearance lane's own judge config, the one its calls
+    actually use. It used to read the profile's ``low_clue_recall`` section,
+    so switching the low-clue judge off (the install default since
+    2026-09-22) silently failed every clearance record closed to
+    ``judge_unavailable`` — two unrelated lanes sharing one switch.
+    ``store`` is kept for caller compatibility.
 
     Returns ``False`` when the LLM cannot be reached — all non-empty-corpus
     records will receive an ``unknown`` verdict (fail-closed).
@@ -302,39 +316,7 @@ def _check_llm_available(store: Any | None = None) -> bool:
     try:
         from .low_clue_recall import low_clue_judge_availability as _judge_avail
 
-        full_config: dict[str, Any] | None = None
-
-        # Resolve the live config from the store, then fall back to disk
-        if store is not None:
-            try:
-                config_path = store.roots.memory_os_root / "config.json"
-                if config_path.exists():
-                    import json as _json
-                    full_config = _json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                full_config = None
-
-        if full_config is None:
-            # Last resort: try reading from ambient roots (no store available)
-            try:
-                from .roots import MemoryOSRoots
-                ambient = MemoryOSRoots.from_profile()
-                config_path = ambient.memory_os_root / "config.json"
-                if config_path.exists():
-                    import json as _json
-                    full_config = _json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                full_config = {}
-
-        # Extract the low_clue_recall subsection — normalize_low_clue_recall_config
-        # expects a flat config with "enabled" and "llm_judge" at the top level.
-        lcr_config = (
-            full_config.get("low_clue_recall")
-            if isinstance(full_config, dict) and isinstance(full_config.get("low_clue_recall"), dict)
-            else {}
-        )
-
-        judge_status = _judge_avail(lcr_config)
+        judge_status = _judge_avail({"enabled": True, "llm_judge": dict(_CLEARANCE_JUDGE_CONFIG)})
         return bool(judge_status.get("available", False))
     except Exception:
         return False
@@ -408,19 +390,10 @@ def _judge_against_permanents(
         _resolve_hermes_default_runtime,
     )
 
-    _DEFAULT_LLM_CONFIG: dict[str, Any] = {
-        "enabled": True,
-        "mode": "bounded_vote",
-        "provider": "hermes_default",
-        "temperature": 0,
-        "timeout_ms": 15000,
-        "max_tokens": 512,
-        "on_error": "deterministic_fallback",
-    }
-    resolved = _resolve_hermes_default_runtime(_DEFAULT_LLM_CONFIG)
+    resolved = _resolve_hermes_default_runtime(_CLEARANCE_JUDGE_CONFIG)
     if not resolved.get("ok"):
         return ("unknown", [], checked_entity_set, invalidation_mode, "judge_unavailable")
-    llm_config = dict(_DEFAULT_LLM_CONFIG)
+    llm_config = dict(_CLEARANCE_JUDGE_CONFIG)
 
     # ── Pair provisional with permanents ────────────────────────────────
     # Priority: entity-index shared entities → cosine fallback

@@ -44,7 +44,7 @@ def deploy_memory_os(
     hermes_home: str,
     mode: str,
     hindsight_mode: str,
-    llm_judge_preset: str = "active",
+    llm_judge_preset: str = "none",
     phase: str,
     profile: str,
     host: str = "",
@@ -543,7 +543,11 @@ def _run_llm_judge_probe(
     enabled: bool,
 ) -> dict[str, Any]:
     if not enabled:
-        return {"status": "skipped", "reason": "llm_judge_preset_none"}
+        # The judge is off by default, so "nothing to probe" is the normal
+        # outcome, not a degradation: a distinct status keeps it out of the
+        # generic skipped -> WARN bucket, which would otherwise fire on every
+        # default deploy.
+        return {"status": "not_requested", "reason": "llm_judge_preset_none"}
     result = _run_json(
         commands["llm_judge_probe"],
         runner=runner,
@@ -943,7 +947,7 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
     ):
         section = report.get(key) if isinstance(report.get(key), dict) else {}
         status = section.get("status")
-        if status in {"pass", "applied"}:
+        if status in {"pass", "applied", "not_requested"}:
             passed.append({"code": f"{key}_{status}"})
         elif status == "warn":
             warn.append({"code": str(section.get("reason") or f"{key}_warn")})
@@ -1067,7 +1071,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hermes-home", required=True)
     parser.add_argument("--mode", choices=["production-safe", "test-host", "operational"], default="production-safe")
     parser.add_argument("--hindsight", choices=["auto", "off", "adopt", "active", "wizard"], default="auto")
-    parser.add_argument("--llm-judge-preset", choices=["active", "none", "report-only", "bounded-vote"], default="active")
+    # Off by default: the judge is an opt-in probe (prefetch never calls it),
+    # and a judge that fails on every call only produces WARN noise.
+    parser.add_argument("--llm-judge-preset", choices=["active", "none", "report-only", "bounded-vote"], default="none")
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")
     parser.add_argument("--timeout", type=int, default=DEFAULT_COMMAND_TIMEOUT_SECONDS)

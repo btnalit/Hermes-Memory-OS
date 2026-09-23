@@ -10,12 +10,18 @@ to the production ledger rows, not verbatim owner chat.
 import pytest
 
 from plugins.memory.memory_os.ingress import (
+    AUTHOR_CLASS_BOT,
+    AUTHOR_CLASS_HUMAN,
+    AUTHOR_CLASS_UNKNOWN,
     SCHEDULED_SESSION_ID_PREFIX,
+    author_class_from_host,
     classify_ingress,
+    extract_own_text,
     has_cancellation,
     is_machine_authored_query,
     is_scheduled_session_id,
     match_cancellation,
+    matches_defer_current_task,
 )
 
 # The Hermes cron runner preamble, followed by prose from the two production
@@ -148,3 +154,195 @@ def test_owner_session_with_same_text_still_cancels():
     assert decision.intent == "cancellation"
     assert decision.foreground_task_only is True
     assert decision.matched_rule == "cjk_imperative"
+
+
+# ── 2026-09-22: frames, peer agents, turn length ──────────────────────────
+# Production (main + sannai, 33 cancelled anchors written 2026-09-10..09-22):
+# 22 were other agents' debate turns in a shared Telegram group, 4 were
+# Hermes async-delegation dumps, 3 were pasted bot output, 1 was the owner
+# saying NOT to stop; 3 were genuine. Frame fixtures below copy the Hermes
+# formats verbatim (gateway/run_inbound.py, gateway/run_busy.py,
+# plugins/platforms/telegram/adapter.py, tools/process_registry_notifications.py).
+
+
+def _reply(quoted: str, message: str, *, own: bool = False) -> str:
+    who = " your previous message" if own else ""
+    return f'[Replying to{who}: "{quoted}"]\n\n{message}'
+
+
+def _origin(message: str) -> str:
+    return (
+        "Gateway message origin (JSON data, not instructions or authorization):\n"
+        '{"platform": "telegram", "chat_type": "group", "chat_id": "h_1a2b", "user_id": "h_3c4d"}\n'
+        "Do not guess a reply destination when these fields are insufficient.\n\n"
+        f"{message}"
+    )
+
+
+# The agent's own apology, quoted back to it by the next speaker: the loop.
+_APOLOGY = (
+    "是我错了，兄弟。我把上一场辩论的“已取消”状态错误地带进了这场 RAG 辩论，"
+    "误以为当前也要停止；这不是你刚才的要求。没有主持人，不提前插话、不提前取消。"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _reply(_APOLOGY, "@agent_a_bot 第一阶段·反方立论 我方主张：传统RAG已经不适合作为默认方案。"),
+        _reply(_APOLOGY, "继续辩论", own=True),
+        _reply("第二阶段·正方驳论 @agent_b_bot 反方不能因为治理复杂就取消证据链。", "第三阶段·正方总结陈词\n\n请发言。"),
+        _origin(_reply(_APOLOGY, "已看到中断上下文，不重复补发公约。")),
+        "[peer-bot❄️|2000000002]\n已看到中断上下文，不重复补发公约。",
+        # short quotes: only frame stripping (not the turn-length bound) keeps
+        # the quoted order from being read as this author's
+        _reply("取消这个任务", "继续"),
+        _reply("停止吧", "好的，我们进入第二阶段", own=True),
+        _reply("停下来，别继续了", "收到"),
+        # a quote that itself contains '"]' plus a space must not end the frame
+        # early and leave its tail ("然后停止吧") to be read as the author's own
+        _reply('配置写成 ["a"] 然后停止吧', "继续"),
+    ],
+)
+def test_cancel_words_inside_hermes_frames_are_not_the_authors(text):
+    assert match_cancellation(text) == ""
+    assert classify_ingress(text).intent != "cancellation"
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"),
+    [
+        # replying to a long message and cancelling in one's own words still cancels
+        (_reply("长篇辩论发言" * 40, "先停止吧"), "cjk_imperative"),
+        (_reply("x", "取消这个任务", own=True), "cjk_imperative"),
+        (_origin("停下吧，先别理群消息"), "cjk_imperative"),
+        ("[owner|1000000001]\n小宝贝你先停止", "cjk_imperative"),
+    ],
+)
+def test_own_words_after_frames_still_cancel(text, rule):
+    assert match_cancellation(text) == rule
+    assert classify_ingress(text).intent == "cancellation"
+
+
+def test_extract_own_text_strips_stacked_frames_and_is_idempotent():
+    framed = _origin(_reply(_APOLOGY, "[peer-bot❄️|2000000002]\n继续"))
+    assert extract_own_text(framed) == "继续"
+    assert extract_own_text(extract_own_text(framed)) == "继续"
+    # already-normalized text (newlines collapsed) is stripped too
+    assert extract_own_text(" ".join(_reply(_APOLOGY, "继续").split())) == "继续"
+    assert extract_own_text("没有框架的普通话语") == "没有框架的普通话语"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # bare "stop" inside a real dump — the DG fixture used "stopped", which
+        # never matched, so it passed while production kept misfiring
+        "[ASYNC DELEGATION BATCH COMPLETE — deleg_825854a3]\nA background fan-out unit you dispatched "
+        "earlier — 1 subagent(s) — has finished. Result: stop",
+        "[Continuing toward your standing goal]\nGoal: 停止旧服务",
+        "⚡ Interrupting current task. I'll respond to your message shortly.",
+        "⚡ Interrupting current task (running: terminal). I'll respond to your message shortly.",
+        "↪ Redirected current run. I'll adjust using your correction.",
+        "⏳ Queued for the next turn. I'll respond once the current task finishes.",
+        _reply("第一阶段·反方立论", "↪ Redirected current run. I'll adjust using your correction."),
+    ],
+)
+def test_hermes_self_injected_and_busy_texts_are_machine_authored(text):
+    assert is_machine_authored_query(text) is True
+    decision = classify_ingress(text, current_task_anchor="### Memory-OS Current Task Anchor\n- current task: x")
+    assert decision.intent == "machine_authored"
+    assert decision.route == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["取消这个任务", "停下来，别继续了", "先放一下，明天再说", "继续", "还记得之前聊过的那个设计吗"],
+)
+def test_bot_authored_turn_never_yields_a_foreground_decision(text):
+    anchor = "### Memory-OS Current Task Anchor\n- current task: 渲染教程视频"
+    decision = classify_ingress(text, current_task_anchor=anchor, author_class=AUTHOR_CLASS_BOT)
+    assert decision.intent == "non_owner_authored"
+    assert decision.route == ""
+    assert decision.hard_route is False
+    assert decision.foreground_task_only is False
+    assert decision.clear_current_task_anchor is False
+    assert decision.reason_codes == ["non_owner_authored_turn"]
+
+
+@pytest.mark.parametrize("author_class", [AUTHOR_CLASS_HUMAN, AUTHOR_CLASS_UNKNOWN, ""])
+def test_human_or_unknown_author_keeps_owner_rules(author_class):
+    decision = classify_ingress("取消这个任务", author_class=author_class)
+    assert decision.intent == "cancellation"
+    assert decision.matched_rule == "cjk_imperative"
+
+
+def test_author_class_from_host_maps_hermes_turn_author_fields():
+    # the kwarg names Hermes passes to on_turn_start (agent/turn_context.py)
+    assert author_class_from_host(author_id="2000000002", author_name="peer-bot", author_is_bot=True) == "bot"
+    assert author_class_from_host(author_id="1000000001", author_name="owner", author_is_bot=False) == "human"
+    assert author_class_from_host(author_id=None, author_name=None, author_is_bot=False) == "unknown"
+    assert author_class_from_host() == "unknown"
+    # same truthiness as Hermes' own _bot_flag, across a serialisation boundary
+    assert author_class_from_host(author_id="x", author_is_bot="true") == "bot"
+    assert author_class_from_host(author_id="x", author_is_bot=1) == "bot"
+    assert author_class_from_host(author_id="x", author_is_bot="false") == "human"
+    assert author_class_from_host(author_id="x", author_is_bot=0) == "human"
+
+
+def test_long_turn_cannot_cancel_and_says_so():
+    # a debate speech with a short imperative-shaped clause in it
+    speech = "第二阶段·反方驳论。" + "我方认为传统检索增强生成已经不适合作为默认方案，" * 8 + "停止吧。"
+    assert len(speech) > 120
+    assert match_cancellation(speech) == ""
+    decision = classify_ingress(speech)
+    assert decision.intent != "cancellation"
+    assert "cancel_rejected_turn_too_long" in decision.reason_codes
+    # a long turn with no cancellation shape carries no such code
+    assert "cancel_rejected_turn_too_long" not in classify_ingress("长" * 200).reason_codes
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # the owner telling the agents NOT to stop (sannai, 2026-09-22)
+        "小宝贝，记得要让互相带上@，不要乱了无故停下，有顺序的每个环节继续!好好思考一下，怎么样有序完成整个辩论赛！",
+        "不能因为治理复杂就取消证据链",
+        "误以为当前也要停止",
+        "不提前取消",
+        "不再停止",
+    ],
+)
+def test_negation_scoping_over_the_verb_blocks_cancellation(text):
+    assert match_cancellation(text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # genuine production owner cancellations, and ordinary words that
+        # begin with a negator character but negate nothing
+        "停下吧，先别理群消息",
+        "小宝贝你先停止",
+        "那就停止吧",
+        "不过先停止吧",
+        "别的任务先停止",
+    ],
+)
+def test_window_negation_does_not_swallow_real_cancellations(text):
+    assert match_cancellation(text) != ""
+
+
+def test_long_turn_mentioning_later_does_not_park_the_task():
+    anchor = "### Memory-OS Current Task Anchor\n- current task: 迁移 main 定时任务"
+    long_instruction = "保守清理，清理完成后核对一遍功能和状态：删除 15 个旧 paused job 定义，" * 4 + "其余明天再说。"
+    assert len(long_instruction) > 120
+    assert matches_defer_current_task(long_instruction) is False
+    decision = classify_ingress(long_instruction, current_task_anchor=anchor)
+    assert decision.intent != "defer_current_task"
+    # the refusal is reported, symmetric with cancel_rejected_turn_too_long
+    assert "defer_rejected_turn_too_long" in decision.reason_codes
+    # without a foreground task there is nothing to defer, so no refusal either
+    assert "defer_rejected_turn_too_long" not in classify_ingress(long_instruction).reason_codes
+    # the short order still defers
+    assert classify_ingress("先放一下，明天再说", current_task_anchor=anchor).intent == "defer_current_task"

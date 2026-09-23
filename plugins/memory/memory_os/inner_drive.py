@@ -125,6 +125,9 @@ _SOURCE_GATE_WEAK_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 _SOURCE_GATE_SKIP_REASON = "source_gate:obvious_fragment"
+# Explicit ``safe_ref.drive_policy`` values that keep an event out of working
+# memory and candidates.
+_NON_DRIVING_POLICIES = frozenset({"index_only", "evidence_only", "candidate_surface", "ignore"})
 
 
 def _segment_is_weak_fragment(segment: str) -> bool:
@@ -322,6 +325,19 @@ def classify_event_for_inner_drive(event: EventEnvelope) -> InnerDriveEventDecis
     candidate_explicit = safe_ref.get("candidate_allowed")
 
     if kind == "conversation_turn":
+        # A turn the provider marked non-driving (another agent's turn, a
+        # machine frame, or a foreground-control exchange such as "停下吧" /
+        # "收到，已停止") is kept for the index only. Before 2026-09-22 this
+        # branch ignored the explicit policy, so those turns became eligible
+        # lingering items and were re-injected by term overlap — the stop
+        # acknowledgements of one debate kept resurfacing in the next.
+        if explicit_policy in _NON_DRIVING_POLICIES:
+            return InnerDriveEventDecision(
+                source_class=source_class,
+                drive_policy=explicit_policy,
+                candidate_allowed=False,
+                skip_reason=explicit_policy,
+            )
         # Source gate: default flipped from True to content-based.
         # candidate_explicit (bool) still overrides — preserves explicit control.
         if isinstance(candidate_explicit, bool):
@@ -376,7 +392,7 @@ def classify_event_for_inner_drive(event: EventEnvelope) -> InnerDriveEventDecis
             working_weight=0.2,
             candidate_allowed=_candidate_allowed(candidate_explicit, default=False),
         )
-    if kind in {"cron_job_run", "session_observed"} or explicit_policy in {"index_only", "evidence_only", "candidate_surface", "ignore"}:
+    if kind in {"cron_job_run", "session_observed"} or explicit_policy in _NON_DRIVING_POLICIES:
         return InnerDriveEventDecision(
             source_class=source_class,
             drive_policy=explicit_policy or "index_only",

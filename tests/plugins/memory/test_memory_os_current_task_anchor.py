@@ -15,6 +15,7 @@ def _store(tmp_path):
 def test_provider_on_pre_compress_returns_bounded_current_task_anchor(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
 
     anchor = provider.on_pre_compress(
         [
@@ -38,6 +39,7 @@ def test_provider_on_pre_compress_returns_bounded_current_task_anchor(tmp_path):
 def test_provider_system_prompt_block_exposes_current_task_anchor_after_pre_compress(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
 
     provider.on_pre_compress(
         [
@@ -75,6 +77,7 @@ def test_prefetch_can_place_current_task_anchor_above_memory_layers(tmp_path):
 def test_provider_prefetch_includes_current_task_anchor_after_pre_compress(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "安装 ComfyUI Impact Pack"},
@@ -93,6 +96,7 @@ def test_provider_prefetch_includes_current_task_anchor_after_pre_compress(tmp_p
 def test_cancellation_query_does_not_pivot_to_background_memory(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "剪一个 ComfyUI 教程视频，修掉内容消失的问题"},
@@ -134,6 +138,7 @@ def test_cancellation_query_does_not_pivot_to_background_memory(tmp_path):
 def test_continue_query_after_anchor_uses_foreground_only_prefetch(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "安装 ComfyUI Impact Pack"},
@@ -177,6 +182,7 @@ def test_deictic_yesterday_continue_routes_deferred_task_as_low_clue_candidate(t
     )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
@@ -230,6 +236,7 @@ def test_explicit_deferred_task_resume_still_uses_foreground_only(tmp_path):
     )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
@@ -263,6 +270,7 @@ def test_chinese_explicit_deferred_task_resume_uses_matching_foreground_attribut
     )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider.on_pre_compress(
         [
             {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
@@ -295,6 +303,7 @@ def test_deferred_continue_without_record_asks_for_clarification(tmp_path):
     )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     provider._store.write_working_document(
         "lingering",
         {
@@ -325,6 +334,7 @@ def test_deferred_continue_without_record_asks_for_clarification(tmp_path):
 def test_current_task_anchor_redacts_secrets(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
 
     anchor = provider.on_pre_compress(
         [
@@ -367,6 +377,7 @@ def _anchor_records(tmp_path):
 def _owner_provider(tmp_path, session_id):
     provider = load_memory_provider("memory_os")
     provider.initialize(session_id, hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     return provider
 
 

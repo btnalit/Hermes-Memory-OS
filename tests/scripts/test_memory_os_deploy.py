@@ -12,9 +12,11 @@ from scripts.deploy_memory_os import (
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
     _run_command,
+    _run_llm_judge_probe,
     _run_memory_projection_refresh,
     classify_deploy_report,
     deploy_memory_os,
+    main as deploy_main,
     render_deploy_plan,
 )
 
@@ -457,7 +459,7 @@ def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     assert report["profile"] == "fresh"
     assert report["restart_requested"] is False
     assert "--hindsight auto" in rendered
-    assert "--llm-judge-preset active" in rendered
+    assert "--llm-judge-preset none" in rendered
     assert "--production-safe" in rendered
     assert "SECRET" not in json.dumps(report, ensure_ascii=False)
 
@@ -1288,6 +1290,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
         hermes_home="/root/.hermes",
         mode="operational",
         hindsight_mode="auto",
+        # The judge is opt-in since 2026-09-22; this test covers the opted-in path.
+        llm_judge_preset="active",
         phase="postcheck",
         profile="upgrade",
         run_command=fake_runner,
@@ -1522,3 +1526,21 @@ def test_probe_classifiers_still_report_bad_output_as_json_invalid(classifier, p
     garbage = {"exit_code": 0, "stdout": "not json", "json": None}
 
     assert classifier(garbage)["reason"] == f"{prefix}_json_invalid"
+
+
+def test_cli_deploy_defaults_llm_judge_off(tmp_path, capsys):
+    # The judge is opt-in (owner ruling 2026-09-22): a bare deploy must write
+    # the "none" preset and skip the judge probe, not enable bounded voting.
+    deploy_main(["--repo-root", str(tmp_path), "--hermes-home", "/root/.hermes", "--output", "json"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["llm_judge_preset"] == "none"
+    assert "--llm-judge-preset none" in render_deploy_plan(report)
+
+
+def test_unrequested_llm_judge_probe_is_not_a_deploy_warning():
+    # With the judge off by default, a WARN here would fire on every deploy.
+    probe = _run_llm_judge_probe({}, runner=None, host="", timeout=30, enabled=False)
+    assert probe == {"status": "not_requested", "reason": "llm_judge_preset_none"}
+    classified = classify_deploy_report({"llm_judge_probe": probe})
+    assert {"code": "llm_judge_probe_not_requested"} in classified["pass"]
+    assert all("llm_judge" not in item["code"] for item in classified["warn"])
