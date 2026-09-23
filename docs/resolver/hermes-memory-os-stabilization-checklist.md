@@ -5031,6 +5031,10 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `33d674b..HEAD`：monitor 接线 part 2（DW）——P0 主体普查采集器统一改用 `roots.state_db_path` / `principal.MACHINE_SESSION_SOURCES`
+  两个既有 accessor（不再手写路径/副本）；新增 `lane_backend_transport_summary` 展示 fact_judge 的 `judge_backend` / Jev 回落计数
+  （全部回落时 WARN，默认关闭恒 INFO）与 SFE 的 `input_source` / `group_sessions_*` 计数（INFO only）；`llm_route_unexpected` 因跨两个
+  越界文件才能落地而不实现，记为遗留。全量 4179 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
 - `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
   新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿。全量 4068 passed。**未部署**。
 - `7c72f63..HEAD`：J1（DS）——可选的 TypeSafe Jev 判官后端（独立文件、stdlib HTTP、默认关闭），fact_judge 以原生 `noul` 问题接入，
@@ -8590,3 +8594,66 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   分级（monitor part 2）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界 SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时。
 - **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮
   `backfill_upgraded_count>0`，7 天内 main `superseded_by_newer>0`（sannai 允许 no-sample）。
+
+---
+
+## DW — monitor 接线 part 2：主体普查统一 accessor、J1 回落、L1 路由、SFE 计数（2026-09-23）
+
+- **背景**：monitor part 1（DP）接了 C3/P0 主体普查/G0 三项，明确留下四项给 part 2：P0 嵌入式采集器仍手写 `state.db` 路径与本地
+  `PRINCIPAL_MACHINE_SESSION_SOURCES` 副本（DP 遗留）；J1 的 `judge_backend` / 回落计数 / 回落详情样本尚无 monitor 读者（DS 遗留）；L1 的
+  `llm_transport` / provider / model 对 fact_judge、session_fact_extraction 两条 lane 尚未展示，规划 `llm_route_unexpected` 待评估（DN 遗留）；
+  SFE 的 `input_source` / `sessions_skipped_by_principal` / `group_sessions_scanned` / `group_sessions_without_user_suffix` 四个新计数已产出
+  但未接 monitor（DR 遗留）。本 PR（Sonnet 单代理，范围仅 monitor + 其测试 + `lane_contracts.py`）逐项接线，不改任何生产者。
+- **① 主体普查统一 accessor**：嵌入式采集器 `principal_binding_summary` 的 `db_path = os.path.join(_hermes_home, "state.db")` 改为
+  `state_db_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))`——与同一采集器文件里 `lane_input_freshness_summary` 已经
+  在用的 accessor 完全一致（CLAUDE.md 的"路径字面量各处重写"漂移类）；本地 `_classify_principal_binding` 的 `ruled_sources` 计算改从
+  `principal.py` 现读 `MACHINE_SESSION_SOURCES`（与同函数里 `LOCAL_OWNER_SOURCES` / `API_SELF_DECLARED_SOURCES` / `MAILBOX_SOURCE` 三个已有
+  import 同源），模块级 `PRINCIPAL_MACHINE_SESSION_SOURCES = frozenset(...)` 副本删除。两处均只改实现，输出键名与既有分级语义不变。
+- **② J1 回落可见性 + ③ L1 路由展示（合并实现，新采集器 `lane_backend_transport_summary`）**：fact_judge 自身没有逐 tick 的账本（只有逐候选
+  `verdicts.jsonl`），其 `judge_backend` / `judge_backend_fallback_count` / `_fallback_reasons` / `_fallback_detail_sample` /
+  `llm_transport` / `llm_provider` / `llm_model` 只存在于共享的 `execution_gate_envelopes.jsonl` 账本里该 lane_id 的最新一条 `completion`
+  记录的 `result_summary`（`memory_os_fact_judge_lane.py::_write_execution_report` 写入）——新采集器经 `execution_gate_records_path` +
+  `read_jsonl_tail`（有界倒序扫描，`max_records=5000` 与既有 `_execution_gate_helper_completion_summary` 同量级）定位。
+  session_fact_extraction 有自己的逐 run 账本（`system-modules/session_fact_extraction/runs.jsonl`），改为直接读其最新一条记录（同一批字段 +
+  `input_source` / `sessions_skipped_by_principal` / `group_sessions_scanned` / `group_sessions_without_user_suffix`）。`classify_snapshot`
+  新增一段：两条 lane 各出一条 INFO（`fact_judge_backend_state` / `session_fact_extraction_backend_state`，无样本时降级为 `_no_sample`）；
+  仅当 `judge_backend=="typesafe_jev"` 且本 tick `judged_count>0` 且 `judge_backend_fallback_count>=judged_count`（本 tick 判定的候选全部
+  回落）时另出 WARN `fact_judge_backend_fallback_all`（Jev 静默失活，而非一次性抖动）——默认关闭（`hermes_default`）恒为 INFO，`judged_count`
+  守卫防止空 tick 的 `0>=0` 假阳性。`judge_backend_fallback_detail_sample` 的可信度已核实：`jev_backend.py` 的 HTTP 错误 detail 只取
+  `exc.read()`（远端 API 自己的错误响应体），`api_key` 只出现在出站 `Authorization` 头里、从未进入任何 `detail=` 构造；样本在
+  jev_backend→fact_judge→本采集器三层各裁一次（200/160/160/200 字符）。SFE 的四个新计数刻意不分级（INFO only），与
+  `session_fact_extraction.py` 自己"group-chat tripwire"docstring 的处置一致。`fact_judge_backend_fallback_all` 登记进
+  `CLEAN_HOST_WARN_CLASSIFICATIONS`（`expected_clean_host` / `warn_if_production`——Jev 默认关闭，clean-host 不可能命中）。
+- **`llm_route_unexpected` 前置条件核实（规划 L1 行，未实现）**：先查 `LlmCallResult`（`low_clue_recall.py`）是否已经暴露"应答模型"——
+  它暴露的 `model` 字段实为 `route_info.get("model") or model or getattr(response, "model", "")` 的合并结果，混合了"调用方要的模型"与
+  "响应声称的模型"，且 `_call_hermes_runtime_model_hermes_result` 内部确实算出了调用前的期望模型（`_resolve_hermes_default_runtime(config)
+  ["model"]`），但这个值在函数里被直接丢弃，从未进入 `LlmCallResult`。即便在 `low_clue_recall.py`（本次派工单唯一允许为此项改动的文件）里
+  补一个 `expected_model` 字段，fact_judge.py 的 `_call_diagnostics`（本次派工单标为只读）与 session_fact_extraction.py 里几乎同形的内联
+  diagnostics 代码各自手写一份"从 LlmCallResult 转报告字段"的白名单，不会自动转发新字段——要让 WARN 真正落到 monitor，必须同时改这两个
+  lane 文件的报告聚合逻辑，而它们不在本次允许编辑的范围内。因此按派工单条款：不实现，作为证据充分的缺口记录（见"遗留"），不强行在
+  `low_clue_recall.py` 单点加一个够不到 monitor 的计数器。
+- **反事实**（全部用 cp 备份做"破坏即失败、恢复即通过"验证，未用 `git checkout --`）：① `state_db_path` 改回字面量拼接后
+  `test_principal_binding_summary_uses_state_db_path_accessor_not_a_rebuilt_literal` FAIL（读到 `no_state_db` 而非 `ok`），恢复后 PASS；
+  ② `ruled_sources` 改回本地字面量 `frozenset({"cron","subagent"})` 后 `test_classify_principal_binding_ruled_sources_track_principal_
+  machine_session_sources_live` FAIL（WARN 未出现），恢复后 PASS；③ 采集器"取最新一条"的 `reversed()` 去掉后
+  `test_lane_backend_transport_summary_fact_judge_picks_the_latest_completion` FAIL（读到旧记录的 `hermes_default` 而非新记录的
+  `typesafe_jev`），恢复后 PASS；④ WARN 条件去掉 `judge_backend=="typesafe_jev"` 与 `judged_count>0` 两个守卫后，
+  `test_fact_judge_backend_fallback_all_never_warns_when_default_off` 与 `..._does_not_warn_on_empty_tick` 均 FAIL，恢复后 PASS；⑤
+  `CLEAN_HOST_WARN_CLASSIFICATIONS` 里的新条目删除后 `test_fact_judge_backend_fallback_all_is_warn_if_production_on_clean_host` FAIL
+  （`clean_host_warn_unclassified` 命中该码），恢复后 PASS。
+- **词表钉死**：两条测试直接调用真实 `run_fact_judge_lane` / `run_session_fact_extraction_lane`（真实 store，非手写 fixture）断言其返回字典
+  包含本采集器所读的全部键；另两条集成测试用真实生产者写出真实账本记录（含 SFE 所需的 ExecutionGate permit 信封）再经采集器读回，核对字段
+  与值——不是手造 JSON 断言字段存在。
+- **测试**：monitor +21（含上述 5 类反事实、2 条词表钉死、2 条真生产者集成、latest-wins 选取、no-sample、INFO-only 边界、clean-host 归类）；
+  `test_memory_os_3_200_monitor.py` 单文件 321 passed；连带 `lane_contracts` / `fact_judge` / `session_fact_extraction` / `principal`
+  四个文件 320 passed；全量 4179 passed / 13 skipped / 0 failed（未复现已知 Windows 并发 flake）；五门全绿（import-cycle 0 环 /
+  write-surface `unclassified_count=0` / static-hygiene `pass` / public-checkout `--strict` `PASS` / `git diff --check` 无输出）。
+- **遗留**：`llm_route_unexpected`（应答模型 ≠ 主模型时的 WARN）未实现——见上方"前置条件核实"，需要 owner 决定是否值得为它单独改
+  fact_judge.py / session_fact_extraction.py 的报告聚合逻辑（跨两个 lane 文件的改动，且两处已各自手写字段白名单，不共享一处"转发全部
+  LlmCallResult 字段"的口子，这本身也是可以指出的技术债——一次 seam 升级要吃两次改动）；`session_fact_extraction.py` 不在本次允许编辑名单，
+  只读用于核实字段来源；monitor 里 `execution_gate_envelopes.jsonl` 路径字面量已有 ≥3 处手写副本（`_records_path` /
+  `_execution_gate_helper_completion_summary` / `session_mirror_auto_apply_permit_integrity`），本次新增的 `lane_backend_transport_summary`
+  改用了真正的 `execution_gate_records_path` accessor，但未回头统一那三处既有副本（超出本次派工单范围，记为技术债）。
+- **部署**：随规划全部落地后统一部署，不改任何生产者/写路径，纯只读接线，无需重启 gateway；部署后验收：`fact_judge_backend_state` /
+  `session_fact_extraction_backend_state` 两条 INFO 在 main / sannai 均能读到最近一次 tick 的 `llm_transport=hermes_call_llm`；若 owner 开启
+  `fact_judge_judge_backend=typesafe_jev`，观察 `fact_judge_backend_fallback_all` 是否出现（预期不出现，出现即 Jev 生产环境静默失活）。

@@ -124,11 +124,12 @@ APPEND_ONLY_LEDGER_RELATIVE_PATHS: dict[str, str] = {
 LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD = 5
 LLM_LANE_FAILURE_STREAK_TAIL_LIMIT = 50
 
-# P0-lite principal binding grading. Hermes state.db `sessions.source` values
-# that are not human chat platforms (machine sessions observed on production
-# 2026-09-23: cron, subagent); local / mailbox / api sources resolve by rule in
+# P0-lite principal binding grading. Machine session sources (cron, subagent)
+# are read live from principal.MACHINE_SESSION_SOURCES (DW: monitor part 2) --
+# not re-typed here, matching how LOCAL_OWNER_SOURCES / API_SELF_DECLARED_SOURCES
+# / MAILBOX_SOURCE below are already imported from principal.py rather than
+# copied. local / mailbox / api sources resolve by rule in
 # principal.resolve_principal and never need an owner identity.
-PRINCIPAL_MACHINE_SESSION_SOURCES = frozenset({"cron", "subagent"})
 PRINCIPAL_BINDING_WINDOW_DAYS = 30
 
 # C2: the memory_projection_compaction lane is daily (due_interval_minutes
@@ -439,6 +440,15 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "classification": "expected_clean_host",
         "reason": "a platform with more than one human user has no configured owner identity, so every non-owner turn there still drives the owner's foreground task and memory (compatibility mode); fix with deploy --owner-identity <platform>:<id> or by setting <PLATFORM>_HOME_CHANNEL in Hermes and redeploying",
         "production_behavior": "fail_if_production",
+    },
+    # DW: monitor part 2. typesafe_jev is opt-in and default-off (J1 owner
+    # ruling 2026-09-23) -- a clean host with no TYPESAFE_API_KEY configured
+    # and no fact_judge_judge_backend override cannot select it, so this can
+    # only fire when an operator has deliberately opted in.
+    "fact_judge_backend_fallback_all": {
+        "classification": "expected_clean_host",
+        "reason": "typesafe_jev is opt-in and default-off; a clean host with no TYPESAFE_API_KEY / fact_judge_judge_backend override configured never selects it, so every judged candidate falling back can only happen after an operator opts in",
+        "production_behavior": "warn_if_production",
     },
     "index_not_healthy": {
         "classification": "expected_clean_host",
@@ -1486,6 +1496,7 @@ def _classify_principal_binding(
     from plugins.memory.memory_os.principal import (
         API_SELF_DECLARED_SOURCES,
         LOCAL_OWNER_SOURCES,
+        MACHINE_SESSION_SOURCES,
         MAILBOX_SOURCE,
     )
 
@@ -1504,7 +1515,7 @@ def _classify_principal_binding(
         })
         return
     ruled_sources = (
-        PRINCIPAL_MACHINE_SESSION_SOURCES | LOCAL_OWNER_SOURCES | API_SELF_DECLARED_SOURCES | {MAILBOX_SOURCE}
+        MACHINE_SESSION_SOURCES | LOCAL_OWNER_SOURCES | API_SELF_DECLARED_SOURCES | {MAILBOX_SOURCE}
     )
     platforms = binding.get("platforms") if isinstance(binding.get("platforms"), dict) else {}
     for platform, entry in sorted(platforms.items()):
@@ -1719,6 +1730,81 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             "code": "graph_layer_novelty" if novelty_status == "ok" else "graph_layer_novelty_no_sample",
             "value": raw_novelty,
         })
+
+    # ── DW: monitor part 2 -- J1 backend fallback + L1 transport visibility
+    # (fact_judge, session_fact_extraction). See lane_backend_transport_summary()
+    # in the embedded probe script for the producer side.
+    raw_lane_backend_transport = snapshot.get("lane_backend_transport")
+    lane_backend_transport: dict[str, Any] = (
+        raw_lane_backend_transport if isinstance(raw_lane_backend_transport, dict) else {}
+    )
+    if lane_backend_transport:
+        backend_lanes = (
+            lane_backend_transport.get("lanes") if isinstance(lane_backend_transport.get("lanes"), dict) else {}
+        )
+        fact_judge_backend = (
+            backend_lanes.get("fact_judge") if isinstance(backend_lanes.get("fact_judge"), dict) else {}
+        )
+        if fact_judge_backend.get("status") == "ok":
+            fj_judge_backend = str(fact_judge_backend.get("judge_backend") or "")
+            fj_judged_count = int(fact_judge_backend.get("judged_count") or 0)
+            fj_fallback_count = int(fact_judge_backend.get("judge_backend_fallback_count") or 0)
+            info.append({
+                "code": "fact_judge_backend_state",
+                "value": {
+                    "judge_backend": fj_judge_backend,
+                    "judged_count": fj_judged_count,
+                    "judge_backend_fallback_count": fj_fallback_count,
+                    "judge_backend_fallback_reasons": fact_judge_backend.get("judge_backend_fallback_reasons") or {},
+                    "llm_transport": fact_judge_backend.get("llm_transport") or "",
+                    "llm_provider": fact_judge_backend.get("llm_provider") or "",
+                    "llm_model": fact_judge_backend.get("llm_model") or "",
+                },
+            })
+            # typesafe_jev is opt-in and default-off (J1 owner ruling); a tick
+            # that selected it but had every judged candidate fall back to
+            # hermes_default means Jev is silently dead for this lane, not
+            # merely degraded once -- WARN. judged_count > 0 guards against a
+            # vacuous 0==0 match on a tick with nothing to judge.
+            if fj_judge_backend == "typesafe_jev" and fj_judged_count > 0 and fj_fallback_count >= fj_judged_count:
+                warn.append({
+                    "code": "fact_judge_backend_fallback_all",
+                    "value": {
+                        "judged_count": fj_judged_count,
+                        "judge_backend_fallback_count": fj_fallback_count,
+                        "judge_backend_fallback_reasons": fact_judge_backend.get("judge_backend_fallback_reasons") or {},
+                        "judge_backend_fallback_detail_sample": fact_judge_backend.get(
+                            "judge_backend_fallback_detail_sample"
+                        ) or "",
+                    },
+                })
+        else:
+            info.append({"code": "fact_judge_backend_no_sample", "value": fact_judge_backend})
+
+        sfe_backend = (
+            backend_lanes.get("session_fact_extraction")
+            if isinstance(backend_lanes.get("session_fact_extraction"), dict) else {}
+        )
+        if sfe_backend.get("status") == "ok":
+            # SFE counters (input_source, sessions_skipped_by_principal,
+            # group_sessions_scanned/without_user_suffix) are deliberately
+            # ungraded INFO -- same disposition as the group-chat tripwire's
+            # own docstring in session_fact_extraction.py.
+            info.append({
+                "code": "session_fact_extraction_backend_state",
+                "value": {
+                    "input_source": sfe_backend.get("input_source") or "",
+                    "sessions_skipped_by_principal": sfe_backend.get("sessions_skipped_by_principal") or {},
+                    "group_sessions_scanned": int(sfe_backend.get("group_sessions_scanned") or 0),
+                    "group_sessions_without_user_suffix": int(sfe_backend.get("group_sessions_without_user_suffix") or 0),
+                    "llm_transport": sfe_backend.get("llm_transport") or "",
+                    "llm_provider": sfe_backend.get("llm_provider") or "",
+                    "llm_model": sfe_backend.get("llm_model") or "",
+                },
+            })
+        else:
+            info.append({"code": "session_fact_extraction_backend_no_sample", "value": sfe_backend})
+    # ── end DW grading block ────────────────────────────────────────────────
 
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
@@ -6804,6 +6890,10 @@ def principal_binding_summary(window_days=30):
     # P0-lite: per-platform session census from Hermes state.db -- counts
     # only, never an id. classify_snapshot() decides what is graded; the
     # window default mirrors PRINCIPAL_BINDING_WINDOW_DAYS in the local module.
+    # DW (monitor part 2): db_path is resolved through roots.state_db_path
+    # (SFE, 2026-09-23), the same accessor lane_input_freshness_summary above
+    # already uses, instead of rebuilding the "state.db" path literal here --
+    # CLAUDE.md's "path literal repeated at each call site" class of drift.
     schema = "memory-os.principal_binding.v0"
     try:
         import sqlite3
@@ -6814,9 +6904,10 @@ def principal_binding_summary(window_days=30):
             _owner_identities_for,
             principal_binding_status,
         )
+        from plugins.memory.memory_os.roots import MemoryOSRoots, state_db_path
     except Exception as exc:
         return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__, "platforms": {}}
-    db_path = os.path.join(_hermes_home, "state.db")
+    db_path = str(state_db_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")))
     if not os.path.exists(db_path):
         return {"schema_version": schema, "status": "no_state_db", "platforms": {}}
     # Schema verified read-only on hermes-media 2026-09-23 (both profiles):
@@ -6884,6 +6975,104 @@ def graph_layer_novelty_summary(max_records=2000):
     errors = summary.pop("error_records", []) or []
     summary["error_record_count"] = len(errors)
     return summary
+
+# ─── DW: monitor part 2 -- J1 backend fallback + L1 transport/provider/model
+# visibility for fact_judge and session_fact_extraction (2026-09-23) ────────
+#
+# fact_judge has no dedicated per-tick ledger of its own (only the per-
+# candidate verdicts.jsonl already read by llm_lane_failure_streak_summary
+# above) -- its tick-level judge_backend / fallback diagnostics exist only in
+# the shared ExecutionGate completion ledger's result_summary
+# (memory_os_fact_judge_lane.py's _write_execution_report writes
+# {"lane_id": "fact_judge", ..., **run_fact_judge_lane()} into
+# execution_gate_records_path()). session_fact_extraction DOES have its own
+# per-run ledger (system-modules/session_fact_extraction/runs.jsonl, one
+# record per run via _append_run_report) and is read from there directly --
+# a dedicated ledger over the shared 24-lane envelope stream when one exists.
+def lane_backend_transport_summary():
+    schema = "memory-os.lane_backend_transport.v0"
+    try:
+        from plugins.memory.memory_os.execution_gate import execution_gate_records_path
+        from plugins.memory.memory_os.jsonl_io import read_jsonl_tail
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+    except Exception as exc:
+        return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__, "lanes": {}}
+
+    lanes = {}
+
+    # fact_judge: latest completion record for this lane_id in the shared
+    # execution_gate_envelopes.jsonl ledger (bounded reverse tail scan --
+    # CLAUDE.md: append-only ledger reads belong in read_jsonl_tail).
+    try:
+        envelopes_path = execution_gate_records_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+        envelope_result = read_jsonl_tail(envelopes_path, max_records=5000, max_bytes=4 * 1024 * 1024)
+        fact_judge_result_summary = {}
+        for record in reversed(envelope_result.records):
+            if (
+                isinstance(record, dict)
+                and record.get("stage") == "completion"
+                and str(record.get("lane_id") or "") == "fact_judge"
+                and isinstance(record.get("result_summary"), dict)
+            ):
+                fact_judge_result_summary = record["result_summary"]
+                break
+    except Exception as exc:
+        lanes["fact_judge"] = {"status": "collection_error", "collection_error": f"{type(exc).__name__}: {exc}"[:160]}
+    else:
+        if not fact_judge_result_summary:
+            lanes["fact_judge"] = {"status": "no_sample"}
+        else:
+            lanes["fact_judge"] = {
+                "status": "ok",
+                "judge_backend": str(fact_judge_result_summary.get("judge_backend") or ""),
+                "judged_count": int(fact_judge_result_summary.get("judged_count") or 0),
+                "judge_backend_fallback_count": int(fact_judge_result_summary.get("judge_backend_fallback_count") or 0),
+                "judge_backend_fallback_reasons": (
+                    fact_judge_result_summary.get("judge_backend_fallback_reasons")
+                    if isinstance(fact_judge_result_summary.get("judge_backend_fallback_reasons"), dict) else {}
+                ),
+                # jev_backend.py's HTTP error detail is the remote API's own
+                # error response body (status + message text), never the
+                # request -- the api_key only ever appears in the outbound
+                # Authorization header, which is never captured into any
+                # `detail=` string. Already clipped to 160 chars twice
+                # upstream (jev_backend, fact_judge); re-clipped here as a
+                # third, independent bound.
+                "judge_backend_fallback_detail_sample": str(
+                    fact_judge_result_summary.get("judge_backend_fallback_detail_sample") or ""
+                )[:200],
+                "llm_transport": str(fact_judge_result_summary.get("llm_transport") or ""),
+                "llm_provider": str(fact_judge_result_summary.get("llm_provider") or ""),
+                "llm_model": str(fact_judge_result_summary.get("llm_model") or ""),
+            }
+
+    # session_fact_extraction: latest record from its own runs.jsonl.
+    sfe_path = os.path.join(_hermes_home, "memory-os/system-modules/session_fact_extraction/runs.jsonl")
+    try:
+        sfe_result = read_jsonl_tail(sfe_path, max_records=20, max_bytes=1048576)
+        sfe_latest = next((r for r in reversed(sfe_result.records) if isinstance(r, dict)), None)
+    except Exception as exc:
+        lanes["session_fact_extraction"] = {"status": "collection_error", "collection_error": f"{type(exc).__name__}: {exc}"[:160]}
+    else:
+        if sfe_latest is None:
+            lanes["session_fact_extraction"] = {"status": "no_sample"}
+        else:
+            lanes["session_fact_extraction"] = {
+                "status": "ok",
+                "input_source": str(sfe_latest.get("input_source") or ""),
+                "sessions_skipped_by_principal": (
+                    sfe_latest.get("sessions_skipped_by_principal")
+                    if isinstance(sfe_latest.get("sessions_skipped_by_principal"), dict) else {}
+                ),
+                "group_sessions_scanned": int(sfe_latest.get("group_sessions_scanned") or 0),
+                "group_sessions_without_user_suffix": int(sfe_latest.get("group_sessions_without_user_suffix") or 0),
+                "llm_transport": str(sfe_latest.get("llm_transport") or ""),
+                "llm_provider": str(sfe_latest.get("llm_provider") or ""),
+                "llm_model": str(sfe_latest.get("llm_model") or ""),
+            }
+
+    return {"schema_version": schema, "lanes": lanes}
+# ─── end DW block ───────────────────────────────────────────────────────────
 
 def append_only_ledger_size_summary():
     # W1-B: raw sizes only -- classify_snapshot() applies
@@ -10032,6 +10221,7 @@ print(json.dumps({
   "llm_lane_failure_streak": llm_lane_failure_streak_summary(),
   "principal_binding": principal_binding_summary(),
   "graph_layer_novelty": graph_layer_novelty_summary(),
+  "lane_backend_transport": lane_backend_transport_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))

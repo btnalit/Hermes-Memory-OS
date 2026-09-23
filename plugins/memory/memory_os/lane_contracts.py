@@ -198,7 +198,15 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         reads=("candidate queue (inner_drive_candidate items)",),
         produces=("fact_judge verdict sidecar JSONL (durable_fact judgements)",),
         consumers=("plugins.memory.memory_os.crystallized",),
-        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + ("llm_lane_consecutive_failure_streak",),
+        # DW: monitor part 2 reads the ExecutionGate completion ledger's
+        # result_summary for this lane_id (judge_backend / fallback / L1
+        # transport diagnostics) -- see lane_backend_transport_summary().
+        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
+            "llm_lane_consecutive_failure_streak",
+            "fact_judge_backend_state",
+            "fact_judge_backend_no_sample",
+            "fact_judge_backend_fallback_all",
+        ),
     ),
     "candidate_aggregation": LaneContract(
         kind=CRON_LANE,
@@ -230,7 +238,16 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
         ),
         produces=("candidate queue entries (unapproved candidates)",),
         consumers=("plugins.memory.memory_os.crystallized",),
-        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + ("lane_input_stale", "llm_lane_consecutive_failure_streak"),
+        # DW: monitor part 2 reads system-modules/session_fact_extraction/
+        # runs.jsonl's latest record for input_source / sessions_skipped_by_
+        # principal / group_sessions_* / L1 transport diagnostics -- see
+        # lane_backend_transport_summary().
+        monitor_codes=GENERIC_CRON_LANE_MONITOR_CODES + (
+            "lane_input_stale",
+            "llm_lane_consecutive_failure_streak",
+            "session_fact_extraction_backend_state",
+            "session_fact_extraction_backend_no_sample",
+        ),
     ),
     # G4 -- day-boundary + maintenance
     "exposure_rollup": LaneContract(
