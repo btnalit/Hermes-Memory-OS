@@ -8849,6 +8849,51 @@ def test_cursor_alignment_fields_survive_both_whitelists_end_to_end(tmp_path, mo
     assert not any(item["code"].startswith("v2_graph") for item in graded["fail"])
 
 
+def test_every_edge_weight_feedback_scalar_survives_both_whitelists_end_to_end(tmp_path):
+    """Census across all three layers with no hand-written result: the REAL
+    producer runs, the REAL cognitive_loop wrapper filters it, the report is
+    read back by the REAL embedded monitor collector. Every scalar the
+    wrapper publishes must reach the monitor.
+
+    The cursor test above hand-lists its keys, so G0's orphan-cascade and
+    shadow-compaction counters were dropped at both whitelists while it
+    stayed green.
+    """
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    wrapper_summary = CognitiveLoopRunner(store)._edge_weight_feedback({})
+    assert "orphan_invalidated_count" in wrapper_summary, "sanity: the wrapper passed G0 counters"
+
+    report = {
+        "cycle_id": "cycle-census",
+        "status": "ok",
+        "steps": [{"step": "edge_weight_feedback", "status": "ok", "duration_ms": 1, "result": wrapper_summary}],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    (mod_dir / "reports.jsonl").write_text(_json.dumps(report) + "\n", encoding="utf-8")
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    surfaced = namespace["cognitive_loop_step_evidence"]()["edge_step_results"]["edge_weight_feedback"]
+
+    # Non-scalar or envelope-only keys the monitor deliberately does not carry.
+    not_carried = {"schema_version", "orphan_cascade_error_records"}
+    scalar_keys = {
+        key for key, value in wrapper_summary.items()
+        if key not in not_carried and not isinstance(value, (dict, list))
+    }
+    missing = sorted(scalar_keys - set(surfaced))
+    assert not missing, f"edge_weight_feedback scalars dropped by the monitor's _edge_fields: {missing}"
+
+
 def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).

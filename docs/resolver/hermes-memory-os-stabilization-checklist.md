@@ -5031,6 +5031,10 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `3d9cb44..HEAD`：图谱卫生 G0（DL）——孤儿边按规范结晶文件判定存活后级联失效（规范视图不可信则整轮 fail-closed 跳过）、
+  选槽前解析存活、shadow 账本限长、shadow 行新增 session_ref 与新颖度；主会话审查修掉"索引当权威 + 查询失败即全判孤儿"的清图风险，并补上新计数在两层白名单被丢弃的缺口。
+  +18 测试（含两层白名单普查），全量 3803 passed。**未部署**。
+
 - `ab9869c..HEAD`：full_monitor_refresh 忽略 HERMES_HOME（DK）——Hermes 以 no-agent 调用该脚本只设环境变量不传参，
   写死的默认 home 让 sannai 的夜间监控六周都在监控 main、且覆盖 main 的 lane_last_run；默认值改为先读 `HERMES_HOME`。
   +2 测试，全量 3786 passed / 13 skipped / 0 failed（上一版 3784）。**未部署**（owner 裁定：规划全部落地后统一部署）。
@@ -8217,3 +8221,35 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   profile 目录且诱饵目录不被创建；以及 parser 级断言）；恢复 → 通过。
 - **测试**：+2；全量 3786 passed / 13 skipped / 0 failed（上一版 3784）。
 - **部署**：随下一阶段规划全部落地后统一部署；部署后 sannai 次日 02:35 应出现自己的 artifact，main 当天只应有一份。
+
+## DL — 图谱卫生（规划 G0）：孤儿边级联、选槽前存活解析、shadow 账本限长、新颖度（2026-09-23）
+
+- **背景（生产实测 2026-09-22）**：结晶↔结晶边 96%（main）/ 82%（sannai）的端点已不在 active 结晶集且从未失效；注入先选槽后解析
+  存活，约 8% 的决策以 `target_inactive` 结束并白占名额；`graph_layer_shadow.jsonl` 约 15MB 无上限；也没有任何量尺说明注入的邻居
+  比检索多给了什么（主人评分 30 天 0 条，"命中=被注入"是机械量尺）。
+- **修复**（Sonnet 子代理实现，主会话审查并修正一处 BLOCKER）：
+  - `edge_weight_feedback`：每轮 ≤200 条（`ORPHAN_CASCADE_MAX_PER_RUN`）把端点不再 active 的边失效，原因 `endpoint_inactive`，走既有
+    规范写入路径（`memory_edges` 增可空列 `invalidation_reason`）；计数 `orphan_scanned/invalidated/skipped_by_cap`。
+  - `prefetch._render_graph_layer_lines`：存活解析提到选槽之前；失活目标仍记账但不占槽。
+  - shadow 账本：`compact_jsonl_tail` 限长（keep 5000 / min 1MiB，先归档再丢，遇坏行拒绝），放在游标落盘之后、离开热路径。
+  - shadow 行增 `session_ref`（sha256 前缀，从不落原始 id）、逐边 `novelty`（邻居预览词项中不在锚点与 query 里的占比）与行均值
+    `mean_injected_novelty`（无样本为 `None` 而非 0）；`graph_layer_shadow_novelty_summary(store, max_records=2000)` 有界尾读聚合，
+    供后续 monitor 分级。`schema_version` 刻意保持 v1：monitor 按精确字符串过滤 shadow 行。
+- **主会话审查抓到的 BLOCKER**：初稿以 SQLite 索引为存活权威，且查询异常时 `rows = []`，随后把"索引里查不到"一律判为孤儿——
+  索引为空、正在重建或同步失败时，所有引用结晶记录的边都会以规范写入被失效，每轮 200 条，几轮清空整图。违反"索引可重建、永不为
+  权威"与 No Silent Failures。改为读**规范结晶文件**（同一 id 出现多次时任一 active 即算 active，歧义永不失效），并在规范视图不可信时
+  整轮跳过：`orphan_cascade_skipped_reason` 封闭集 `canonical_empty` / `canonical_unparseable_file` / `canonical_read_failed`，后者附
+  bounded `error_record`。
+- **反事实**：子代理初版 12 项逐项破坏验证；主会话补 4 项（索引表清空但规范文件完好 → 0 失效；规范文件缺失 / 读异常 / 存在不可解析
+  非空文件 → 跳过并给出对应原因），两类破坏（退化为"查不到即空"、删去 fail-closed 跳过）下对应测试各自失败，恢复即通过。
+- **整合时抓到的三处"算了却传不出去"**：首轮全量只挂 1 项——`ERROR_RECORD_EMITTING_COMPONENTS` 未登记 G0 新增的两个发射点
+  （`edge_weight_feedback`、`prefetch.graph_layer_shadow`；前者被截断的断言消息盖住了后者，且主会话一度用 `-k` 过滤把该测试一并筛掉）。
+  反向审查另查出：G0 的 8 个新计数（`orphan_*` / `shadow_compaction_*`）在 `cognitive_loop._edge_weight_feedback` 包装器与 monitor
+  `_edge_fields` **两层白名单**都被丢弃——既有两条透传测试都手写生产者结果，只能检查"有人记得列出的键"，所以一直是绿的。已补两层
+  白名单，并新增两条**由真实生产者驱动**的普查测试（生产者键集 ⊆ 包装器键集；包装器全部标量键 ⊆ monitor 采集结果），显式排除项
+  各自写明理由（`begin_at`、`schema_version`、列表型 `orphan_cascade_error_records`）；两层各自删一行即失败、恢复即通过。
+- **测试**：+18（edge_weight_feedback +11、graph_layer +5、白名单普查 +2），`_active_edge` 夹具改为先写真实结晶记录再造边（否则会被级联误杀）；
+  全量 3803 passed / 13 skipped；五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene / public-checkout `--strict` / diff-check）。
+- **遗留**：novelty 的 monitor 分级待与 C0 的 monitor 改动一并接线（主会话负责）；`scripts/memory_os_graph_shadow_analyzer.py` 在压缩后
+  只能看到保留窗口（归档仍在，未接入）；`MemoryOSIndex.transition_edge_state` 实例包装未透传 `reason`（当前无调用方需要）。
+- **部署**：随规划全部落地后统一部署；部署后首轮预计按 200 条/轮消化存量孤儿边（main 约 6800 条 → 约 34 轮），`target_inactive` 应降至 ≈0。

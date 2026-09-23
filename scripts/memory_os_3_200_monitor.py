@@ -4664,6 +4664,9 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "cascade_routing_policy",
     "clearance_cycle",
     "crystallized_candidate_queue",
+    # G0: the orphan-edge cascade reports a failed canonical crystallized
+    # read here (the cascade is then skipped for the run, never run blind).
+    "edge_weight_feedback",
     "entity_index",
     "feature_score",
     "imagination_loop",
@@ -4685,6 +4688,9 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "prefetch._crystallized_lines",
     "prefetch._floor_match_score",
     "prefetch._indexed_lines",
+    # G0: graph_layer_shadow_novelty_summary's bounded tail read reports
+    # malformed shadow lines here (jsonl_io.read_jsonl_tail).
+    "prefetch.graph_layer_shadow",
     "prefetch_facade",
     "provenance",
     # DB: session-end last-session-anchor compaction (size-gated) reports its
@@ -7482,6 +7488,12 @@ def cognitive_loop_step_evidence():
       "tracked_edge_count", "cursor_misaligned", "cursor_misalignment_reason",
       "cursor_previous_line_count", "cursor_realigned_line_count",
       "cursor_skipped_row_count",
+      # G0 edge_weight_feedback: orphan-edge cascade (skipped_reason says
+      # why a run invalidated nothing) + shadow-ledger compaction outcome.
+      "orphan_scanned_count", "orphan_invalidated_count",
+      "orphan_skipped_by_cap_count", "orphan_cascade_skipped_reason",
+      "shadow_compaction_reason", "shadow_compaction_records_archived",
+      "shadow_compaction_suppressed_error_count",
     )
     edge_step_results = {}
     for step in steps:
