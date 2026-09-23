@@ -1579,7 +1579,7 @@ def _fake_llm_durable_with_route(prompt: str, config: dict) -> LlmCallResult:
         text=json.dumps({"has_durable_fact": True, "fact": "extracted durable fact text", "reason": "test"}),
         provider="openai-codex",
         model="answering-model",
-        expected_model="pinned-model",
+        expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
     )
 
 

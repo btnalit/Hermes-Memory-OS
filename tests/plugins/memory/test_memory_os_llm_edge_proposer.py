@@ -400,7 +400,7 @@ def test_run_llm_proposer_counts_route_unexpected_when_answering_model_differs(t
         llm_edge_proposer, "_call_hermes_runtime_model_result",
         lambda prompt, config: LlmCallResult(
             text=_VALID_REFINES_JSON, provider="openai-codex", model="answering-model",
-            expected_model="pinned-model",
+            expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
         ),
     )
 

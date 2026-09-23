@@ -8983,7 +8983,18 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   自行剥离别名，而 `_resolve_hermes_default_runtime` 回显的是配置原值）——按派工单与 owner 裁定，Memory-OS 不做别名特判，这是已知、
   接受的字面量比较特性，不是缺陷；部署后应观察该 WARN 在两个 profile 上的实际噪声水平，据此判断是否需要 owner 就"主模型名不得带别名
   后缀"给出配置规范（而非代码层特判）。
+- **主会话集成审查：更正 `route_unexpected` 的定义（上文按模型名比较的描述已作废）**。按模型名做纯字符串比较在生产上**不是"可能有噪声"，
+  而是必然每次都报**：两个 profile 的主模型都配成 `gpt-5.6-luna-900k`（见上文 `-900k` 定案一节），Hermes 发请求前剥掉别名，应答与
+  `route_info` 都是 `gpt-5.6-luna`——部署当天起 fact_judge / SFE / llm_edge_proposer 三条 lane 常驻 WARN，一个人人都会学会忽略的告警。
+  这也不是 L1 定义的信号：DN 的遗留一条写的是"实际 provider ≠ 请求 provider"，要抓的是 Hermes 在付费 / 配额 / 429 时的静默跨 provider
+  回退。改为比较 provider：`LlmCallResult` 新增 `expected_provider`（Memory-OS 显式传给 `call_llm` 的 provider）与 `routed_provider`
+  （**只取** Hermes 在 `route_info` 里报告的 provider，绝不回落成请求值——否则 Hermes 不报时每次都会静默算作"符合预期"）；
+  `route_unexpected` = 两者都已知且不同，`route_unknown` = Hermes 未报告路由 provider（或根本没发生调用）。模型名保留作展示，
+  不参与判定；provider 名不带这类别名，所以不需要任何 per-provider 归一，仍守 2026-09-10 裁定。legacy_wire 直连已解析的 provider，
+  发生过调用的出口 `routed_provider = provider`。诊断助手新增 `llm_expected_provider` / `llm_routed_provider`；WARN 附带 lane 的
+  路由 provider。反事实（cp 备份法 2/2）：改回按模型名比较，`-900k` 别名用例转 FAIL；让 `routed_provider` 回落成请求 provider，
+  "Hermes 未报告即未知"用例转 FAIL。已知限度：若 Hermes 的 `route_info` 从不带 provider，则该信号恒为 unknown（计数可见，不会误报）。
 - **部署**：随规划全部落地后统一部署；纯只读接线 + 新增字段/计数器，未改任何写路径/生产者判定逻辑（`llm_edge_proposer._call_llm` 的
-  判定逻辑/提示词未动），无需重启 gateway；部署后验收：`llm_route_unexpected` 在两个 profile 上默认应为 0（若非零需人工核对是否为
+  判定逻辑/提示词未动），无需重启 gateway；部署后验收：`llm_route_unexpected` 在两个 profile 上默认应为 0（按 provider 比较，别名不会触发；若非零即 Hermes 真实跨 provider 回退，核对是否为
   别名字面量差异还是真实跨 provider 回退）；`graph_layer_updates` INFO 在 main 上 7 天内追踪 `superseded_by_newer_count_7d` 是否
   转正（sannai 允许 `healthy_no_sample`）。

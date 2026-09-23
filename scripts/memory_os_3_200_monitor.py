@@ -1632,15 +1632,13 @@ def _classify_event_principal_coverage(
 
 
 def _llm_route_unexpected_warn_entry(lane: str, summary: dict[str, Any]) -> dict[str, Any] | None:
-    """Build one WARN entry for an LLM lane whose latest run answered with a
-    model other than the one it was pinned to (plan row L1). Returns None
-    when the lane's ``llm_route_unexpected_count`` is not positive -- see
-    LlmCallResult's docstring (low_clue_recall.py) for the
-    route_unexpected/route_unknown definition and the alias-handling note:
-    Memory-OS does no alias stripping of its own, so this can legitimately
-    fire on a benign Hermes-side alias normalization, not only on a real
-    cross-provider fallback -- the WARN records the divergence for a human
-    to read, it does not judge it.
+    """Build one WARN entry for an LLM lane whose latest run was routed by
+    Hermes to a provider other than the one it explicitly requested (plan
+    row L1: a silent cross-provider fallback). Returns None when the lane's
+    ``llm_route_unexpected_count`` is not positive. The comparison is on
+    providers, not model names (see LlmCallResult in low_clue_recall.py):
+    a Hermes-side model alias such as ``-900k`` never trips it. The models
+    of the mismatched call ride along for the reader.
     """
     count = int(summary.get("llm_route_unexpected_count") or 0)
     if count <= 0:
@@ -1649,6 +1647,7 @@ def _llm_route_unexpected_warn_entry(lane: str, summary: dict[str, Any]) -> dict
         "code": "llm_route_unexpected",
         "lane": lane,
         "llm_route_unexpected_count": count,
+        "routed_provider": str(summary.get("llm_provider") or summary.get("llm_transport_provider") or ""),
         "expected_model": str(summary.get("llm_route_unexpected_expected_model") or ""),
         "actual_model": str(summary.get("llm_route_unexpected_actual_model") or ""),
     }

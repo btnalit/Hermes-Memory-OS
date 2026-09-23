@@ -1345,7 +1345,7 @@ class TestRunFactJudgeLaneRouteVisibility:
                 text='{"durable_fact": true, "reason": "preference"}',
                 provider="openai-codex",
                 model="answering-model",
-                expected_model="pinned-model",
+                expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
             ),
         ):
             result = run_fact_judge_lane(store)
@@ -1372,7 +1372,7 @@ class TestRunFactJudgeLaneRouteVisibility:
                 text='{"durable_fact": true, "reason": "preference"}',
                 provider="openai-codex",
                 model="same-model",
-                expected_model="same-model",
+                expected_model="same-model", expected_provider="openai-codex", routed_provider="openai-codex",
             ),
         ):
             result = run_fact_judge_lane(store)

@@ -1158,7 +1158,7 @@ def test_run_clearance_cycle_report_exposes_llm_transport_diagnostics(tmp_path: 
         "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
         return_value=LlmCallResult(
             text=mock_llm_response, provider="openai-codex", model="gpt-5.6-luna",
-            expected_model="pinned-model",
+            expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
         ),
     ), patch(
         "plugins.memory.memory_os.clearance_cycle._check_llm_available",

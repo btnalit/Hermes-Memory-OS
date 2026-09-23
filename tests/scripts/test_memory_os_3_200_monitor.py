@@ -10486,7 +10486,7 @@ def test_every_llm_edge_proposer_scalar_survives_both_whitelists_end_to_end(tmp_
         llm_edge_proposer, "_call_hermes_runtime_model_result",
         lambda prompt, config: LlmCallResult(
             text=_json.dumps({"relation_type": "refines", "confidence": 0.8, "reasoning": "x"}),
-            provider="openai-codex", model="answering-model", expected_model="pinned-model",
+            provider="openai-codex", model="answering-model", expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
         ),
     )
 

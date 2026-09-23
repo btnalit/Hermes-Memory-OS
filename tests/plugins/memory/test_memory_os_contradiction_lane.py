@@ -430,7 +430,7 @@ def test_route_unexpected_counted_when_answering_model_differs_from_expected(tmp
         "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
         return_value=LlmCallResult(
             text=reply, provider="openai-codex", model="answering-model",
-            expected_model="pinned-model",
+            expected_model="pinned-model", expected_provider="openai-codex", routed_provider="fallback-provider",
         ),
     ):
         mock_judge.return_value = {"available": True}
