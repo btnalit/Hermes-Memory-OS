@@ -75,7 +75,9 @@ JEV_BACKEND_NAME = "typesafe_jev"
 #     a caller's answer-semantics failure -- kept distinct from fact_judge's
 #     own like-named vocabulary for the same reason _call_diagnostics keeps
 #     low_clue_recall's llm_missing_key separate from fact_judge's.
-JEV_CALL_FAILURE_REASONS = frozenset(LLM_CALL_FAILURE_REASONS | {"llm_overloaded", "llm_parse_failed"})
+JEV_CALL_FAILURE_REASONS = frozenset(
+    LLM_CALL_FAILURE_REASONS | {"llm_overloaded", "llm_rate_limited", "llm_parse_failed"}
+)
 
 # Defensive input bound (INV-5 corollary: always bound the input,
 # independent of what a caller already clipped -- see CLAUDE.md's "a single
@@ -252,8 +254,10 @@ def _classify_http_status(status_code: int) -> str:
 
     401 -> llm_missing_key (bad/rejected credential); 529 -> llm_overloaded
     (explicit, not folded into a generic bucket -- TypeSafe's own docs treat
-    it as distinct from 4xx/429); any other 4xx (400/422/429 all observed or
-    documented) -> llm_http_4xx; anything else (undocumented 5xx) ->
+    it as distinct from 4xx/429); 429 -> llm_rate_limited (back off -- an
+    operator must be able to tell "we are being throttled" from "our request
+    is malformed" without re-running anything); any other 4xx (400 observed
+    live, 422 documented) -> llm_http_4xx; anything else (undocumented 5xx) ->
     llm_exception, the same generic fallback low_clue_recall's classifier
     uses for cases outside its documented contract.
     """
@@ -261,6 +265,8 @@ def _classify_http_status(status_code: int) -> str:
         return "llm_missing_key"
     if status_code == 529:
         return "llm_overloaded"
+    if status_code == 429:
+        return "llm_rate_limited"
     if 400 <= status_code < 500:
         return "llm_http_4xx"
     return "llm_exception"
@@ -440,7 +446,7 @@ def judge_noul(
         )
 
     answer = (result.answers or {}).get(question_id)
-    if answer is None or answer.noul is None:
+    if answer is None or answer.type != "noul" or answer.noul is None:
         return JevJudgmentResult(
             failure_reason="llm_parse_failed",
             detail=f"missing_or_non_noul_answer_for:{question_id}",

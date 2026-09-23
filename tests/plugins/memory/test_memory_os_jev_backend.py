@@ -124,12 +124,14 @@ class TestHttpStatusClassification:
             )
         assert result.failure_reason == "llm_missing_key"
 
-    def test_429_maps_to_llm_http_4xx(self):
+    def test_429_maps_to_llm_rate_limited_not_the_malformed_request_bucket(self):
+        """Throttling and a malformed request need different responses
+        (back off vs fix the payload); one bucket for both hides which."""
         with patch("urllib.request.urlopen", side_effect=_fake_http_error(429)):
             result = jev_backend.call_systemone(
                 state="x", questions={"q": {"type": "noul", "instructions": "?"}}, config=_VALID_CONFIG,
             )
-        assert result.failure_reason == "llm_http_4xx"
+        assert result.failure_reason == "llm_rate_limited"
 
     def test_422_documented_maps_to_llm_http_4xx(self):
         """Docs claim malformed questions return 422."""
@@ -454,6 +456,22 @@ class TestJudgeNoul:
                 json.dumps({
                     "model": "jev-1.13.0",
                     "answers": {"durable_fact": {"type": "choice", "choice": "x"}},
+                }).encode()
+            )
+            result = jev_backend.judge_noul(
+                question_id="durable_fact", instructions="?", criteria=None, state="x",
+                config=_VALID_CONFIG,
+            )
+        assert result.failure_reason == "llm_parse_failed"
+
+    def test_answer_with_a_noul_value_but_another_declared_type_is_rejected(self):
+        """A stray noul field on an answer whose declared type is not noul
+        (API drift / malformed body) must not be read as a noul judgment."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"durable_fact": {"type": "choice", "choice": "x", "noul": 0.9}},
                 }).encode()
             )
             result = jev_backend.judge_noul(

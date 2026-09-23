@@ -421,11 +421,13 @@ def judge_candidate(
     # a typed, counted fallback, not a silent one (see
     # judge_backend_fallback_reason threaded into both return points below).
     jev_fallback_reason: str | None = None
+    jev_fallback_detail = ""
     if judge_backend == jev_backend.JEV_BACKEND_NAME:
         jev_verdict = _judge_via_jev(body_for_prompt, active_crystallized_count, effective_config)
         if jev_verdict.get("failure_reason") is None:
             return jev_verdict
         jev_fallback_reason = str(jev_verdict.get("failure_reason") or "")
+        jev_fallback_detail = str(jev_verdict.get("jev_failure_detail") or "")[:160]
 
     user_prompt = (
         f'Candidate ID: {candidate.candidate_id}\n'
@@ -503,6 +505,7 @@ def judge_candidate(
         }
         if jev_fallback_reason:
             result["judge_backend_fallback_reason"] = jev_fallback_reason
+            result["judge_backend_fallback_detail"] = jev_fallback_detail
         return result
 
     # All attempts exhausted — fall back to deterministic heuristic
@@ -511,6 +514,7 @@ def judge_candidate(
     verdict.update(_call_diagnostics(last_call_result))
     if jev_fallback_reason:
         verdict["judge_backend_fallback_reason"] = jev_fallback_reason
+        verdict["judge_backend_fallback_detail"] = jev_fallback_detail
     return verdict
 
 
@@ -612,6 +616,7 @@ def run_fact_judge_lane(
     judge_confidence: float | None = None
     judge_backend_fallback_count = 0
     judge_backend_fallback_reasons: dict[str, int] = {}
+    judge_backend_fallback_detail_sample = ""
 
     for candidate in candidates:
         if candidate.candidate_id in already_judged:
@@ -668,6 +673,9 @@ def run_fact_judge_lane(
             judge_confidence = float(verdict_judge_confidence)
         fallback_reason = str(verdict.get("judge_backend_fallback_reason") or "")
         if fallback_reason:
+            # Keep one clipped sample of the backend's own error text so the
+            # reason bucket can be diagnosed from the report alone.
+            judge_backend_fallback_detail_sample = str(verdict.get("judge_backend_fallback_detail") or "")[:160]
             judge_backend_fallback_count += 1
             judge_backend_fallback_reasons[fallback_reason] = (
                 judge_backend_fallback_reasons.get(fallback_reason, 0) + 1
@@ -719,6 +727,7 @@ def run_fact_judge_lane(
         "judge_confidence": judge_confidence,
         "judge_backend_fallback_count": judge_backend_fallback_count,
         "judge_backend_fallback_reasons": judge_backend_fallback_reasons,
+        "judge_backend_fallback_detail_sample": judge_backend_fallback_detail_sample,
     }
 
 

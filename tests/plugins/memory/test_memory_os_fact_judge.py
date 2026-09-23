@@ -1819,6 +1819,9 @@ class TestJ1JevFallback:
         assert mock_hermes.called, "Jev failure must fall back to the hermes_default path"
         assert result["judge_backend_fallback_count"] == 1
         assert result["judge_backend_fallback_reasons"] == {"llm_timeout": 1}
+        # The backend's own error text survives as a clipped sample, so a
+        # reason bucket can be diagnosed from the report alone.
+        assert result["judge_backend_fallback_detail_sample"] == "socket_timeout"
 
         verdicts = _read_verdicts(store)
         assert verdicts["cand_fallback"]["durable_fact"] is True

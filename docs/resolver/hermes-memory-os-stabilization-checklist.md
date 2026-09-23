@@ -8427,7 +8427,12 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   适合 `noul`，但该 lane 两边仍关闭，应等其重新启用后再接，避免两件事搅在一起；low_clue 候选选择需先看清选择语义（多选一用 `choice`、逐个打分用
   `score`）；抽取 / 生成类 lane 不适用。
 - **反事实**（子代理，破坏即失败、恢复即通过）：去掉 529 特判；强制绕过默认关闭守卫；去掉缺 key 的联网前短路。
-- **测试**：jev_backend +39、fact_judge +25、probe +3；全量 4110 passed / 13 skipped；五门全绿。
+- **独立审查（Sonnet）无阻塞**（默认关闭逐字节不变、key 卫生、失败封闭集、INV-5 边界均核实），据其 SHOULD-FIX 修两处（各有破坏即失败的
+  反事实）：`judge_noul` 只查 `noul` 字段是否存在，不查答案声明的 `type`——带着多余 `noul` 字段、类型却是 choice 的答案会被当成 noul 判定，
+  现要求 `type == "noul"`，原测试夹具根本没有 `noul` 字段所以覆盖不到；429（限流）与 400 / 422（请求畸形）同归 `llm_http_4xx`，而唯一保留原始
+  状态与报文的 `jev_failure_detail` 在回落时被丢弃——生产上看 `llm_http_4xx: N` 分不清"被限流"与"payload 写错"。429 改为独立的
+  `llm_rate_limited`，回落时把截断的错误详情带到 tick 报告的 `judge_backend_fallback_detail_sample`。
+- **测试**：jev_backend +40、fact_judge +25、probe +3；全量 4110 passed / 13 skipped（审查修复前）；五门全绿。
 - **遗留 / 待 owner 定**：阈值 0.4 / 0.6 是模块常量（与 `LEAN_CAPTURE_THRESHOLD` 同为非 knob），是否要开放可调由 owner 定；monitor 读取
   `judge_backend` / 回落计数待 monitor part 2；开启前建议先在 sannai 小流量试（`fact_judge_max_per_tick` 默认 8 已限流）。
 - **部署**：随规划全部落地后统一部署；部署不等于开启——开启需要在主机 `~/.hermes/.env` 写入 `TYPESAFE_API_KEY` 并由 owner 登记
