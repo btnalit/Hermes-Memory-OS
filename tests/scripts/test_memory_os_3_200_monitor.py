@@ -9245,6 +9245,74 @@ def test_every_edge_weight_feedback_scalar_survives_both_whitelists_end_to_end(t
     assert not missing, f"edge_weight_feedback scalars dropped by the monitor's _edge_fields: {missing}"
 
 
+def test_every_structural_edge_proposer_scalar_survives_both_whitelists_end_to_end(tmp_path):
+    """PR-G1 census: the REAL producer (run_structural_proposer, including
+    its bounded updates-backfill pass) runs through the REAL cognitive_loop
+    wrapper and the REAL embedded monitor collector — mirroring
+    test_every_edge_weight_feedback_scalar_survives_both_whitelists_end_to_end,
+    the DL/G0 lesson this file records: a hand-listed key set stays green
+    while a new counter is dropped at either whitelist layer.
+    """
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    frontmatter_common = {
+        "schema_version": "memory-os.crystallized.v0",
+        "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z",
+        "approval_purpose": "test",
+        "approval_note": "test seed",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+        "hindsight_indexed": False,
+        "bridge_state": "active",
+    }
+    store.append_crystallized_record(
+        "cry_census_a.md",
+        {**frontmatter_common, "id": "cry_census_a", "kind": "note", "created_at": "2026-06-01T00:00:00Z"},
+        "test crystallized body one",
+    )
+    store.append_crystallized_record(
+        "cry_census_b.md",
+        {**frontmatter_common, "id": "cry_census_b", "kind": "note", "created_at": "2026-06-02T00:00:00Z"},
+        "test crystallized body two",
+    )
+
+    wrapper_summary = CognitiveLoopRunner(store)._structural_edge_proposer({})
+    assert "backfill_scanned_count" in wrapper_summary, "sanity: the wrapper passed PR-G1 backfill counters"
+
+    report = {
+        "cycle_id": "cycle-census-g1",
+        "status": "ok",
+        "steps": [{
+            "step": "structural_edge_proposer", "status": "ok", "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    (mod_dir / "reports.jsonl").write_text(_json.dumps(report) + "\n", encoding="utf-8")
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    surfaced = namespace["cognitive_loop_step_evidence"]()["edge_step_results"]["structural_edge_proposer"]
+
+    not_carried = {"schema_version", "backfill_error_records"}
+    scalar_keys = {
+        key for key, value in wrapper_summary.items()
+        if key not in not_carried and not isinstance(value, (dict, list))
+    }
+    missing = sorted(scalar_keys - set(surfaced))
+    assert not missing, f"structural_edge_proposer scalars dropped by the monitor's _edge_fields: {missing}"
+
+
 def test_edge_provenance_write_failed_count_survives_both_whitelists_end_to_end(tmp_path, monkeypatch):
     """Counterfactual: write_failed_count is the counter that distinguishes
     "nothing to write" from "tried and failed" (Completion Is Not Output).

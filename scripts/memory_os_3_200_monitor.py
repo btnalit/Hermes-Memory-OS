@@ -4860,6 +4860,10 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     # reader rather than the silent `except: pass` they replaced.
     "state_overlay",
     "state_source_mirror",
+    # PR-G1: run_structural_updates_backfill reports a failed canonical/index
+    # read here (the backfill pass is then skipped for the run, never run
+    # blind — same shape as edge_weight_feedback's orphan cascade above).
+    "structural_edge_proposer",
     "temporal_retriever",
 })
 
@@ -7802,6 +7806,13 @@ def cognitive_loop_step_evidence():
       "orphan_skipped_by_cap_count", "orphan_cascade_skipped_reason",
       "shadow_compaction_reason", "shadow_compaction_records_archived",
       "shadow_compaction_suppressed_error_count",
+      # PR-G1 structural_edge_proposer: bounded backfill that upgrades
+      # pre-existing co_occurs pairs to `updates` (see
+      # run_structural_updates_backfill) — scanned/upgraded/skipped is the
+      # "Completion Is Not Output" evidence that the lane ran AND did
+      # something, not just that its envelope closed clean.
+      "backfill_scanned_count", "backfill_upgraded_count",
+      "backfill_skipped_count", "backfill_pass_complete", "backfill_duration_ms",
     )
     edge_step_results = {}
     for step in steps:

@@ -981,6 +981,14 @@ class CognitiveLoopRunner:
             "write_failed_count": result.get("write_failed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
+            # PR-G1: bounded backfill that upgrades pre-existing co_occurs
+            # pairs to `updates` — see run_structural_updates_backfill.
+            "backfill_scanned_count": result.get("backfill_scanned_count", 0),
+            "backfill_upgraded_count": result.get("backfill_upgraded_count", 0),
+            "backfill_skipped_count": result.get("backfill_skipped_count", 0),
+            "backfill_pass_complete": result.get("backfill_pass_complete", False),
+            "backfill_duration_ms": result.get("backfill_duration_ms", 0),
+            "backfill_error_records": result.get("backfill_error_records", []),
         }
 
     def _crystallization_gate(self, context: dict[str, Any]) -> dict[str, Any]:

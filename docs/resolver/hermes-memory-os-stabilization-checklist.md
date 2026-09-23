@@ -5031,6 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：G4 + G1（DT）——图谱回放评测集（38 对合成中文样本、真实生产者、空集报 no-sample）与 `updates` 关系（Dice≥0.85 且同 kind、
+  新指旧、优先于 co_occurs、只注入较新者）；主会话修掉存量回填"无游标、永远只扫最旧 200 条"的饥饿。全量 4068 passed。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8401,3 +8403,39 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DT — G4 图谱回放评测集 + G1 `updates` 关系与 latest-wins 注入（2026-09-23）
+
+- **背景**：生产上 main 313 对 / sannai 29 对近逐字重复的结晶记录被当成 `co_occurs` 一起注入；图谱没有"新版本取代旧版本"的语义，也没有不依赖主人
+  反馈的离线评测（主人评分 30 天 0 条）。owner 裁定：`updates`（新→旧），确定性生产者只认 Dice ≥ θ_high = 0.85 且同 kind；0.5–0.85 留给 L1
+  之后的 LLM 标签；不改任何记录、不加层、不设逐边审批。
+- **G4**（Sonnet 子代理）：`eval/memory_os/data/graph_replay_cases.jsonl` 38 对**合成**中文样本（近逐字重述 14、低 Dice 改口 10、无关同 kind 8、
+  跨 kind 高重叠 6，按真实 `_dice_coefficient` 校准）；`eval/memory_os/adapters/graph_replay.py` 逐对建隔离 store，跑真实 `run_structural_proposer`
+  与真实 `_graph_layer_shadow_lines`，读回 shadow 行；指标：各子集召回 / 误报、方向准确率、新颖度、覆盖、冗余（`emitted_stub`）、选槽浪费
+  （`target_inactive`）、新旧同注入数、`superseded_by_newer` 数；每个比率带 `sampled | healthy_no_sample`，空分母不伪造 0 / 1。已知局限：2 条记录的
+  隔离样本构造不出"第三方锚点同时连到新旧两版"的形状，由专门的 3 记录单测覆盖。
+- **G1**（Sonnet 子代理）：`_detect_relation` 最先判 `updates`（Dice ≥ 0.85 ∧ 同 kind ∧ 两个 created_at 可解析且不同；方向由 created_at 定），优先于
+  shared_events / depends_on / 正文相似 / temporal 所有 co_occurs 路径——写入边界按无序对去重，只有第一个判出的关系能落库。出生权重
+  `("structural","updates_restatement")=0.60`。`prefetch._render_graph_layer_lines` 选槽前用一次有界的 `index.query_edges(neighbor_ids,
+  relation_types=["updates"])` 把"任一 active `updates` 边的旧端点"整体压下（第三方锚点经 co_occurs 同时连到新旧两版也能压住），outcome
+  `superseded_by_newer`；`MemoryOSIndex.is_latest_crystallized_record` 为纯派生读。消费方全仓核对（edge_weight_feedback / edge_promotion /
+  llm_edge_proposer / 分析与压缩脚本 / monitor），`llm_edge_proposer` 闭集按裁定未动。
+- **主会话审查修掉的一处（饥饿）**：存量回填 `run_structural_updates_backfill` 的候选查询是 `order by created_at limit 200` 且无游标——不满足条件的
+  co_occurs 边保持 co_occurs，下一轮原样再被扫到，于是每轮都重扫同一批最旧的 200 条，排在后面的待回填对永远到不了（生产 active 边约 85% 是
+  co_occurs，远多于一批）。这正是 CLAUDE.md 点名禁止的队首饥饿选法。改为 `(created_at, edge_id)` 键集游标，持久化在
+  `system/structural_updates_backfill_state.json`，扫过即前进（合格与否都前进），新生边在游标推进到时自然被扫到；`backfill_pass_complete` 透传
+  到 cognitive_loop 包装器与 monitor `_edge_fields`；游标写失败记 `error_record`。反事实：3 对不合格边排在 1 对合格边之前、每轮上限 2——旧查询
+  跑 3 轮回填 0 对，修复后 1 对。
+- **基线对比**（同一 38 对样本，每次运行实时计算）：近逐字重述 `updates` 召回 0.0 → 1.0（14/14）；改口 / 无关 / 跨 kind 误报 0 / 0 / 0；方向准确率
+  1.0；平均注入新颖度 0.0503 → 0.0546（不降）；覆盖率 0.526 → 0.342——设计使然：7 对以较新端为锚点，旧端被正确压下为 `superseded_by_newer`
+  而不是作为 co_occurs 注入；新旧同注入 0。
+- **反事实**：子代理 8 条（`updates` 优先级、跨 kind、低 Dice 改口、只注入较新者、`is_latest` 经索引重建仍成立、回填有界幂等、评测空集 no-sample 两条），
+  主会话 1 条（回填游标）。
+- **测试**：graph_replay +8、graph_layer +8（含 2 条既有测试的夹具相似度下调——其 Dice 本就 ≥0.85，现在应得 `updates`）、monitor 普查 +1；
+  全量 4068 passed / 13 skipped；五门全绿（write-surface 为回填游标状态文件登记 `structural_updates_backfill_cursor_state`）。
+- **遗留**：`updates` 抢占 `depends_on`（显式 ID 引用）是子代理的判断，尚无两者同时成立的真实样本；`superseded_by_newer` / 回填量 / 新颖度尚未
+  分级（monitor part 2）；`is_latest` 还没有面向主人的读者；prefetch 热路径多一次有界 SQLite 查询（非网络，INV-5 不受影响），部署后留意耗时。
+- **部署**：随规划全部落地后统一部署；回填随 `structural_edge_proposer` 认知循环步骤自动运行，main 约两轮、sannai 一轮收敛；部署后确认首轮
+  `backfill_upgraded_count>0`，7 天内 main `superseded_by_newer>0`（sannai 允许 no-sample）。

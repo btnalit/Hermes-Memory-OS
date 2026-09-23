@@ -2506,6 +2506,16 @@ GRAPH_RELATION_PHRASES: dict[tuple[str, str], str] = {
     ("evidence_for", "anchor_is_to"): "其证据为",
     ("contradicts", "anchor_is_from"): "与以下内容冲突",
     ("contradicts", "anchor_is_to"): "与以下内容冲突",
+    # PR-G1: updates is from=newer -> to=older. anchor_is_from means the
+    # anchor IS the newer endpoint, so its older neighbor is exactly what
+    # step 1b below always suppresses before slot selection (outcome
+    # superseded_by_newer) — this direction is registered for the phrase
+    # census's completeness guarantee but is not reachable in practice.
+    # anchor_is_to means the anchor is the OLDER endpoint and the neighbor
+    # being shown is the newer version — the only direction this relation
+    # actually renders.
+    ("updates", "anchor_is_from"): "取代了",
+    ("updates", "anchor_is_to"): "已被以下内容取代",
 }
 # 未知 relation_type 的兜底短语(方向无关)。
 GRAPH_FALLBACK_PHRASE = "关联于"
@@ -2554,6 +2564,11 @@ GRAPH_SHADOW_OUTCOMES = frozenset({
     "unresolved",
     "not_selected",
     "knob_disabled",
+    # PR-G1: the older endpoint of an `updates` pair is never injected as a
+    # neighbor (latest-wins) — decided in step 1b, before slot selection, so
+    # it never wastes an exploit/explore slot the way target_inactive used
+    # to (G0).
+    "superseded_by_newer",
 })
 
 
@@ -2662,6 +2677,7 @@ def _graph_layer_shadow_lines(
         source_ids=source_ids,
         events=events,
         query=query,
+        index=index,
     )
     # ── Shadow log written AFTER rendering (audit trail, v1) ────
     _record_graph_layer_shadow(store, anchor_ids, decisions, session_id=session_id)
@@ -2743,8 +2759,15 @@ def _render_graph_layer_lines(
     events: list[Any] | None = None,
     day_ordinal: int | None = None,
     query: str = "",
+    index: object | None = None,
 ) -> tuple[list[str], list[dict]]:
     """Render graph edges as owner-readable Related Memory lines.
+
+    ``index`` (PR-G1): used only for the latest-wins superseded-neighbor
+    query in step 1b (``index.query_edges(..., relation_types=["updates"])``)
+    — fail-open when absent (no MemoryOSIndex to query means no evidence of
+    supersession, not proof of currency, so nothing is suppressed on that
+    basis alone).
 
     行文法(F1/P2 2026-08-07):方向归一 + 中文自然语言短语 + 锚点短预览:
 
@@ -2766,9 +2789,14 @@ def _render_graph_layer_lines(
     - G0:每条被注入的边附带 novelty(邻居预览词集里,锚点预览+query 词集
       未覆盖的份额)——衡量图谱层在检索已知内容之外增加了多少信息,替代
       缺失的 owner 有用性反馈信号。
+    - PR-G1:任何邻居只要是某条 active `updates` 边的较旧端(不论该邻居是
+      通过哪条边进入候选集——第三方锚点分别与新旧两版共现即可构造这种
+      形状),一律不注入(outcome `superseded_by_newer`),同样发生在选位
+      之前,不占用 exploit/explore 名额。
     - 返回 (lines, decisions):decisions 给每条边一个封闭 outcome
       (emitted_full / emitted_stub / below_weight_floor / target_inactive /
-      non_crystallized_target / unresolved / not_selected),供 shadow 账本
+      non_crystallized_target / unresolved / not_selected / superseded_by_newer),
+      供 shadow 账本
       区分「注入」与「查到但未注入」。
     """
     anchor_set = {str(a).strip() for a in anchor_ids if str(a or "").strip()}
@@ -2833,8 +2861,42 @@ def _render_graph_layer_lines(
         except Exception:
             continue
 
+    # PR-G1 latest-wins: a neighbor that is the OLDER endpoint of any active
+    # `updates` edge must never be injected — regardless of which edge
+    # introduced it into `workable`. A neighbor can reach injection via a
+    # plain co_occurs edge from an anchor that is party to neither side of
+    # the updates edge (e.g. a third record co-occurring with both the old
+    # and new version independently); checking only the item's own edge
+    # would miss that shape and let a stale version through. One bounded
+    # query over the candidate neighbor set (same cost class as the
+    # liveness batch above) resolves it for the whole batch at once.
+    neighbor_ids = {item["neighbor_id"] for item in workable}
+    superseded_neighbor_ids: set[str] = set()
+    if neighbor_ids and index is not None and hasattr(index, "query_edges"):
+        try:
+            updates_edges = index.query_edges(
+                list(neighbor_ids),
+                depth=1,
+                relation_types=["updates"],
+                state=GRAPH_INJECTION_EDGE_STATE,
+                limit=GRAPH_EDGE_CANDIDATE_LIMIT,
+            )
+        except Exception:
+            updates_edges = []
+        for ue in updates_edges or []:
+            if not isinstance(ue, dict):
+                continue
+            older_id = str(ue.get("to_record_id") or "")
+            if older_id in neighbor_ids:
+                superseded_neighbor_ids.add(older_id)
+
     live_workable: list[dict] = []
     for item in workable:
+        if item["neighbor_id"] in superseded_neighbor_ids:
+            decisions.append(
+                {"edge": item["edge"], "injected": False, "outcome": "superseded_by_newer"}
+            )
+            continue
         neighbor_record = cry_map.get(item["neighbor_id"])
         if (
             item["neighbor_type"] in _GRAPH_CRYSTALLIZED_TYPES

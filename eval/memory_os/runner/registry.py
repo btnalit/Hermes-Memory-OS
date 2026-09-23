@@ -125,4 +125,8 @@ def default_adapter_registry() -> EvalAdapterRegistry:
         "retrieval_shadow",
         module_path="eval.memory_os.adapters.retrieval_shadow",
     )
+    registry.register(
+        "graph_replay",
+        module_path="eval.memory_os.adapters.graph_replay",
+    )
     return registry

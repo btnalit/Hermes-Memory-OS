@@ -22,11 +22,14 @@ from __future__ import annotations
 # (proposed_by, evidence_kind) → 出生权重。证据强度排序:
 #   explicit_reference      正文显式引用对方 record_id(硬证据,误报率最低)
 #   source_event_provenance event→crystallized 溯源(硬证据)
+#   updates_restatement     近逐字重述且同 kind(PR-G1;θ_high=0.85,强于一般
+#                           词面重叠但不如显式引用硬)
 #   shared_source_event     共享 source_event(同源 ≠ 相关)
 #   body_similarity         词面重叠(dice)
 #   temporal_proximity      仅时间邻近(最弱信号,「无其他信号」兜底分支)
 EDGE_BIRTH_WEIGHTS: dict[tuple[str, str], float] = {
     ("structural", "explicit_reference"): 0.70,
+    ("structural", "updates_restatement"): 0.60,
     ("structural", "shared_source_event"): 0.55,
     ("structural", "body_similarity"): 0.45,
     ("structural", "temporal_proximity"): 0.35,

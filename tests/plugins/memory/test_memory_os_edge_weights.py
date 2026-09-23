@@ -34,8 +34,11 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[3] / "plugins" / "memory" / "mem
 
 # producer relation 全集(llm 的 _AUTO_ACTIVE_TYPES ∪ structural ∪
 # provenance ∪ vector)。新 relation 必须同时登记短语表两方向。
+# PR-G1 (2026-09-23): `updates` is deterministic-structural-only for now —
+# 0.50–0.85 dice is reserved for a future llm_edge_proposer label, NOT added
+# to _AUTO_ACTIVE_TYPES by this change.
 _PRODUCER_RELATIONS = frozenset(
-    {"co_occurs", "depends_on", "refines", "evidence_for", "contradicts"}
+    {"co_occurs", "depends_on", "refines", "evidence_for", "contradicts", "updates"}
 )
 
 
@@ -158,6 +161,9 @@ def test_shadow_outcomes_census():
         "unresolved",
         "not_selected",
         "knob_disabled",
+        # PR-G1: latest-wins — the older endpoint of an `updates` pair is
+        # never injected as a neighbor.
+        "superseded_by_newer",
     })
 
 
