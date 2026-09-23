@@ -495,6 +495,110 @@ class TestJudgeNoul:
         assert result.confidence == 1.0
 
 
+# ── judge_choice convenience wrapper (J2) ────────────────────────────────
+
+class TestJudgeChoice:
+    def test_successful_choice_returns_native_confidence_and_probabilities(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "relation_type": {
+                            "type": "choice",
+                            "choice": "refines",
+                            "confidence": 0.94,
+                            "probabilities": {"refines": 0.94, "none": 0.06},
+                        }
+                    },
+                }).encode()
+            )
+            result = jev_backend.judge_choice(
+                question_id="relation_type",
+                instructions="pick one",
+                criteria={"refines": "a", "none": "b"},
+                state={"record_a": {}, "record_b": {}},
+                config=_VALID_CONFIG,
+            )
+        assert result.choice == "refines"
+        assert result.confidence == 0.94
+        assert result.probabilities == {"refines": 0.94, "none": 0.06}
+        assert result.failure_reason == ""
+
+    def test_failure_propagates_with_empty_choice(self):
+        with patch("urllib.request.urlopen", side_effect=_fake_http_error(401)):
+            result = jev_backend.judge_choice(
+                question_id="relation_type", instructions="?",
+                criteria={"a": "x", "b": "y"}, state="x", config=_VALID_CONFIG,
+            )
+        assert result.choice == ""
+        assert result.confidence is None
+        assert result.failure_reason == "llm_missing_key"
+
+    def test_missing_question_id_in_answers_is_llm_parse_failed(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"some_other_id": {"type": "choice", "choice": "a"}},
+                }).encode()
+            )
+            result = jev_backend.judge_choice(
+                question_id="relation_type", instructions="?",
+                criteria={"a": "x"}, state="x", config=_VALID_CONFIG,
+            )
+        assert result.failure_reason == "llm_parse_failed"
+
+    def test_non_choice_answer_type_is_llm_parse_failed(self):
+        """A stray 'choice' field on an answer declared some other type
+        (API drift / malformed body) must not be read as a choice judgment
+        -- same-shaped guard as judge_noul's own type check."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"relation_type": {"type": "noul", "noul": 0.9, "choice": "a"}},
+                }).encode()
+            )
+            result = jev_backend.judge_choice(
+                question_id="relation_type", instructions="?",
+                criteria={"a": "x"}, state="x", config=_VALID_CONFIG,
+            )
+        assert result.failure_reason == "llm_parse_failed"
+
+    def test_empty_choice_string_is_llm_parse_failed(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"relation_type": {"type": "choice", "choice": ""}},
+                }).encode()
+            )
+            result = jev_backend.judge_choice(
+                question_id="relation_type", instructions="?",
+                criteria={"a": "x"}, state="x", config=_VALID_CONFIG,
+            )
+        assert result.failure_reason == "llm_parse_failed"
+
+    def test_choice_outside_offered_options_is_llm_parse_failed(self):
+        """Counterfactual: without the criteria-membership check, a choice
+        the API returns that is not one of the offered options would be
+        trusted verbatim -- e.g. hallucinated or drifted vocabulary."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"relation_type": {"type": "choice", "choice": "not_offered"}},
+                }).encode()
+            )
+            result = jev_backend.judge_choice(
+                question_id="relation_type", instructions="?",
+                criteria={"a": "x", "b": "y"}, state="x", config=_VALID_CONFIG,
+            )
+        assert result.failure_reason == "llm_parse_failed"
+        assert result.choice == ""
+
+
 # ── Closed failure-reason vocabulary ─────────────────────────────────────
 
 class TestFailureVocabulary:

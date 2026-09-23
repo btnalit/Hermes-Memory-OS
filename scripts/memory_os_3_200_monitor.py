@@ -8430,6 +8430,12 @@ def cognitive_loop_step_evidence():
       "backfill_scanned_count", "backfill_upgraded_count",
       "backfill_skipped_count", "backfill_failed_count", "backfill_pass_complete",
       "backfill_outcome", "backfill_duration_ms",
+      # J2: llm_edge_proposer optional Jev choice judge-backend diagnostics
+      # (same shape as fact_judge's J1 fields, surfaced separately via
+      # fact_judge_backend_state -- this whitelist is llm_edge_proposer's
+      # own path to a monitor reader, see cognitive_loop._llm_edge_proposer).
+      "judge_backend", "judge_backend_fallback_count",
+      "judge_backend_fallback_reasons", "judge_backend_fallback_detail_sample",
     )
     edge_step_results = {}
     for step in steps:
