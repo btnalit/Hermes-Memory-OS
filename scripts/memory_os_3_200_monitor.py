@@ -1480,7 +1480,12 @@ def _classify_principal_binding(
     if binding.get("status") != "ok":
         info.append({
             "code": "principal_binding_no_sample",
-            "value": {"status": binding.get("status"), "collection_error": binding.get("collection_error", "")},
+            "value": {
+                "status": binding.get("status"),
+                "collection_error": binding.get("collection_error", ""),
+                "collection_error_detail": binding.get("collection_error_detail", ""),
+                "missing_columns": binding.get("missing_columns", []),
+            },
         })
         return
     ruled_sources = (
@@ -6754,11 +6759,20 @@ def principal_binding_summary(window_days=30):
     db_path = os.path.join(_hermes_home, "state.db")
     if not os.path.exists(db_path):
         return {"schema_version": schema, "status": "no_state_db", "platforms": {}}
+    # Schema verified read-only on hermes-media 2026-09-23 (both profiles):
+    # sessions.source TEXT, sessions.user_id TEXT (session-level author),
+    # sessions.started_at REAL (epoch). Other Hermes versions may lack
+    # user_id, so it is probed and its absence reported by name, never left
+    # to surface as a bare OperationalError.
     try:
         config = load_config(_hermes_home)
         cutoff = _time.time() - float(window_days) * 86400.0
         conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True, timeout=5)
         try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if not {"source", "user_id", "started_at"} <= columns:
+                missing = sorted({"source", "user_id", "started_at"} - columns)
+                return {"schema_version": schema, "status": "state_db_without_user_id", "missing_columns": missing, "platforms": {}}
             rows = conn.execute(
                 "SELECT source, user_id, COUNT(*) FROM sessions WHERE started_at >= ? GROUP BY source, user_id",
                 (cutoff,),
@@ -6766,7 +6780,10 @@ def principal_binding_summary(window_days=30):
         finally:
             conn.close()
     except Exception as exc:
-        return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__, "platforms": {}}
+        return {
+            "schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__,
+            "collection_error_detail": str(exc)[:160], "platforms": {},
+        }
     platforms = {}
     for source, user_id, count in rows:
         key = _normalize_source(source)

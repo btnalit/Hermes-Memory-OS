@@ -6488,6 +6488,19 @@ def test_retired_right_brain_sources_are_exempt_from_55c_55g_never_passed_on_res
     assert any(item["code"] == "memory_projection_retired_source_exempt" for item in with_residue["info"])
 
 
+def test_disabled_right_brain_is_not_retired_and_keeps_the_55c_55g_requirement():
+    """sannai's right brain is disabled, not retired (plan: disabled != retired):
+    only a recorded retirement exempts the sources."""
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"].pop("wandering_mind_state", None)
+    snapshot["legacy_right_brain_archive"] = {"lifecycle": "disabled"}
+
+    graded = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55c_payload_field_coverage_missing" for item in graded["fail"])
+    assert not any(item["code"] == "memory_projection_retired_source_exempt" for item in graded["info"])
+
+
 def test_retired_right_brain_projection_sources_exist_in_the_55c_55g_tables():
     """The exemption set is vocabulary: a name that is not a real 55C/55G
     requirement exempts nothing, silently."""
@@ -6546,6 +6559,22 @@ def test_principal_binding_summary_counts_platform_users_from_state_db_without_i
     assert platforms["cron"]["unattributed_session_count"] == 1
     dumped = json.dumps(summary)
     assert owner_id not in dumped and other_id not in dumped and peer_id not in dumped
+
+
+def test_principal_binding_summary_names_a_state_db_without_user_id(tmp_path):
+    """A Hermes version whose sessions table has no user_id must say so by
+    name -- not surface as a bare OperationalError that looks like a lock."""
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL)")
+    conn.commit()
+    conn.close()
+
+    summary = _exec_embedded_probe_prefix(str(tmp_path))["principal_binding_summary"]()
+
+    assert summary["status"] == "state_db_without_user_id"
+    assert summary["missing_columns"] == ["user_id"]
 
 
 def test_principal_binding_summary_reports_no_state_db(tmp_path):

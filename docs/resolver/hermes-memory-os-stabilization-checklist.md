@@ -8424,7 +8424,13 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **G0 新颖度**：`graph_layer_novelty_summary` 调 `prefetch.graph_layer_shadow_novelty_summary`（有界尾读），`error_records` 只出计数；
   分级刻意只出 INFO（新颖度是词面不相交的代理量，单独优化会奖励无关邻居），作 G1 / G4 的基线。
 - **反事实**（破坏即失败、恢复即通过）：去掉 55C 豁免；把"≥2 用户"门槛放宽；把分类表的 `fail_if_production` 改掉（生产不再升级 FAIL）。
-- **测试**：+9（C3 豁免与词表守卫 2、P0 采集器与分级 5、新颖度 2）；monitor + principal + lane_contracts 493 passed；全量 4059 passed / 13 skipped / 1 failed
+- **独立审查（Sonnet）无阻塞**，据其 SHOULD-FIX 修一处：采集器原本写死 `sessions.user_id`，仓库里另两处读同一张表时会在多个列名间
+  探测，一个测试夹具的表甚至没有这一列。先只读核实生产（2026-09-23，两个 profile 均有 `user_id TEXT` / `started_at REAL`，main 3494 个会话中
+  475 个带 user_id），再按开源兼容处理：用 `PRAGMA table_info` 探测，缺列时报封闭状态 `state_db_without_user_id` 并列出缺失列，
+  其它异常附截断的 `collection_error_detail`——不再以一个裸 `OperationalError` 永久静默成 INFO。另补 NIT：`lifecycle: disabled`
+  （sannai 现状）不豁免。审查另指出：群聊若不按发送者分会话，多人会落进 `unattributed_session_count` 而不计入不同用户数——这是
+  P0 设计沿袭的假设，记为遗留（`sessions` 表另有 `chat_type` / `chat_id` 可供 Phase 2 细化）。
+- **测试**：+11（C3 豁免、词表守卫与 disabled 3，P0 采集器与分级 6，新颖度 2）；monitor + principal + lane_contracts 493 passed；全量 4059 passed / 13 skipped / 1 failed
   （已知 Windows 并发 flake `test_completion_append_and_sidecar_are_idempotent_under_concurrency`，见 DN）；五门全绿。
 - **部署**：随规划全部落地后统一部署。部署后预期：main / sannai 的 Telegram 为 `principal_platform_bound`，无 `_unbound_with_non_owner_sessions`；
   若部署早于 principal 配置写入，Telegram 会报该 FAIL——那正是它要抓的状态。
