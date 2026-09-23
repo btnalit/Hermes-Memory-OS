@@ -131,6 +131,10 @@ def _detect_relation(
     # `_parse_iso`). When any of those fail, this pair falls through to the
     # ordinary checks below unchanged (a ≥0.85 dice pair is still ≥0.30, so
     # it is not lost — merely not labelled as a version relationship).
+    # This also precedes depends_on on purpose: prefetch's latest-wins
+    # suppression keys on relation_type == "updates" alone, so a newer record
+    # that cites the older one's id (the strongest supersession evidence)
+    # would otherwise lose latest-wins by being labelled depends_on.
     dice = _dice_coefficient(body_a, body_b)
     if dice >= _DICE_THRESHOLD_UPDATES and kind_a and kind_a == kind_b:
         ts_a = _parse_iso(str(record_a.get("created_at", "")))
@@ -301,6 +305,9 @@ def _order_records_unedged_first(
 # scanning/rewriting unboundedly in one run.
 UPDATES_BACKFILL_MAX_PER_RUN = 200
 UPDATES_BACKFILL_STATE_FILENAME = "structural_updates_backfill_state.json"
+# Closed set for `backfill_outcome` (Completion Is Not Output): the two
+# *_failed values are the runs the monitor grades even when no count moved.
+UPDATES_BACKFILL_OUTCOMES = frozenset({"completed", "no_roots", "scan_failed", "resolve_failed"})
 
 
 def _backfill_state_path(roots: Any):
@@ -357,6 +364,12 @@ def run_structural_updates_backfill(
     (``system/structural_updates_backfill_state.json``) advances past every
     scanned edge, qualifying or not; edges born after the cursor are picked
     up as the scan reaches them.
+
+    The cursor assumes ``created_at`` grows with insertion order (one writer
+    per profile, ``write_governed_edge`` stamps it at write time). An edge
+    written with a ``created_at`` behind the cursor — clock skew, or a repair
+    that reconstructs timestamps — is never revisited; deleting the state
+    file restarts the scan from the beginning.
     """
     from .index import transition_edge_state as _transition_edge_state
     from .index import write_governed_edge as _write_governed_edge
@@ -371,6 +384,9 @@ def run_structural_updates_backfill(
             "backfill_scanned_count": 0,
             "backfill_upgraded_count": 0,
             "backfill_skipped_count": 0,
+            "backfill_failed_count": 0,
+            "backfill_pass_complete": False,
+            "backfill_outcome": "no_roots",
             "backfill_duration_ms": 0,
             "backfill_error_records": [],
         }
@@ -395,6 +411,12 @@ def run_structural_updates_backfill(
             "backfill_scanned_count": 0,
             "backfill_upgraded_count": 0,
             "backfill_skipped_count": 0,
+            "backfill_failed_count": 0,
+            "backfill_pass_complete": False,
+            # Nothing could be scanned, so there is no count to put in
+            # backfill_failed_count; without this code the run reads exactly
+            # like an idle one (scanned=0).
+            "backfill_outcome": "scan_failed",
             "backfill_duration_ms": int(
                 (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
             ),
@@ -412,7 +434,12 @@ def run_structural_updates_backfill(
 
     scanned = len(candidates)
     upgraded = 0
+    # skipped = the pair does not qualify (or an endpoint is gone): benign.
+    # failed = the pair qualified but the upgrade did not complete — kept
+    # apart because the second failure branch below can leave a pair with no
+    # active structural edge at all, which must never read as a benign skip.
     skipped = 0
+    failed = 0
 
     referenced_ids: set[str] = set()
     for row in candidates:
@@ -439,10 +466,15 @@ def run_structural_updates_backfill(
                     rec["body"] = str(body_row["text"])
         except sqlite3.Error as exc:
             conn.close()
+            # Nothing was mutated and the cursor is not advanced, so the same
+            # batch is retried next run — but it is a failure, not a skip.
             return {
                 "backfill_scanned_count": scanned,
                 "backfill_upgraded_count": 0,
-                "backfill_skipped_count": scanned,
+                "backfill_skipped_count": 0,
+                "backfill_failed_count": scanned,
+                "backfill_pass_complete": False,
+                "backfill_outcome": "resolve_failed",
                 "backfill_duration_ms": int(
                     (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
                 ),
@@ -481,18 +513,49 @@ def run_structural_updates_backfill(
         # write boundary's structural pair-dedup only allows a write when no
         # non-invalidated structural edge already exists for this unordered
         # pair (see write_governed_edge's W1 dedup authority comment).
+        pair_details = {"edge_id": edge_id, "from_record_id": rid_a, "to_record_id": rid_b}
         invalidated = _transition_edge_state(
             conn, edge_id, "invalidated", roots=roots,
             reason="superseded_by_update_detection",
         )
         if not invalidated or invalidated.get("state") != "invalidated":
-            skipped += 1
+            # `{}` covers two durable outcomes: the canonical append failed
+            # (nothing changed, but the cursor still moves past this edge, so
+            # the pair stays co_occurs until a later pass), or the canonical
+            # row landed and only the projection update failed (the next
+            # index_sync invalidates it with no `updates` edge written).
+            failed += 1
+            error_records.append(build_error_record(
+                component="structural_edge_proposer",
+                operation="updates_backfill_invalidate",
+                error_code="edge_transition_failed",
+                severity="warning",
+                recoverable=True,
+                details=pair_details,
+            ))
             continue
         written = _write_governed_edge(conn, roots, **updates_edge)
         if written and not written.get("skipped_duplicate") and written.get("edge_id"):
             upgraded += 1
-        else:
+        elif written.get("skipped_duplicate"):
+            # A second non-invalidated structural edge (a pre-E2 duplicate)
+            # still links the pair, so it is not left unlinked.
             skipped += 1
+        else:
+            # Invalidation is a one-way door (EDGE_STATE_TRANSITIONS
+            # ["invalidated"] is empty) and the pair dedup forbids writing the
+            # replacement first, so this cannot be made atomic. The pair may
+            # now have NO active structural edge; the ids in details are what
+            # lets an operator find it.
+            failed += 1
+            error_records.append(build_error_record(
+                component="structural_edge_proposer",
+                operation="updates_backfill_write",
+                error_code="edge_write_failed",
+                severity="error",
+                recoverable=False,
+                details=pair_details,
+            ))
 
     conn.close()
     if candidates:
@@ -517,7 +580,9 @@ def run_structural_updates_backfill(
         "backfill_scanned_count": scanned,
         "backfill_upgraded_count": upgraded,
         "backfill_skipped_count": skipped,
+        "backfill_failed_count": failed,
         "backfill_pass_complete": scanned < max_per_run,
+        "backfill_outcome": "completed",
         "backfill_duration_ms": int(
             (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         ),
@@ -650,11 +715,9 @@ def run_structural_proposer(
         "write_failed_count": write_failed,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
-        "backfill_scanned_count": backfill_result.get("backfill_scanned_count", 0),
-        "backfill_upgraded_count": backfill_result.get("backfill_upgraded_count", 0),
-        "backfill_skipped_count": backfill_result.get("backfill_skipped_count", 0),
-        "backfill_duration_ms": backfill_result.get("backfill_duration_ms", 0),
-        "backfill_error_records": backfill_result.get("backfill_error_records", []),
+        # Spread, not hand-listed: the hand list dropped backfill_pass_complete,
+        # so every consumer read the wrapper's False default.
+        **backfill_result,
     }
 
     if audit_path:
