@@ -894,29 +894,37 @@ def test_classify_snapshot_without_lane_last_run_section_adds_no_entry():
 # (lane_input_freshness / append_only_ledger_size / llm_lane_failure_streak)
 
 
-def test_lane_input_freshness_summary_reads_real_sessions_directory(tmp_path):
-    """Exercises the real embedded collector against an actual sessions/
-    directory shaped the way hermes-media main looks in production
-    (verified 2026-09-23): session_*.json files with an old mtime, plus
-    other non-matching files that must not be counted."""
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    old_file = sessions_dir / "session_20260513_224454_41ffcf.json"
-    old_file.write_text("{}", encoding="utf-8")
-    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=133)).timestamp()
-    os.utime(old_file, (old_timestamp, old_timestamp))
-    # Non-matching file (real production also has bare-named .jsonl files
-    # here) must not be counted as a session_*.json input file.
-    (sessions_dir / "20260513_125515_532c4dab.jsonl").write_text("{}", encoding="utf-8")
+def _write_freshness_state_db(path, rows):
+    """Hermes state.db `sessions` columns the freshness collector reads
+    (verified on hermes-media 2026-09-23: started_at / last_activity_at are
+    epoch REAL)."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, last_activity_at REAL)")
+    conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_lane_input_freshness_summary_reads_state_db_activity(tmp_path):
+    """SFE's input is state.db now: the newest session activity decides
+    freshness, counted over every session (machine ones included)."""
+    old = (datetime.now(timezone.utc) - timedelta(days=133)).timestamp()
+    older = old - 86400
+    _write_freshness_state_db(tmp_path / "state.db", [
+        ("s1", "telegram", older, None),
+        ("s2", "cron", older, old),
+    ])
 
     namespace = _exec_embedded_probe_prefix(str(tmp_path))
     summary = namespace["lane_input_freshness_summary"]()
 
     lane = summary["lanes"]["session_fact_extraction"]
+    assert lane["source"] == "state_db"
     assert lane["directory_exists"] is True
-    assert lane["file_count"] == 1
-    assert lane["newest_age_seconds"] > 132 * 24 * 3600
-    assert lane["newest_age_seconds"] < 134 * 24 * 3600
+    assert lane["file_count"] == 2
+    assert 132 * 24 * 3600 < lane["newest_age_seconds"] < 134 * 24 * 3600
 
 
 def test_lane_input_freshness_summary_missing_directory_reports_no_files(tmp_path):
@@ -1126,11 +1134,11 @@ def test_w1b_collector_paths_match_the_real_producers(tmp_path):
         "llm_edge_proposer": 1,
     }
 
-    # session_fact_extraction's input directory (session_fact_extraction.py
-    # builds it from roots.hermes_home).
-    sessions_root = roots.hermes_home / "sessions"
-    sessions_root.mkdir(parents=True, exist_ok=True)
-    (sessions_root / "session_x.json").write_text("{}", encoding="utf-8")
+    # session_fact_extraction's input: Hermes' state.db, addressed through the
+    # roots.state_db_path accessor the lane itself uses.
+    from plugins.memory.memory_os.roots import state_db_path
+
+    _write_freshness_state_db(state_db_path(roots), [("s1", "telegram", 1.0, None)])
     freshness = namespace["lane_input_freshness_summary"]()["lanes"]["session_fact_extraction"]
     assert freshness["file_count"] == 1
 

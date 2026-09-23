@@ -84,6 +84,13 @@ MAILBOX_SOURCE = "mailbox"
 # for this source yet.
 API_SELF_DECLARED_SOURCES = frozenset({"api", "api_server"})
 
+# Hermes state.db ``sessions.source`` values of machine sessions (verified on
+# hermes-media 2026-09-23). Their state.db ids are date-hash ids without the
+# ``cron_`` prefix the provider sees at runtime, so readers of state.db map
+# these sources to ``non_primary_context`` -- one definition, shared by every
+# state.db reader.
+MACHINE_SESSION_SOURCES = frozenset({"cron", "subagent"})
+
 
 @dataclass(frozen=True)
 class PrincipalDecision:

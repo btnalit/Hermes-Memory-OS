@@ -224,8 +224,9 @@ _CRON_LANE_CONTRACTS: dict[str, LaneContract] = {
     "session_fact_extraction": LaneContract(
         kind=CRON_LANE,
         reads=(
-            "<hermes_home>/sessions/session_*.json -- DEAD since ~2026-05/06: "
-            "Hermes now writes state.db instead; see CLAUDE.md background",
+            "roots.state_db_path (Hermes state.db: sessions + messages tables, read-only) -- "
+            "replaces the dead <hermes_home>/sessions/session_*.json input (SFE, 2026-09-23); "
+            "sessions are filtered through principal.resolve_principal before extraction",
         ),
         produces=("candidate queue entries (unapproved candidates)",),
         consumers=("plugins.memory.memory_os.crystallized",),

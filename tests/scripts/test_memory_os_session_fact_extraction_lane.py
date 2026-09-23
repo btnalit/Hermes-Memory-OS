@@ -62,7 +62,7 @@ def _store_with_gate(tmp_path) -> MemoryOSStore:
 
 def _fake_result(**overrides):
     base = {
-        "schema_version": "memory-os.session_fact_extraction_run.v0",
+        "schema_version": "memory-os.session_fact_extraction_run.v1",
         "profile": "memoryos-test",
         "lane_id": "session_fact_extraction",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -153,9 +153,9 @@ def test_main_end_to_end_prints_required_counters_and_writes_report(tmp_path, mo
     ):
         assert key in summary, key
 
-    # No sessions directory under tmp_path -> explicit skip, not silent no-op.
+    # No state.db under tmp_path -> explicit skip, not silent no-op.
     assert summary["skipped"] is True
-    assert summary["skipped_reason"] == "sessions_dir_absent"
+    assert summary["skipped_reason"] == "state_db_absent"
 
     assert report_path.exists()
     written = json.loads(report_path.read_text(encoding="utf-8"))

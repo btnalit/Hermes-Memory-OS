@@ -91,12 +91,12 @@ V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
 # per CLAUDE.md's rule that a gate's vocabulary/thresholds must be
 # grep-able. All three grade WARN, never FAIL, for now.
 #
-# session_fact_extraction reads <hermes_home>/sessions/session_*.json, a
-# format Hermes stopped writing around 2026-05/06 (now writes state.db).
-# Verified on hermes-media main 2026-09-23: 141 session_*.json files, newest
-# mtime ~2026-05-13 -- over 4 months stale against today's date, so this
-# threshold is deliberately far below that gap and still comfortably above
-# any legitimate multi-day gap in owner activity.
+# session_fact_extraction reads Hermes' state.db (sessions + messages) since
+# the SFE switch (2026-09-23); before that it read sessions/session_*.json,
+# which Hermes stopped writing around 2026-05/06 (newest ~2026-05-13 on
+# hermes-media main). The input is stale when state.db itself stops being
+# written: the threshold sits far below that four-month gap and comfortably
+# above any legitimate multi-day lull in traffic.
 LANE_INPUT_STALE_THRESHOLD_SECONDS = 7 * 24 * 3600  # 7 days
 
 # Append-only ledger sizes measured on hermes-media main 2026-09-23:
@@ -5008,6 +5008,11 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "provisional_sweep",
     "runtime",
     "session_fact_extraction",
+    # SFE (2026-09-23): state.db open/query failures are a distinct
+    # sub-component from the module's general errors above -- lets a reader
+    # tell "the input source itself is broken" apart from "extraction/write
+    # failed" without inspecting error_record details.
+    "session_fact_extraction.state_db",
     # CF: provisional_write_failed containment records from the aggregation
     # lane's _try_write_resolver_provisional boundary.
     "candidate_aggregation",
@@ -6754,39 +6759,41 @@ def lane_last_run_summary():
     }
 
 def lane_input_freshness_summary():
-    # W1-B: session_fact_extraction reads <hermes_home>/sessions/session_*.json.
-    # This is a raw-facts collector only -- classify_snapshot() applies
-    # LANE_INPUT_STALE_THRESHOLD_SECONDS locally so the threshold lives in one
-    # place (the local module), not duplicated into this remote script.
-    lanes = {}
-    directory = os.path.join(_hermes_home, "sessions")
-    directory_exists = os.path.isdir(directory)
-    newest_mtime = None
-    file_count = 0
-    if directory_exists:
-        for name in os.listdir(directory):
-            if not (name.startswith("session_") and name.endswith(".json")):
-                continue
-            file_count += 1
-            try:
-                mtime = os.path.getmtime(os.path.join(directory, name))
-            except OSError:
-                continue
-            if newest_mtime is None or mtime > newest_mtime:
-                newest_mtime = mtime
-    now = datetime.now(timezone.utc).timestamp()
-    lanes["session_fact_extraction"] = {
-        "directory": directory,
-        "directory_exists": directory_exists,
-        "file_count": file_count,
-        "newest_mtime_utc": (
-            datetime.fromtimestamp(newest_mtime, tz=timezone.utc).isoformat() if newest_mtime is not None else ""
-        ),
-        "newest_age_seconds": (now - newest_mtime) if newest_mtime is not None else None,
+    # session_fact_extraction reads Hermes' state.db (read-only). Raw facts
+    # only -- classify_snapshot() applies LANE_INPUT_STALE_THRESHOLD_SECONDS
+    # locally. Counts ALL sessions: the question is whether state.db is being
+    # written at all, not whether anything is extraction-eligible right now
+    # (that is the lane's own run record). The output keys keep their v0
+    # names (directory_exists = the db exists, file_count = session rows) so
+    # the grading needs no change.
+    entry = {
+        "source": "state_db", "directory": "", "directory_exists": False,
+        "file_count": 0, "newest_mtime_utc": "", "newest_age_seconds": None,
     }
+    try:
+        import sqlite3
+        from plugins.memory.memory_os.roots import MemoryOSRoots, state_db_path
+        db_path = str(state_db_path(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")))
+        entry["directory"] = db_path
+        if os.path.exists(db_path):
+            entry["directory_exists"] = True
+            conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True, timeout=5)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*), MAX(COALESCE(last_activity_at, started_at)) FROM sessions"
+                ).fetchone()
+            finally:
+                conn.close()
+            entry["file_count"] = int(row[0] or 0)
+            newest = row[1]
+            if isinstance(newest, (int, float)):
+                entry["newest_mtime_utc"] = datetime.fromtimestamp(float(newest), tz=timezone.utc).isoformat()
+                entry["newest_age_seconds"] = datetime.now(timezone.utc).timestamp() - float(newest)
+    except Exception as exc:
+        entry["collection_error"] = f"{type(exc).__name__}: {exc}"[:160]
     return {
-        "schema_version": "memory-os.lane_input_freshness.v0",
-        "lanes": lanes,
+        "schema_version": "memory-os.lane_input_freshness.v1",
+        "lanes": {"session_fact_extraction": entry},
     }
 
 def principal_binding_summary(window_days=30):
