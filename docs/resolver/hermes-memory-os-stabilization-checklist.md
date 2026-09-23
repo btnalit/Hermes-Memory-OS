@@ -5031,6 +5031,8 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `7c72f63..HEAD`：SFE（DR）——会话事实抽取改读 Hermes `state.db`（只读，epoch 数值窗口，SQL 层截断超长消息），经 `resolve_principal` 过滤
+  非主人；主会话修掉"机器会话占满扫描窗口导致积压永不排空"，monitor 输入新鲜度改看 state.db。全量 4062 passed。**未部署**。
 - `6f1c262..HEAD`：权限主体 P0-lite（DO）——`principal.resolve_principal()` 成为"这一轮是谁"的唯一判定（owner / peer_agent /
   other_human / system / unknown，8 条优先级规则），provider、ingress、router、prefetch 共用；安装 / 部署只凭宿主已有信号自动绑定主人
   身份（报告只出打码 id）；主会话修掉"cron 轮被当非主人降成 index_only"与"一次性显式绑定在下次部署被悄悄丢弃"。全量 4048 passed。**未部署**。
@@ -8401,3 +8403,38 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   P3（session_mirror 主体过滤）未做；`principal_binding_status` 的 monitor 分级待 monitor 接线 PR。
 - **部署**：随规划全部落地后统一部署；gateway 进程缓存 provider 模块，需重启两个 profile 的 gateway。部署后验收：主人 Telegram 轮
   `principal=owner`，群里其他人类 `other_human`、同行 bot `peer_agent`，cron 轮 `system` 且无 `drive_policy`。
+
+---
+
+## DR — SFE：session_fact_extraction 改读 state.db + 主体过滤（2026-09-23）
+
+- **背景**：Hermes 自 2026-05/06 起不再写 `sessions/session_*.json`，SFE 从那以后零产出（sannai 自 8/26 起零入库）；C0 的 `lane_input_stale`
+  正是为它而设。规划要求改读 `state.db`、经主体模型过滤非主人、`started_at` 按 epoch 数值比较（与 ISO 字符串比较会静默返回空）。
+- **子代理只读核实生产表结构**（两个 profile）：`sessions`（`source` / `user_id` / `started_at REAL` / `last_activity_at REAL` / `message_count`
+  / `chat_type` ∈ {None, dm, group, webhook} / `session_key`）、`messages`（`session_id` / `role` ∈ {user, assistant, tool, session_meta} /
+  `content` / `timestamp REAL`）。**纠正了一个既有假设**：state.db 里 cron / subagent 会话的 id 是日期哈希，不带 provider 运行时看到的 `cron_`
+  前缀，`is_scheduled_session_id` 抓不到它们——改为按 `source` 映射到 `non_primary_context`，判定仍只在 `resolve_principal`。群聊 `session_key`
+  含发送者 user_id（按发送者分会话当前生效），保留为 INFO 绊线。
+- **改动**（Sonnet 子代理实现，主会话审查）：新增 `roots.state_db_path` accessor；以 `mode=ro` 读；每个会话经
+  `resolve_principal(source, user_id, author_class="", non_primary_context=source∈机器源)`，只有 owner / unknown 进入抽取；peer_agent /
+  other_human 记终态指纹（稀少、稳定），system 不记指纹（约 95% 的量，每轮由 `source` 即可重算）；SQL 层 `substr` 截断到 `max_message_chars`、
+  只取 user / assistant、每会话硬上限 500 行；新 knob `session_fact_extraction_max_sessions_scanned_per_tick`（500）与 `_lookback_days`（180）；
+  指纹改为 (session_id, message_count, last_activity_at)；schema v0→v1（诚实的纪元边界），新增 `input_source`、`sessions_skipped_by_principal`、
+  `group_sessions_scanned`、`group_sessions_without_user_suffix`；旧 JSON 读路径删除，跳过原因改为 `state_db_absent` / `sessions_table_missing` /
+  `no_sessions_in_window` / `no_actionable_sessions`；新发射点 `session_fact_extraction.state_db` 已登记。
+- **主会话审查修掉的一处（饥饿）**：候选查询是 `ORDER BY started_at DESC LIMIT 500`，LIMIT 在主体过滤之前生效，而机器会话约占 95%
+  （main 30 天 1190 个会话中 1131 个）且从不记指纹——窗口每轮都被它们填满（500 个 ≈ 12 天流量），比窗口更早的主人会话永远扫不到，
+  5 月以来的积压永远排不空。机器源改在 SQL 里排除（`lower(source) NOT IN`），另起一条 COUNT 查询计入 `sessions_skipped_by_principal.system`，
+  全部机器会话时跳过原因为 `no_actionable_sessions` 而不是"窗口里没会话"。机器源集合收归 `principal.MACHINE_SESSION_SOURCES` 一处定义。
+  反事实：12 个更新的 cron / subagent 会话 + 1 个更早的主人会话、扫描上限 10——旧查询下主人会话处理数为 0，修复后为 1。
+- **monitor 输入新鲜度**（主会话在本 PR 内做，SFE 语义归属本 PR）：`lane_input_freshness_summary` 从数 `session_*.json` 改为只读查询
+  `state.db` 的 `COUNT(*)` 与 `MAX(COALESCE(last_activity_at, started_at))`，统计全部会话（问的是 state.db 是否还在被写，不是此刻是否有可抽取
+  内容）；输出键名不变，分级不改。C0 的路径守卫测试改为经 `roots.state_db_path` 落库。
+- **反事实**：子代理 5 条（SQL 截断、角色过滤、system 不记指纹、已处理指纹、epoch-vs-ISO 窗口），主会话 1 条（机器会话饥饿）。
+- **测试**：SFE 测试文件重写为 35 条（真实 SQLite 夹具）、monitor 新鲜度 2 条改写；全量 4062 passed / 13 skipped；五门全绿。
+- **遗留**：`tool` / `webhook` / `v3-*` 等少量自定义来源与未配置的 wecom / weixin 落兼容态 `unknown`，可进入抽取（30 天内均为 0～1 个会话）；
+  monitor part 1 的主体普查仍手写 `state.db` 路径、本地定义机器源常量（与本分支并行），part 2 统一改用 `roots.state_db_path` 与
+  `principal.MACHINE_SESSION_SOURCES`；另有三处既有代码仍手写 `state.db` 路径（session_mirror / owner_actions / seam owner_channel_adapter），
+  未迁移；新计数尚未接入 monitor 分级。
+- **部署**：随规划全部落地后统一部署；部署后验收：main / sannai 的 `lane_input_stale` 消失，SFE `input_source=state_db`、
+  `sessions_skipped_by_principal.system>0`、主人会话 `facts_extracted>0`（依赖 L1 的 call_llm 已恢复 LLM 回复）。
