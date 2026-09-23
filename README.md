@@ -310,9 +310,10 @@ python scripts/deploy_memory_os.py \
   --hindsight auto
 ```
 
-Automated rollout defaults the low-clue LLM judge to bounded active voting with
-the current Hermes provider/model. Select `--llm-judge-preset report-only` for
-observation only, or `--llm-judge-preset none` to disable it.
+Automated rollout keeps the low-clue LLM judge off (`--llm-judge-preset none`);
+live prefetch never calls it either way. Opt in with `--llm-judge-preset
+report-only` for observation, or `bounded-vote` / `active` for bounded voting
+with the current Hermes provider/model.
 
 ## Automation Profiles
 

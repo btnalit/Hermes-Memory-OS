@@ -2057,10 +2057,11 @@ def main() -> int:
     parser.add_argument(
         "--llm-judge-preset",
         choices=sorted(LLM_JUDGE_PRESETS),
-        default="active",
+        default="none",
         help=(
-            "Write Low-Clue Recall LLM judge config. Default active reuses Hermes provider/model "
-            "for bounded_vote; use none for deterministic-only or report-only for report-only probes."
+            "Write Low-Clue Recall LLM judge config. Default none keeps the judge off "
+            "(deterministic guard only); report-only / bounded-vote / active opt in and reuse "
+            "the Hermes provider/model."
         ),
     )
     parser.add_argument(

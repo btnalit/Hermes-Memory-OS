@@ -1128,7 +1128,8 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--memory-sources-preset" in text
     assert "--llm-judge-preset" in text
     assert "--hindsight" in text
-    assert "default active reuses Hermes" in text
+    assert "default none keeps it off" in text
+    assert 'local default_llm_judge_preset="none"' in text
     assert "active enables retain/recall/reflect" in text
     assert "report-only" in text
     assert "--yes" in text

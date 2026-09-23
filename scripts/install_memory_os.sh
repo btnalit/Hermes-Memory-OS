@@ -73,8 +73,9 @@ Options:
   --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host|operational.
   --memory-sources-preset NAME none|production-safe|test-host|operational.
   --llm-judge-preset NAME      active|none|report-only|bounded-vote. Low-clue
-                                recall LLM judge; default active reuses Hermes
-                                provider/model config in bounded-vote mode.
+                                recall LLM judge; default none keeps it off.
+                                The others opt in and reuse Hermes
+                                provider/model config.
   --hindsight MODE             auto|off|adopt|active|wizard. Default: auto.
                                 auto adopts a new Hindsight config into shadow
                                 mode and preserves an already-active adoption;
@@ -564,7 +565,7 @@ select_options() {
   local default_right_brain_expression_cron_helper="no"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
-  local default_llm_judge_preset="report-only"
+  local default_llm_judge_preset="none"
 
   if [[ "${MODE}" == "test-host" || "${MODE}" == "operational" ]]; then
     default_preset="${MODE}"
