@@ -207,6 +207,7 @@ def build_prefetch(
     memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     recall_facade: object | None = None,  # Phase 3: RetrieverFacade (provider-cached)
+    author_class: str = "",
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
@@ -246,6 +247,7 @@ def build_prefetch(
             query,
             sections=candidates,
             current_task_anchor=current_task_anchor,
+            author_class=author_class,
             budget_chars=budget_chars,
             mode="disabled",
         )
@@ -280,6 +282,7 @@ def build_prefetch(
             query,
             sections=selected_sections,
             current_task_anchor=current_task_anchor,
+            author_class=author_class,
             budget_chars=budget_chars,
             mode="foreground_only",
         )
@@ -308,6 +311,7 @@ def build_prefetch(
             memory_reranker_config=reranker_config,
             substrate_recall_report=substrate_recall_report,
             recall_facade=recall_facade,
+            author_class=author_class,
         )
         if routed is not None:
             _record_memory_sources(
@@ -336,6 +340,7 @@ def build_prefetch(
             query,
             sections=[],
             current_task_anchor=current_task_anchor,
+            author_class=author_class,
             budget_chars=budget_chars,
             mode=str(router_config.get("mode") or "disabled"),
         )
@@ -363,6 +368,7 @@ def build_prefetch(
         query,
         sections=candidates,
         current_task_anchor=current_task_anchor,
+        author_class=author_class,
         budget_chars=budget_chars,
         mode=str(router_config.get("mode") or "disabled"),
     )
@@ -508,6 +514,7 @@ def _build_context_router_apply_prefetch(
     memory_reranker_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     recall_facade: object | None = None,
+    author_class: str = "",
 ) -> dict[str, Any] | None:
     candidates = build_prefetch_section_candidates(
         query,
@@ -526,6 +533,7 @@ def _build_context_router_apply_prefetch(
         query,
         sections=candidates,
         current_task_anchor=current_task_anchor,
+        author_class=author_class,
         budget_chars=budget_chars,
         mode="apply",
     )

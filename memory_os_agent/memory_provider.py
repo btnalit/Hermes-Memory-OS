@@ -34,7 +34,15 @@ class MemoryProvider(ABC):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         return None
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages=None,
+        turn_author: dict[str, Any] | None = None,
+    ) -> None:
         return None
 
     @abstractmethod

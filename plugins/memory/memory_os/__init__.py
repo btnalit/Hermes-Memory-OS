@@ -26,7 +26,16 @@ from .crystallized import read_candidate_queue, read_effective_candidates
 from .event_stats import build_event_stats, read_event_stats, write_event_stats
 from .ids import new_event_id
 from .index import MemoryOSIndex
-from .ingress import classify_ingress, is_scheduled_session_id
+from .ingress import (
+    AUTHOR_CLASS_BOT,
+    AUTHOR_CLASS_UNKNOWN,
+    FOREGROUND_CONTROL_AUTHOR_CLASSES,
+    author_class_from_host,
+    classify_ingress,
+    extract_own_text,
+    is_machine_authored_query,
+    is_scheduled_session_id,
+)
 from .low_clue_recall import low_clue_judge_availability
 from .operational_truth import project_public_counts, read_operational_truth_snapshot
 from .owner_actions import (
@@ -84,6 +93,14 @@ class MemoryOSProvider(MemoryProvider):
         self._current_task_anchor = ""
         self._foreground_task_only_prefetch = False
         self._consecutive_topic_switch_count = 0
+        # Who wrote the current turn (ingress.AUTHOR_CLASS_*), set per turn by
+        # on_turn_start. A session may only touch the owner's foreground
+        # state (anchor recovery, writes, session-end tombstones) once it has
+        # had a turn from a foreground-control author.
+        self._turn_author_class = AUTHOR_CLASS_UNKNOWN
+        self._owner_turn_seen = False
+        self._anchor_recovery_pending = False
+        self._non_primary_context = False
         self._last_owner_review_reply_result: dict[str, Any] | None = None
         self._last_owner_review_reply_query = ""
         self._embedder = None
@@ -140,21 +157,51 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_stop = threading.Event()
         if kwargs.get("worker_autostart", True):
             self._start_worker()
-        # C2: recover active foreground anchor from disk after restart / session switch.
+        # C2: the active foreground anchor is recovered from disk after restart /
+        # session switch (deferred to the first foreground-control turn, below).
         # Always clear the in-memory anchor first — this prevents stale anchors from
         # surviving across provider instances that share the same process (e.g., session
         # reuse without re-instantiation).  Recovery is gated by
         # ANCHOR_RECOVERY_MAX_AGE_HOURS: anchors older than this are treated as stale
         # and discarded.
         self._current_task_anchor = ""
-        # Scheduled (cron) sessions are not owner sessions: they must neither
-        # inherit the owner's foreground anchor into their context nor write
-        # the "superseded" tombstone below over it.
-        recovered = ""
-        if not is_scheduled_session_id(self.session_id):
-            recovered = self._read_latest_active_task_anchor(
-                max_age_hours=ANCHOR_RECOVERY_MAX_AGE_HOURS,
-            )
+        self._turn_author_class = AUTHOR_CLASS_UNKNOWN
+        self._owner_turn_seen = False
+        # Hermes marks non-primary agents (subagent / cron / flush) and asks
+        # providers to skip writes for them.
+        self._non_primary_context = str(kwargs.get("agent_context") or "primary") != "primary"
+        # Recovery waits for the session's first foreground-control turn
+        # (_note_foreground_control_turn). Hermes opens one session per
+        # sender in a group chat, and nothing at initialize says whether the
+        # sender is the owner or another agent: recovering here pulled the
+        # owner's task into peer-agent sessions and tombstoned it, and their
+        # session end then marked it completed. Machine sessions never
+        # recover — they must neither inherit the owner's anchor into their
+        # context nor write the "superseded" tombstone over it.
+        self._anchor_recovery_pending = not self._is_machine_session()
+
+    def _is_machine_session(self) -> bool:
+        return is_scheduled_session_id(self.session_id) or self._non_primary_context
+
+    def _may_write_foreground_state(self) -> bool:
+        """True once this session has had a turn that may steer the owner's foreground task."""
+        return self._owner_turn_seen and not self._is_machine_session()
+
+    def _note_foreground_control_turn(self) -> None:
+        """Latch the first foreground-control turn and run the deferred recovery once."""
+        if self._is_machine_session() or self._turn_author_class not in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+            return
+        self._owner_turn_seen = True
+        if not self._anchor_recovery_pending:
+            return
+        self._anchor_recovery_pending = False
+        if not self._current_task_anchor:
+            self._recover_cross_session_anchor()
+
+    def _recover_cross_session_anchor(self) -> None:
+        recovered = self._read_latest_active_task_anchor(
+            max_age_hours=ANCHOR_RECOVERY_MAX_AGE_HOURS,
+        )
         if recovered:
             self._current_task_anchor = recovered
             # ── Compact-resume defense: Hermes may compact without calling
@@ -487,6 +534,7 @@ class MemoryOSProvider(MemoryProvider):
             memory_reranker_config=self._config.get("memory_reranker"),
             substrate_recall_report=substrate_recall_report,
             recall_facade=facade,
+            author_class=self._turn_author_class,
         )
 
     def _substrate_recall_report(self, query: str) -> dict[str, Any] | None:
@@ -518,7 +566,15 @@ class MemoryOSProvider(MemoryProvider):
         report["query_class"] = "active" if recall_mode == "active" else "shadow"
         return report
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages=None,
+        turn_author: dict[str, Any] | None = None,
+    ) -> None:
         if self._owner_review_reply_processed(user_content):
             self._audit(
                 "owner_review_reply_sync_turn_skipped",
@@ -539,11 +595,31 @@ class MemoryOSProvider(MemoryProvider):
                 },
             )
             return
+        # The host's per-turn author (sent because this signature accepts it)
+        # is exact for this turn; sync runs on a background worker, so the
+        # on_turn_start value may already belong to the next turn.
+        if isinstance(turn_author, dict):
+            author_class = author_class_from_host(
+                author_id=turn_author.get("id"),
+                author_name=turn_author.get("name"),
+                author_is_bot=turn_author.get("is_bot"),
+            )
+        else:
+            author_class = self._turn_author_class
+        safe_ref: dict[str, Any] = {"session_id": session_id or self.session_id, "author_class": author_class}
+        non_driving_reason = self._non_driving_turn_reason(
+            user_content, author_class=author_class, session_id=session_id or self.session_id
+        )
+        if non_driving_reason:
+            # Indexed, but neither lingering working memory nor a candidate.
+            safe_ref.update(
+                {"drive_policy": "index_only", "candidate_allowed": False, "non_driving_reason": non_driving_reason}
+            )
         event = self._build_event(
             kind="conversation_turn",
-            summary=_turn_summary(user_content, assistant_content),
+            summary=_turn_summary(extract_own_text(user_content), assistant_content),
             session_id=session_id,
-            safe_ref={"session_id": session_id or self.session_id},
+            safe_ref=safe_ref,
             hashes={
                 "user_sha256": _sha256(user_content),
                 "assistant_sha256": _sha256(assistant_content),
@@ -551,7 +627,32 @@ class MemoryOSProvider(MemoryProvider):
         )
         self._enqueue(event, drop_action="sync_turn_dropped")
         # ── C1: capture operations from this turn's messages ──────────────
-        self._capture_turn_operations(messages, session_id=session_id)
+        if author_class in FOREGROUND_CONTROL_AUTHOR_CLASSES:
+            self._capture_turn_operations(messages, session_id=session_id)
+
+    def _non_driving_turn_reason(self, user_content: str, *, author_class: str, session_id: str) -> str:
+        """Why a turn must not drive working memory or candidates ("" = it may).
+
+        Another agent's turn is not the owner's experience; a Hermes frame is
+        not anyone's; and a cancellation/deferral exchange ("停下吧" /
+        "收到，已停止") re-injected by term overlap tells the next turn to stop
+        again. Scheduled sessions keep their existing cron-sourced handling.
+        """
+        if author_class == AUTHOR_CLASS_BOT:
+            return "non_owner_author"
+        if is_scheduled_session_id(session_id):
+            return ""
+        if is_machine_authored_query(user_content):
+            return "machine_authored"
+        intent = classify_ingress(
+            user_content,
+            current_task_anchor=self._current_task_anchor,
+            session_id=session_id,
+            author_class=author_class,
+        ).intent
+        if intent in {"cancellation", "defer_current_task"}:
+            return "foreground_control_exchange"
+        return ""
 
     def _capture_turn_operations(
         self, messages: Any, *, session_id: str = ""
@@ -915,9 +1016,13 @@ class MemoryOSProvider(MemoryProvider):
         # and tombstone them. Observed on production 2026-09-10: a sannai cron
         # job finishing at 08:03:10Z superseded the owner's 05:17Z anchor. The
         # safety net is for an owner session that lost its own anchor in
-        # memory — never for a machine session that never had one.
+        # memory — never for a machine session that never had one. The same
+        # holds for a session that only ever carried another agent's turns
+        # (a peer bot in a group chat gets its own Hermes session): it never
+        # had an anchor either, so the net may only run once the session has
+        # had a foreground-control turn.
         self._clear_active_task_anchor()
-        if not self._current_task_anchor and not is_scheduled_session_id(self.session_id):
+        if not self._current_task_anchor and self._may_write_foreground_state():
             self._supersede_active_anchors()
         self._current_task_anchor = ""
         foreground_summary = _extract_foreground_session_summary(messages)
@@ -965,6 +1070,15 @@ class MemoryOSProvider(MemoryProvider):
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
         self._last_owner_review_reply_result = None
         self._last_owner_review_reply_query = ""
+        # Hermes calls this, on the same thread, immediately before prefetch
+        # (agent/turn_context.py), with the author of *this* turn — a cached
+        # gateway agent sees several authors over its lifetime.
+        self._turn_author_class = author_class_from_host(
+            author_id=kwargs.get("author_id"),
+            author_name=kwargs.get("author_name"),
+            author_is_bot=kwargs.get("author_is_bot"),
+        )
+        self._note_foreground_control_turn()
 
     def _process_owner_review_reply_ingress(
         self,
@@ -981,6 +1095,16 @@ class MemoryOSProvider(MemoryProvider):
             owner_review = {}
         if owner_review.get("reply_ingress_enabled", True) is False:
             return _owner_review_reply_not_processed("reply_ingress_disabled")
+        if self._turn_author_class == AUTHOR_CLASS_BOT:
+            # Owner actions are an owner-trust boundary; another agent in a
+            # shared chat quoting a digest token is not the owner.
+            result = _owner_review_reply_not_processed("non_owner_author")
+            self._audit(
+                "owner_review_reply_ingress",
+                "warning",
+                {"turn_number": turn_number, "phase": phase, "status": result["status"], "reason": result["reason"]},
+            )
+            return result
         owner_id = str(owner_review.get("owner_id") or "owner")
         channels = _owner_review_reply_channels(str(self.platform or ""), owner_review)
         result: dict[str, Any] | None = None
@@ -1032,8 +1156,10 @@ class MemoryOSProvider(MemoryProvider):
         # record describing a cron job (and, via _write_active_task_anchor,
         # supersede the owner's real anchor on the way). An agent cron job runs
         # for minutes and can accumulate enough tool output to be compacted, so
-        # this hook is genuinely reachable for one.
-        if is_scheduled_session_id(self.session_id):
+        # this hook is genuinely reachable for one. A session that has only
+        # carried another agent's turns is the same case: its transcript is a
+        # peer's debate, not the owner's task.
+        if not self._may_write_foreground_state():
             return self._current_task_anchor
         # Extract completed_operations from current anchor before rebuilding
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
@@ -1355,14 +1481,43 @@ class MemoryOSProvider(MemoryProvider):
         }
 
     def _refresh_current_task_anchor_from_query(self, query: str, *, session_id: str = "") -> None:
-        text = " ".join(str(query or "").split())
+        # A non-primary agent (Hermes subagent / cron / flush context) makes
+        # no foreground decision at all; cron sessions are also caught below
+        # by their session id, but agent_context is only known here.
+        if self._non_primary_context:
+            self._foreground_task_only_prefetch = False
+            return
+        # Hosts that never call on_turn_start still get the deferred recovery
+        # on their first turn (author "unknown").
+        self._note_foreground_control_turn()
+        # The author's own words: an anchor's task text and every decision
+        # below must never come from a reply quote or other Hermes frame.
+        text = " ".join(extract_own_text(query).split())
         if not text:
             return
         decision = classify_ingress(
             text,
             current_task_anchor=self._current_task_anchor,
             session_id=session_id or self.session_id,
+            author_class=self._turn_author_class,
         )
+        if decision.intent == "non_owner_authored" or "cancel_rejected_turn_too_long" in decision.reason_codes:
+            # Both are the gate *holding*; recorded so production can tell
+            # that apart from "nothing reached the gate".
+            self._audit(
+                "ingress_foreground_control_skipped",
+                "ok",
+                {
+                    "reason": decision.reason_codes[-1],
+                    "author_class": self._turn_author_class,
+                    "session_id": session_id or self.session_id,
+                },
+            )
+        if decision.intent == "non_owner_authored":
+            # Same shape as machine_authored: no anchor decision or write, and
+            # the sticky foreground-only flag must not leak into this turn.
+            self._foreground_task_only_prefetch = False
+            return
         if decision.intent == "machine_authored":
             # Scheduled-job prompt: no cancel / defer / continue / topic-switch
             # decision and no anchor ledger write may derive from it. The
@@ -1575,6 +1730,9 @@ class MemoryOSProvider(MemoryProvider):
             "session_id": record["session_id"],
             "profile": record["profile"],
             "status": status,
+            # Closed set (ingress.AUTHOR_CLASS_*). "unknown" is kept apart
+            # from "human" so a host that stops sending the author is visible.
+            "author_class": self._turn_author_class,
         }
         if ingress_rule:
             # Which cancellation rule read the owner turn as a cancellation —

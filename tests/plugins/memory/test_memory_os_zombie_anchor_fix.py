@@ -26,6 +26,7 @@ def _init_provider(tmp_path, session_id="s1"):
         platform="cli",
         agent_identity="memoryos-test",
     )
+    provider.on_turn_start(1, "")  # the session's first owner turn (Hermes calls this before prefetch)
     return provider
 
 
