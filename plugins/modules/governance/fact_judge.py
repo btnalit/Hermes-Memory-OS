@@ -24,6 +24,7 @@ from plugins.memory.memory_os.low_clue_recall import (
     LlmCallResult,
     _call_hermes_runtime_model_result,
     _extract_json_object,
+    _llm_call_diagnostics,
 )
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -39,19 +40,14 @@ def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
     about. Kept in a separate field so the two vocabularies never collide
     (e.g. the transport's llm_missing_key means "credential missing";
     this module's llm_missing_key means "durable_fact key missing").
+
+    W4-A: delegates to the single shared seam
+    (``low_clue_recall._llm_call_diagnostics``) that also now forwards
+    ``llm_expected_model``/``llm_actual_model``/``llm_route_unexpected``/
+    ``llm_route_unknown`` (plan row L1) -- every key this function
+    previously returned is unchanged in name and value.
     """
-    if call_result is None:
-        return {}
-    diagnostics: dict[str, Any] = {
-        "llm_transport_failure_reason": call_result.failure_reason,
-        "llm_provider": call_result.provider,
-        "llm_model": call_result.model,
-        "llm_transport": call_result.transport,
-    }
-    if call_result.usage:
-        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
-        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
-    return diagnostics
+    return _llm_call_diagnostics(call_result)
 
 
 def fact_judge_manifest() -> dict[str, Any]:
@@ -612,6 +608,14 @@ def run_fact_judge_lane(
     llm_transport = ""
     llm_usage_prompt_tokens = 0
     llm_usage_completion_tokens = 0
+    # W4-A / plan row L1: route-mismatch counters, plus a sample of the
+    # expected/actual model names from the most recent mismatch this tick
+    # (see LlmCallResult's docstring for the route_unexpected/route_unknown
+    # definition and the alias-handling note).
+    llm_route_unexpected_count = 0
+    llm_route_unknown_count = 0
+    llm_route_unexpected_expected_model = ""
+    llm_route_unexpected_actual_model = ""
     # J1: optional Jev backend diagnostics, aggregated across this tick.
     judge_confidence: float | None = None
     judge_backend_fallback_count = 0
@@ -664,6 +668,12 @@ def run_fact_judge_lane(
             llm_transport = str(verdict["llm_transport"])
         llm_usage_prompt_tokens += int(verdict.get("llm_usage_prompt_tokens") or 0)
         llm_usage_completion_tokens += int(verdict.get("llm_usage_completion_tokens") or 0)
+        if verdict.get("llm_route_unexpected"):
+            llm_route_unexpected_count += 1
+            llm_route_unexpected_expected_model = str(verdict.get("llm_expected_model") or "")
+            llm_route_unexpected_actual_model = str(verdict.get("llm_actual_model") or "")
+        if verdict.get("llm_route_unknown"):
+            llm_route_unknown_count += 1
         # ─────────────────────────────────────────────────────────────────
 
         # ── J1 Jev backend diagnostics ──────────────────────────────────
@@ -716,6 +726,11 @@ def run_fact_judge_lane(
         "llm_transport": llm_transport,
         "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
         "llm_usage_completion_tokens": llm_usage_completion_tokens,
+        # W4-A / plan row L1: route-mismatch counters (ADD-only).
+        "llm_route_unexpected_count": llm_route_unexpected_count,
+        "llm_route_unknown_count": llm_route_unknown_count,
+        "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
+        "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
         # J1: optional Jev judge-backend diagnostics (ADD-only). judge_backend
         # is the resolved backend for this tick ("hermes_default" unless the
         # fact_judge_judge_backend knob selects "typesafe_jev").

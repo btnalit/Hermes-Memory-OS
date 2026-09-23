@@ -397,6 +397,88 @@ def test_nested_json_extraction_from_markdown_fenced_llm_output(tmp_path: Path) 
     )
 
 
+def test_route_unexpected_counted_when_answering_model_differs_from_expected(tmp_path: Path) -> None:
+    """W4-A / plan row L1: run_contradiction_lane's report must count calls
+    whose answering model diverged from the pinned one
+    (llm_route_unexpected_count) -- LlmCallResult.__post_init__ derives
+    route_unexpected from expected_model vs model (see low_clue_recall.py's
+    docstring)."""
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_route_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_route_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    reply = (
+        '{"claim_a": {"subject": "auth", "predicate": "uses", "object": "JWT", "confidence": 0.9}, '
+        '"claim_b": {"subject": "auth", "predicate": "uses", "object": "OAuth", "confidence": 0.85}}'
+    )
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(
+            text=reply, provider="openai-codex", model="answering-model",
+            expected_model="pinned-model",
+        ),
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(
+            store, embedder=_mock_embedder(), roots=roots, dry_run=True,
+        )
+
+    assert result["llm_route_unexpected_count"] >= 1
+    assert result["llm_route_unknown_count"] == 0
+    assert result["llm_route_unexpected_expected_model"] == "pinned-model"
+    assert result["llm_route_unexpected_actual_model"] == "answering-model"
+
+
+def test_route_unknown_counted_when_actual_model_cannot_be_determined(tmp_path: Path) -> None:
+    """Counterfactual companion: an empty-content reply never resolves an
+    actual model -- must count as unknown, NEVER as unexpected (mutually
+    exclusive by construction)."""
+    roots = FakeRoots(tmp_path)
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+
+    conn = sqlite3.connect(str(roots.index_path))
+    _create_tables(conn)
+    v1 = np.array([1.0, 0.1], dtype=np.float32).tobytes()
+    v2 = np.array([0.98, 0.05], dtype=np.float32).tobytes()
+    _insert_record(conn, {"id": "cr_unknown_001", "body": "record A body", "kind": "note"}, v1)
+    _insert_record(conn, {"id": "cr_unknown_002", "body": "record B body", "kind": "note"}, v2)
+    conn.commit()
+    conn.close()
+
+    with patch(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability"
+    ) as mock_judge, patch(
+        "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+        return_value={"ok": True},
+    ), patch(
+        "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model_result",
+        return_value=LlmCallResult(text="", failure_reason="llm_empty_content"),
+    ):
+        mock_judge.return_value = {"available": True}
+        result = run_contradiction_lane(
+            store, embedder=_mock_embedder(), roots=roots, dry_run=True,
+        )
+
+    assert result["llm_route_unknown_count"] >= 1
+    assert result["llm_route_unexpected_count"] == 0
+
+
 def test_error_record_on_judge_check_failure(monkeypatch, tmp_path: Path) -> None:
     """Judge check failure produces an error record, not silent pass."""
     from plugins.memory.memory_os.llm_contradiction_lane import run_contradiction_lane

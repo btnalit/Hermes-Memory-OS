@@ -5031,6 +5031,12 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `ace7434..HEAD`：W4-A（DX）——`LlmCallResult` 新增 `expected_model` + 派生 `actual_model`/`route_unexpected`/`route_unknown`（字面量
+  比较，不做别名特判）；四处重复的 `_call_diagnostics` 收口成共享 `low_clue_recall._llm_call_diagnostics`；fact_judge / SFE /
+  clearance_cycle / contradiction_lane / llm_edge_proposer 五条 lane 各带 `llm_route_unexpected_count` 等四个新计数；monitor 对
+  fact_judge / SFE / llm_edge_proposer 出 WARN `llm_route_unexpected`（clearance_cycle/contradiction_lane 暂无 monitor 读者，遗留）；
+  新增 ungraded INFO `graph_layer_updates_summary`（G1 的 `superseded_by_newer` 7 天窗口 + `updates` 边 24h/7d 出生量）；收口
+  execution_gate_envelopes.jsonl 等 7 处路径字面量为生产者 accessor。+25 测试，全量 4246 passed / 13 skipped / 0 failed，五门全绿。**未部署**。
 - `33d674b..HEAD`：P2+P3（DW）——`EventEnvelope` 新增一等 `principal`/`principal_schema_version`，9 处事件生产者全部补上（普查测试逐一验证）；
   `session_mirror` 加身份门（先于 `[:limit]` 切片，防饥饿）+ 持久排除非主人会话（防永远重扫）；monitor 新增 `event_principal_coverage`
   自包含区块（空样本报 healthy_no_sample、legacy 恒 INFO、缺主体的已标记事件 WARN/生产 FAIL）。全量 4179 passed。**未部署**。
@@ -8864,3 +8870,120 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署**：随规划全部落地后统一部署；部署后验收：`event_principal_coverage` 在近窗口出现 `marked_event_count>0` 且
   `marked_without_principal_count=0`；两 profile 的 `session_mirror` 若曾经镜像过 mailbox/群内他人会话，新版本上线后不再新增（历史已
   写入的旧事件不回填，只影响新写入）。
+
+---
+
+## DX — W4-A：LLM 路由可见性、G1 注入可见性、账本路径收口（2026-09-23）
+
+- **背景**：DU（monitor 接线 part 2）核实过 `llm_route_unexpected`（应答模型 ≠ 主模型时的 WARN，规划 L1 行验收项）无法落地——
+  `LlmCallResult` 只暴露混合了"调用方要的模型"与"响应声称的模型"的单一 `.model` 字段，且 fact_judge.py / session_fact_extraction.py
+  各自手写一份"从 LlmCallResult 转报告字段"的白名单（`_call_diagnostics`），不共享一处"转发全部字段"的口子——一次 seam 升级要吃两次改
+  动，这本身被 DU 记为技术债。本 PR（Sonnet 单代理）在 low_clue_recall.py 这一个允许改动的文件里补齐字段并把四份重复的转发代码收口成
+  一处共享 helper，从而解开 DU 留下的阻塞。
+- **`llm_route_unexpected` / `llm_route_unknown`（`LlmCallResult`，`low_clue_recall.py`，唯一改动点）**：新增 `expected_model`
+  （调用前从 `_resolve_hermes_default_runtime(config)["model"]` 取得，由两个 transport 函数在既有 5+5 个 `LlmCallResult(...)` 返回点上
+  各自传入，legacy_wire 因强制显式传模型给 wire 客户端而 `expected_model=model`——按构造恒等，`route_unexpected` 天然恒 False）与三个
+  **派生**字段（`actual_model` / `route_unexpected` / `route_unknown`，`@dataclass(frozen=True)` 的 `__post_init__` 里
+  `object.__setattr__` 计算，不需要任何调用点改动）：
+  - `actual_model` = `self.model`（既有字段已在每个返回点算好"实际应答模型"，只是换一个无歧义的名字）。
+  - `route_unexpected` = `expected_model` 与 `actual_model` 均非空 **且** 二者按纯字符串不相等——Memory-OS 不做别名剥离、不做任何
+    per-provider 归一化（owner 裁定 2026-09-10：`-900k` 一类私有别名是 Hermes 的事）。若主人把带别名的模型名配成"主模型"，
+    `_resolve_hermes_default_runtime` 会原样回显别名，而 Hermes 应答前会自行剥离——这会让该字段在每次调用上都判"不一致"。这是字面比较
+    的既有特性，不是要靠记忆层特判掉的缺陷：该字段存在就是为了把一次可复核的分歧（例如配额/429 触发的跨 provider 回退）如实记录下来，
+    而不是悄悄吸收或丢弃。
+  - `route_unknown` = `actual_model` 为空/None（包括调用从未发生、或响应没有可辨认的模型名两种情形）。**`route_unknown` 与
+    `route_unexpected` 按构造互斥**：不知道路由是什么就不能说它"不对"。
+  - 反事实（cp 备份验证）：把 `route_unexpected` 的赋值硬编码成 `False`——6 个新单测里 2 个转 FAIL（差异未被判 unexpected、
+    `_llm_call_diagnostics` 转发的 `llm_route_unexpected` 字段值不对），恢复后全部转 PASS。
+- **共享转发 helper（`low_clue_recall._llm_call_diagnostics`）**：把 fact_judge.py / session_fact_extraction.py / llm_edge_proposer.py
+  三处字节相同的私有 `_call_diagnostics` 与 clearance_cycle.py / llm_contradiction_lane.py 两处手写累加逻辑，全部收口成一处共享函数——
+  既有键名/取值一律不变（ADD-only），新增 `llm_expected_model` / `llm_actual_model` / `llm_route_unexpected` / `llm_route_unknown`
+  四个键。前三个文件的 `_call_diagnostics` 改为一行委托；后两个文件的累加代码改为读这份共享 diagnostics 字典而不是逐字段摘
+  `call_result.xxx`（clearance_cycle.py 的 `llm_call_stats` 累加器、llm_contradiction_lane.py 的本地累加变量，字段名不变）。
+  `llm_edge_proposer.py` 按派工单边界只改了 `_call_diagnostics` 定义与聚合循环/汇总字段三处，未碰 `_call_llm` 的判定逻辑/提示词/任何
+  `judge_backend` 相关代码（另一分支要接 Jev 后端）。
+  - 反事实：`_llm_call_diagnostics` 的返回字典删掉四个新键——`test_llm_call_diagnostics_forwards_route_fields_and_preserves_existing_keys`
+    转 FAIL，恢复后 PASS。
+- **每 lane 计数器**：`llm_route_unexpected_count` / `llm_route_unknown_count` / `llm_route_unexpected_expected_model` /
+  `llm_route_unexpected_actual_model`（后两个是"本 tick 最近一次判 unexpected 的样本"，与既有 `llm_provider` / `llm_model` 的
+  "本 tick 最近一次非空值" last-wins 口径同款）新增进 fact_judge / session_fact_extraction / clearance_cycle / llm_contradiction_lane /
+  llm_edge_proposer 五条 lane 各自的 per-run 报告——每条 lane 都用真实生产者（`run_fact_judge_lane` / `run_session_fact_extraction_lane` /
+  `run_clearance_cycle`+`_judge_against_permanents` / `run_contradiction_lane` / `run_llm_proposer`）+ mock 的 `LlmCallResult`（配
+  `expected_model`≠`model`）跑一遍反事实，5 条 lane 各 1-2 条测试，均先构造真实调用路径而非手写 fixture。
+- **Monitor 接线（`scripts/memory_os_3_200_monitor.py`）**：三条 LLM lane 目前有读者的两个采集面各自补上四个新键并接出 WARN：
+  - `lane_backend_transport_summary()`（fact_judge / session_fact_extraction，读法不变，只加字段）与新增共享判定函数
+    `_llm_route_unexpected_warn_entry(lane, summary)`：`llm_route_unexpected_count>0` 时出 WARN `llm_route_unexpected`（`lane` /
+    `llm_route_unexpected_count` / `expected_model` / `actual_model`——只出模型名，不出任何调用内容），并把两个计数并入既有的
+    `fact_judge_backend_state` / `session_fact_extraction_backend_state` INFO 值里。
+  - `llm_edge_proposer`（认知循环步骤）：四个新计数透传 `cognitive_loop.py::_llm_edge_proposer` 包装器与监控 `_edge_fields` 白名单
+    （两层白名单同一漏法，新增普查测试 `test_every_llm_edge_proposer_scalar_survives_both_whitelists_end_to_end`，与既有
+    `edge_weight_feedback` / `structural_edge_proposer` 普查同款——真实 `run_llm_proposer` 经真实 `CognitiveLoopRunner` 经真实
+    `cognitive_loop_step_evidence()`，不手写中间 fixture），在 `edge_step_results` 处理块里复用同一个 `_llm_route_unexpected_warn_entry`。
+  - `lane_contracts.py`：`llm_route_unexpected` 登进 fact_judge / session_fact_extraction / llm_edge_proposer 三条 lane 的
+    `monitor_codes`；`CLEAN_HOST_WARN_CLASSIFICATIONS` 新增该码，`expected_clean_host` / `warn_if_production`（clean-host 没有真实 LLM
+    调用流量，路由不可能出现分歧）。
+  - **clearance_cycle / llm_contradiction_lane 两条 lane 的 route_unexpected 计数目前没有 monitor 读者**——这两条 lane 从未有过任何
+    LLM 诊断字段的 monitor 可见性（连 DU 留下的 `llm_provider`/`llm_model` 缺口都还没补），不是本次新退化；按 DU 同样的"跨越界文件才能
+    落地"边界处理：不强行为这两条 lane 现凑一个采集器，作为遗留记录（见下）。
+  - 反事实（cp 备份）：`_llm_route_unexpected_warn_entry` 恒返回 `None`——4 条 classify_snapshot 测试转 FAIL，恢复后 PASS；
+    `CLEAN_HOST_WARN_CLASSIFICATIONS` 删掉新条目——`test_fact_judge_llm_route_unexpected_is_warn_if_production_on_clean_host` 转 FAIL
+    （命中更粗的 `clean_host_warn_unclassified`），恢复后 PASS；`_edge_fields` 删掉四个新键——
+    `test_every_llm_edge_proposer_scalar_survives_both_whitelists_end_to_end` 转 FAIL，恢复后 PASS。
+- **G1 注入可见性（规划验收：main 7 天内 `superseded_by_newer>0`；`updates` 日出生量有界，见 DT）**：新增 ungraded INFO 采集器
+  `graph_layer_updates_summary()`，两个只读聚合，均不改动 `prefetch.py` / `structural_edge_proposer.py`（本次派工单边界之外）：
+  - 复用 `graph_layer_novelty_summary()` 已在用的同一套有界 tail 读取机制（`jsonl_io.read_jsonl_tail`）扫 `system/graph_layer_shadow.jsonl`
+    的尾部，按每行 `created_at`/`recorded_at` 落在最近 7 天内的行统计 `edges[].outcome == "superseded_by_newer"` 的数量——不是重新发明
+    读取路径，是同一 helper 的第二个消费者。
+  - 直接对 `roots.index_path`（SQLite `memory_edges` 表）按 `relation_type = 'updates' and created_at >= ?` 做两次有界计数查询
+    （24 小时 / 7 天窗口），不做全表扫描。
+  - 两个聚合互相独立失败：edge store 查询失败不会丢弃已收集的 shadow 聚合（分别记 `shadow_status` / `edge_store_status`）；`status`
+    在两个来源都无样本时报 `healthy_no_sample`（不得伪装成 0-即-PASS），edge store 查询异常时报 `collection_error`（保留已收集的
+    shadow 部分）。ungraded INFO，disposition 与 G0 新颖度一致：`graph_layer_updates` / `graph_layer_updates_no_sample` /
+    `graph_layer_updates_collection_error` 三个 INFO 码，从不进 warn/fail。
+  - `read_jsonl_tail(component="graph_layer_updates_summary", ...)` 补进 `ERROR_RECORD_EMITTING_COMPONENTS`（既有普查测试
+    `test_error_record_emitting_components_constant_matches_source` 从源码逐字扫出这个新 `component=` 字面量，不补就直接 FAIL）。
+  - 反事实：去掉"行时间戳早于 7 天窗口则跳过"这一判断——30 天前的一行也被计入 `shadow_rows_scanned_7d`，
+    `test_graph_layer_updates_summary_counts_superseded_by_newer_within_7_days` 从 `assert ... == 2` 转成读到 3 而 FAIL，恢复后 PASS。
+- **账本路径收口（Section W 规则 5，`scripts/memory_os_3_200_monitor.py` 内）**：
+  - 派工单点名的 `_execution_gate_helper_completion_summary`（局部变量 `records_path` 手写 `Path(_hermes_home)/"memory-os"/"system"/
+    "execution_gate_envelopes.jsonl"`）与 `session_mirror_auto_apply_permit_integrity`（`os.path.join` 手写同一路径）：均改走
+    `execution_gate.execution_gate_records_path(roots)`，accessor 调用失败时保留原字面量为兜底（不引入新的失败模式，与本函数既有的
+    防御式风格一致，如紧邻的 `read_lane_disable_records` 失败兜底）。反事实（cp 备份，monkeypatch `execution_gate_records_path` 指向
+    一个跟原字面量完全不同的临时文件）：`test_execution_gate_helper_completion_summary_uses_the_accessor_not_a_rebuilt_literal`
+    在改回字面量后转 FAIL（采集器读不到 monkeypatch 指向的路径），恢复后 PASS。
+  - 派工单称"`_records_path`"为第三处——核实后这是 `scripts/memory_os_execution_gate_runner.py`（每-cron ExecutionGate 包装脚本，一个
+    完全不同的文件）里的同名函数，不在 `scripts/memory_os_3_200_monitor.py` 里，且不在本次派工单允许改动的文件列表内（"the monitor and
+    its tests"不包含它）；派工单原文对该符号所在文件的描述有误，本次不改，作为发现记录，供后续澄清。
+  - Rule 5 全文件扫描 `memory-os/...` 数据文件字面量，逐个核实"是否存在生产者 accessor"：`memory_sources.jsonl` /
+    `memory_sources_feedback.jsonl`（`memory_sources.memory_sources_path` / `memory_sources_feedback_path`，`enrich_memory_sources_stats`
+    改用）、`knob_overrides.jsonl`（`knob_overrides.override_store_path`，`output_knob_override_state` 改用）、
+    `expression_feedback_ledger.jsonl` / `speak_permission_tickets.jsonl`（`owner_actions.expression_feedback_ledger_path` /
+    `speak_permission_tickets_path`）——四组共 7 处字面量改走 accessor，均在 monitor 内部函数，均只读、未改任何生产者文件。
+  - **有字面量但没有生产者 accessor 可路由、故只列不改**：`continuity_freshness.jsonl`（`continuity.py`/`prefetch.py` 均无路径
+    accessor，只有内联字面量）；`candidate_triage.jsonl`（`crystallized.py` 两处内联字面量，`crystallized.py` 不在本次允许改动范围）；
+    `graph_layer_shadow.jsonl`（`prefetch.py` 的 `_record_graph_layer_shadow` / `graph_layer_shadow_novelty_summary` 两处各自内联同一
+    字面量，`prefetch.py` 不在本次允许改动范围——monitor 内还有 4 处读它，其中两处`append_only_ledger_size_summary` 的重复已有既有
+    注释说明"故意不从本模块拼接，因为嵌入式脚本不能 import monitor.py 自身"，第三处 `graph_layer_novelty_summary` 已走 prefetch 的
+    `graph_layer_shadow_novelty_summary` 函数间接复用，第四处 `graph_injection_shadow_state` 与本次新增的
+    `graph_layer_updates_summary` 仍各自内联同一字面量——根因在 `prefetch.py` 缺一个 `graph_layer_shadow_path(roots)` accessor，
+    留作技术债，不在本次派工单范围内解决）。
+- **测试**：新增 25 个测试函数（low_clue_recall +6：`LlmCallResult` 派生字段单测 4、`_llm_call_diagnostics` 单测 2；fact_judge +3；
+  session_fact_extraction +2；clearance_cycle +2；llm_contradiction_lane +2；llm_edge_proposer +2；monitor +8：普查 1、
+  `llm_route_unexpected` classify_snapshot 6、账本路径反事实 1）+ monitor `graph_layer_updates_summary` 相关 +4（合计 monitor +12）；
+  另外扩展既有 `test_fact_judge_lane_report_contains_the_keys_the_monitor_reads` /
+  `test_session_fact_extraction_lane_report_contains_the_keys_the_monitor_reads` 词表钉死测试与两条 `lane_backend_transport_summary`
+  真实生产者集成测试的断言，纳入四个新键。全部反事实均用 cp 备份 sabotage 验证（改坏先 FAIL、恢复后 PASS），未使用
+  `git checkout --` / `git stash`。五门全绿（import-cycle 0 环 / write-surface `unclassified_count=0` / static-hygiene `pass` /
+  public-checkout `--strict` `PASS` / `git diff --check` 无输出）；全量 4246 passed / 13 skipped / 0 failed（18m22s，一次性跑通，未
+  复现已知的 Windows 并发 flake `test_completion_append_and_sidecar_are_idempotent_under_concurrency`，无需重跑）。
+- **遗留**：clearance_cycle / llm_contradiction_lane 两条 lane 的 `llm_route_unexpected_count` 无 monitor 读者（同 DU 遗留的
+  provider/model 可见性缺口同类，需要额外的采集器与 monitor 测试，超出本次范围）；`_records_path`
+  （`scripts/memory_os_execution_gate_runner.py`）与 `graph_layer_shadow.jsonl`（`prefetch.py` 缺 accessor）两类路径字面量记为技术
+  债，未改动；`llm_route_unexpected` 的字面量比较在主模型名配了 Hermes 别名（如 `-900k`）时会对每次调用都判"不一致"（Hermes 应答前
+  自行剥离别名，而 `_resolve_hermes_default_runtime` 回显的是配置原值）——按派工单与 owner 裁定，Memory-OS 不做别名特判，这是已知、
+  接受的字面量比较特性，不是缺陷；部署后应观察该 WARN 在两个 profile 上的实际噪声水平，据此判断是否需要 owner 就"主模型名不得带别名
+  后缀"给出配置规范（而非代码层特判）。
+- **部署**：随规划全部落地后统一部署；纯只读接线 + 新增字段/计数器，未改任何写路径/生产者判定逻辑（`llm_edge_proposer._call_llm` 的
+  判定逻辑/提示词未动），无需重启 gateway；部署后验收：`llm_route_unexpected` 在两个 profile 上默认应为 0（若非零需人工核对是否为
+  别名字面量差异还是真实跨 provider 回退）；`graph_layer_updates` INFO 在 main 上 7 天内追踪 `superseded_by_newer_count_7d` 是否
+  转正（sannai 允许 `healthy_no_sample`）。

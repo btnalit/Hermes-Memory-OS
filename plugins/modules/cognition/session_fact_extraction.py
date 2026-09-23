@@ -209,6 +209,7 @@ from plugins.memory.memory_os.low_clue_recall import (
     LlmCallResult,
     _call_hermes_runtime_model_result,
     _extract_json_object,
+    _llm_call_diagnostics,
 )
 from plugins.memory.memory_os.principal import (
     MACHINE_SESSION_SOURCES,
@@ -236,19 +237,14 @@ def _call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
     llm_parse_failed/llm_missing_key), which additionally covers post-
     transport parsing/schema failures the transport layer knows nothing
     about. Kept in a separate field so the two vocabularies never collide.
+
+    W4-A: delegates to the single shared seam
+    (``low_clue_recall._llm_call_diagnostics``) that also now forwards
+    ``llm_expected_model``/``llm_actual_model``/``llm_route_unexpected``/
+    ``llm_route_unknown`` (plan row L1) -- every key this function
+    previously returned is unchanged in name and value.
     """
-    if call_result is None:
-        return {}
-    diagnostics: dict[str, Any] = {
-        "llm_transport_failure_reason": call_result.failure_reason,
-        "llm_provider": call_result.provider,
-        "llm_model": call_result.model,
-        "llm_transport": call_result.transport,
-    }
-    if call_result.usage:
-        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
-        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
-    return diagnostics
+    return _llm_call_diagnostics(call_result)
 
 
 def session_fact_extraction_manifest() -> dict[str, Any]:
@@ -978,6 +974,11 @@ def run_session_fact_extraction_lane(
             "llm_transport": "",
             "llm_usage_prompt_tokens": 0,
             "llm_usage_completion_tokens": 0,
+            # W4-A / plan row L1: route-mismatch counters (ADD-only).
+            "llm_route_unexpected_count": 0,
+            "llm_route_unknown_count": 0,
+            "llm_route_unexpected_expected_model": "",
+            "llm_route_unexpected_actual_model": "",
             # Deferral visibility: without these, an LLM outage and a genuinely
             # fact-free batch both read as "0 facts extracted".
             "sessions_deferred_llm_failure": 0,
@@ -1212,6 +1213,14 @@ def run_session_fact_extraction_lane(
         llm_transport = ""
         llm_usage_prompt_tokens = 0
         llm_usage_completion_tokens = 0
+        # W4-A / plan row L1: route-mismatch counters, plus a sample of the
+        # expected/actual model names from the most recent mismatch this
+        # tick (see LlmCallResult's docstring for the definition and the
+        # alias-handling note).
+        llm_route_unexpected_count = 0
+        llm_route_unknown_count = 0
+        llm_route_unexpected_expected_model = ""
+        llm_route_unexpected_actual_model = ""
         sessions_deferred_llm_failure = 0
         sessions_abandoned_after_max_attempts = 0
         deferral_attempts = read_session_deferral_attempts(store)
@@ -1314,6 +1323,12 @@ def run_session_fact_extraction_lane(
                     llm_transport = str(result["llm_transport"])
                 llm_usage_prompt_tokens += int(result.get("llm_usage_prompt_tokens") or 0)
                 llm_usage_completion_tokens += int(result.get("llm_usage_completion_tokens") or 0)
+                if result.get("llm_route_unexpected"):
+                    llm_route_unexpected_count += 1
+                    llm_route_unexpected_expected_model = str(result.get("llm_expected_model") or "")
+                    llm_route_unexpected_actual_model = str(result.get("llm_actual_model") or "")
+                if result.get("llm_route_unknown"):
+                    llm_route_unknown_count += 1
                 # ─────────────────────────────────────────────────────────────
 
                 if not result.get("has_durable_fact"):
@@ -1414,6 +1429,10 @@ def run_session_fact_extraction_lane(
             "llm_transport": llm_transport,
             "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
             "llm_usage_completion_tokens": llm_usage_completion_tokens,
+            "llm_route_unexpected_count": llm_route_unexpected_count,
+            "llm_route_unknown_count": llm_route_unknown_count,
+            "llm_route_unexpected_expected_model": llm_route_unexpected_expected_model,
+            "llm_route_unexpected_actual_model": llm_route_unexpected_actual_model,
             "sessions_deferred_llm_failure": sessions_deferred_llm_failure,
             "sessions_abandoned_after_max_attempts": sessions_abandoned_after_max_attempts,
             "skipped": False,

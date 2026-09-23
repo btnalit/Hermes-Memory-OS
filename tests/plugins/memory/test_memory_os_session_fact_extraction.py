@@ -1566,3 +1566,74 @@ def test_group_session_tripwire_counts_missing_user_suffix(tmp_path, monkeypatch
 
     assert report["group_sessions_scanned"] == 2
     assert report["group_sessions_without_user_suffix"] == 1
+
+
+# ── W4-A / plan row L1: route visibility (llm_route_unexpected_count) ────
+
+
+def _fake_llm_durable_with_route(prompt: str, config: dict) -> LlmCallResult:
+    """Answers durable, but with an actual model that diverges from the
+    pinned one -- LlmCallResult.__post_init__ derives route_unexpected=True
+    from expected_model vs model (see low_clue_recall.py's docstring)."""
+    return LlmCallResult(
+        text=json.dumps({"has_durable_fact": True, "fact": "extracted durable fact text", "reason": "test"}),
+        provider="openai-codex",
+        model="answering-model",
+        expected_model="pinned-model",
+    )
+
+
+def test_route_unexpected_counted_when_answering_model_differs_from_expected(tmp_path, monkeypatch):
+    envelope_id = "xgate_test_sfe_route_unexpected"
+    store = _store_with_gate(tmp_path, envelope_id)
+    now = time.time()
+    db_path = _create_state_db(store.roots.hermes_home)
+    _configure_owner_identity(store.roots.hermes_home, "telegram", "owner_uid")
+    _write_session(
+        db_path,
+        session_id="sess_route",
+        source="telegram",
+        user_id="owner_uid",
+        started_at=now - 10,
+        messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
+        _fake_llm_durable_with_route,
+    )
+
+    report = run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
+
+    assert report["llm_calls"] == 1
+    assert report["llm_route_unexpected_count"] == 1
+    assert report["llm_route_unknown_count"] == 0
+    assert report["llm_route_unexpected_expected_model"] == "pinned-model"
+    assert report["llm_route_unexpected_actual_model"] == "answering-model"
+
+
+def test_route_unknown_counted_when_actual_model_cannot_be_determined(tmp_path, monkeypatch):
+    """Counterfactual companion: an empty-content failure never resolves an
+    actual model -- must count as unknown, NEVER as unexpected (mutually
+    exclusive by construction)."""
+    envelope_id = "xgate_test_sfe_route_unknown"
+    store = _store_with_gate(tmp_path, envelope_id)
+    now = time.time()
+    db_path = _create_state_db(store.roots.hermes_home)
+    _configure_owner_identity(store.roots.hermes_home, "telegram", "owner_uid")
+    _write_session(
+        db_path,
+        session_id="sess_route_unknown",
+        source="telegram",
+        user_id="owner_uid",
+        started_at=now - 10,
+        messages=[{"role": "user", "content": _LONG_MARKER_TEXT}],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.cognition.session_fact_extraction._call_hermes_runtime_model_result",
+        _fake_llm_empty,
+    )
+
+    report = run_session_fact_extraction_lane(store, execution_gate_envelope_id=envelope_id)
+
+    assert report["llm_route_unknown_count"] >= 1
+    assert report["llm_route_unexpected_count"] == 0

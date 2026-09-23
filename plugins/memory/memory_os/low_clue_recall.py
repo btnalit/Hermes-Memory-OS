@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,40 @@ class LlmCallResult:
     represented here instead of collapsing to a bare "" the way the legacy
     ``_call_hermes_runtime_model`` string return does (see CLAUDE.md
     "Completion Is Not Output").
+
+    W4-A / plan row L1 (route visibility) -- ``expected_model``,
+    ``actual_model``, ``route_unexpected``, and ``route_unknown`` are all
+    derived here, in this one dataclass (the single seam every LLM lane
+    already funnels through), so no per-lane forwarding code has to
+    recompute the comparison:
+
+    - ``expected_model`` is the model Hermes was configured/pinned to answer
+      with -- ``_resolve_hermes_default_runtime(config)["model"]``, captured
+      by the caller BEFORE the call and passed in. ``None``/"" means no
+      expectation could be resolved (e.g. the runtime-resolve step itself
+      failed, so no call was even attempted).
+    - ``actual_model`` mirrors ``model`` (the transport's own "what
+      answered" value, already computed at every return site below) under
+      an unambiguous name -- never independently set by a caller.
+    - ``route_unexpected`` is True only when BOTH ``expected_model`` and
+      ``actual_model`` are non-empty AND they differ by plain string
+      equality. Memory-OS does no alias stripping or per-provider
+      normalization of its own here (owner ruling 2026-09-10: Hermes' own
+      "-900k" context-variant alias is Hermes' concern, not ours) -- a
+      pinned model name that carries such an alias may make this field flag
+      every call as "unexpected" once Hermes strips the alias before
+      answering, because ``_resolve_hermes_default_runtime`` echoes back the
+      configured (possibly aliased) name unchanged. That is an accepted,
+      documented characteristic of the literal comparison, not a defect to
+      special-case away: the field exists so a real, human-reviewable
+      divergence (e.g. a quota/429-triggered cross-provider fallback) is
+      recorded, never silently absorbed or dropped.
+    - ``route_unknown`` is True whenever ``actual_model`` could not be
+      determined (empty/None) -- including when the call never happened
+      (transport unavailable) or the response carried no discoverable model
+      name. An unknown actual model is NEVER also ``route_unexpected``
+      (mutually exclusive by construction: you cannot call a route "wrong"
+      when you do not know what it was).
     """
 
     text: str = ""
@@ -69,9 +103,63 @@ class LlmCallResult:
     detail: str = ""
     provider: str | None = None
     model: str | None = None
+    expected_model: str | None = None
     latency_ms: float | None = None
     usage: dict[str, int] | None = None
     transport: str = LLM_TRANSPORT_HERMES_CALL_LLM
+    actual_model: str | None = field(init=False, default=None)
+    route_unexpected: bool = field(init=False, default=False)
+    route_unknown: bool = field(init=False, default=True)
+
+    def __post_init__(self) -> None:
+        actual = self.model
+        object.__setattr__(self, "actual_model", actual)
+        object.__setattr__(self, "route_unknown", not bool(actual))
+        object.__setattr__(
+            self,
+            "route_unexpected",
+            bool(self.expected_model) and bool(actual) and self.expected_model != actual,
+        )
+
+
+def _llm_call_diagnostics(call_result: LlmCallResult | None) -> dict[str, Any]:
+    """Turn one :class:`LlmCallResult` into the report-diagnostics dict an
+    LLM lane forwards onto its own report (W4-A: the single shared seam
+    replacing four near-identical hand-rolled copies previously living in
+    fact_judge.py, session_fact_extraction.py, llm_edge_proposer.py, and
+    clearance_cycle.py's inline accumulator -- Section W rule 5, same defect
+    pattern, four sites).
+
+    ``llm_transport_failure_reason`` is the RAW closed-set reason from
+    :class:`LlmCallResult` -- distinct from a calling lane's own
+    failure-reason vocabulary, which additionally covers post-transport
+    parsing/schema failures the transport layer knows nothing about (each
+    lane's own docstring explains why the two never collide).
+
+    W4-A / plan row L1 (ADD-only): ``llm_expected_model`` / ``llm_actual_model``
+    / ``llm_route_unexpected`` / ``llm_route_unknown`` mirror
+    :class:`LlmCallResult`'s own fields of the same purpose -- see its
+    docstring for the route_unexpected/route_unknown definition and the
+    alias-handling note. Every key this function already returned keeps its
+    exact name and value; callers that pre-date W4-A are unaffected.
+    """
+    if call_result is None:
+        return {}
+    diagnostics: dict[str, Any] = {
+        "llm_transport_failure_reason": call_result.failure_reason,
+        "llm_provider": call_result.provider,
+        "llm_model": call_result.model,
+        "llm_transport": call_result.transport,
+        "llm_expected_model": call_result.expected_model,
+        "llm_actual_model": call_result.actual_model,
+        "llm_route_unexpected": call_result.route_unexpected,
+        "llm_route_unknown": call_result.route_unknown,
+    }
+    if call_result.usage:
+        diagnostics["llm_usage_prompt_tokens"] = call_result.usage.get("prompt_tokens")
+        diagnostics["llm_usage_completion_tokens"] = call_result.usage.get("completion_tokens")
+    return diagnostics
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -1238,6 +1326,12 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
     provider = str(provider) if provider else None
     explicit_model = config.get("model")
     model = explicit_model.strip() if isinstance(explicit_model, str) and explicit_model.strip() else None
+    # W4-A / plan row L1: the model Hermes was configured/pinned to answer
+    # with, captured before the call so LlmCallResult can compare it against
+    # whatever actually answers (route_unexpected/route_unknown -- see the
+    # dataclass docstring for the alias-handling note).
+    _resolved_expected_model = resolved.get("model")
+    expected_model = str(_resolved_expected_model) if _resolved_expected_model else None
 
     # The call itself must run inside the import scope: call_llm lazily
     # imports agent.* / hermes_cli.* / tools.* at call time (verified on
@@ -1250,6 +1344,7 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
             detail="invalid_call_config: timeout_ms/max_tokens",
             provider=provider,
             model=model,
+            expected_model=expected_model,
             transport=LLM_TRANSPORT_HERMES_CALL_LLM,
         )
     timeout_s, max_tokens = limits
@@ -1260,6 +1355,7 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
                 detail=_clip(import_detail or "agent.auxiliary_client_import_failed", 160),
                 provider=provider,
                 model=model,
+                expected_model=expected_model,
                 transport=LLM_TRANSPORT_HERMES_CALL_LLM,
             )
 
@@ -1287,6 +1383,7 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
                 detail=detail,
                 provider=str(route_info.get("provider") or provider) if (route_info.get("provider") or provider) else None,
                 model=str(route_info.get("model") or model) if (route_info.get("model") or model) else None,
+                expected_model=expected_model,
                 latency_ms=latency_ms,
                 transport=LLM_TRANSPORT_HERMES_CALL_LLM,
             )
@@ -1311,6 +1408,7 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
                 detail="empty_choices_or_content",
                 provider=resolved_provider,
                 model=resolved_model,
+                expected_model=expected_model,
                 latency_ms=latency_ms,
                 usage=usage,
                 transport=LLM_TRANSPORT_HERMES_CALL_LLM,
@@ -1320,6 +1418,7 @@ def _call_hermes_runtime_model_hermes_result(prompt: str, config: dict[str, Any]
             text=text,
             provider=resolved_provider,
             model=resolved_model,
+            expected_model=expected_model,
             latency_ms=latency_ms,
             usage=usage,
             transport=LLM_TRANSPORT_HERMES_CALL_LLM,
@@ -1363,6 +1462,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
             detail="invalid_call_config: timeout_ms/max_tokens",
             provider=provider,
             model=model,
+            expected_model=model,
             transport=LLM_TRANSPORT_LEGACY_WIRE,
         )
     timeout, max_tokens = limits
@@ -1381,6 +1481,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
                 detail=f"unsupported_api_mode:{api_mode}",
                 provider=provider,
                 model=model,
+                expected_model=model,
                 transport=LLM_TRANSPORT_LEGACY_WIRE,
             )
     except Exception as exc:  # the wire helpers already swallow internally; defensive only
@@ -1389,6 +1490,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
             detail=_clip(str(exc), 160),
             provider=provider,
             model=model,
+            expected_model=model,
             transport=LLM_TRANSPORT_LEGACY_WIRE,
         )
     latency_ms = round((time.monotonic() - start) * 1000.0, 1)
@@ -1397,6 +1499,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
             failure_reason="llm_empty_content",
             provider=provider,
             model=model,
+            expected_model=model,
             latency_ms=latency_ms,
             transport=LLM_TRANSPORT_LEGACY_WIRE,
         )
@@ -1404,6 +1507,7 @@ def _call_hermes_runtime_model_legacy_result(prompt: str, config: dict[str, Any]
         text=text,
         provider=provider,
         model=model,
+        expected_model=model,
         latency_ms=latency_ms,
         transport=LLM_TRANSPORT_LEGACY_WIRE,
     )

@@ -1221,6 +1221,82 @@ def test_resolve_hermes_default_runtime_dedupes_stale_explicit_root_to_front(tmp
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# W4-A / plan row L1 — LlmCallResult.route_unexpected / route_unknown.
+# Direct unit tests of the dataclass's __post_init__ derivation: an unknown
+# actual model is NEVER also route_unexpected (mutually exclusive by
+# construction); Memory-OS does no alias stripping/per-provider comparison
+# of its own (owner ruling 2026-09-10) -- plain string equality only.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_llm_call_result_route_unexpected_true_when_expected_and_actual_differ():
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", model="answering-model", expected_model="pinned-model",
+    )
+    assert result.actual_model == "answering-model"
+    assert result.route_unexpected is True
+    assert result.route_unknown is False
+
+
+def test_llm_call_result_route_unexpected_false_when_expected_and_actual_match():
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", model="same-model", expected_model="same-model",
+    )
+    assert result.route_unexpected is False
+    assert result.route_unknown is False
+
+
+def test_llm_call_result_route_unknown_true_when_actual_model_missing():
+    """An empty/None actual model is route_unknown, never route_unexpected --
+    even when an expectation was resolved."""
+    result = low_clue_recall_module.LlmCallResult(
+        failure_reason="llm_empty_content", expected_model="pinned-model",
+    )
+    assert result.actual_model is None
+    assert result.route_unknown is True
+    assert result.route_unexpected is False
+
+
+def test_llm_call_result_route_fields_default_when_no_expectation_resolved():
+    """No expected_model at all (e.g. the runtime-resolve step itself
+    failed) -- there is nothing to compare against, so route_unexpected must
+    stay False regardless of what answered."""
+    result = low_clue_recall_module.LlmCallResult(text="ok", model="some-model")
+    assert result.expected_model is None
+    assert result.route_unexpected is False
+    assert result.route_unknown is False
+
+
+def test_llm_call_diagnostics_forwards_route_fields_and_preserves_existing_keys():
+    """The shared helper (low_clue_recall._llm_call_diagnostics) is the
+    single seam every LLM lane's forwarding code now delegates to (W4-A):
+    every pre-existing key it returned keeps its exact name/value, plus the
+    four new route-visibility keys."""
+    result = low_clue_recall_module.LlmCallResult(
+        text="ok", failure_reason="", provider="openai-codex",
+        model="answering-model", expected_model="pinned-model",
+        transport="hermes_call_llm", usage={"prompt_tokens": 12, "completion_tokens": 7},
+    )
+    diagnostics = low_clue_recall_module._llm_call_diagnostics(result)
+    assert diagnostics == {
+        "llm_transport_failure_reason": "",
+        "llm_provider": "openai-codex",
+        "llm_model": "answering-model",
+        "llm_transport": "hermes_call_llm",
+        "llm_expected_model": "pinned-model",
+        "llm_actual_model": "answering-model",
+        "llm_route_unexpected": True,
+        "llm_route_unknown": False,
+        "llm_usage_prompt_tokens": 12,
+        "llm_usage_completion_tokens": 7,
+    }
+
+
+def test_llm_call_diagnostics_none_result_returns_empty_dict():
+    assert low_clue_recall_module._llm_call_diagnostics(None) == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # W2 — _call_hermes_runtime_model_result: typed transport, no hand-rolled
 # wire clients on the default path (hermes_call_llm), legacy_wire kept only
 # for rollback. Every test injects a FAKE agent.auxiliary_client module via
