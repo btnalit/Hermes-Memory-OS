@@ -124,6 +124,13 @@ APPEND_ONLY_LEDGER_RELATIVE_PATHS: dict[str, str] = {
 LLM_LANE_CONSECUTIVE_FAILURE_WARN_THRESHOLD = 5
 LLM_LANE_FAILURE_STREAK_TAIL_LIMIT = 50
 
+# P0-lite principal binding grading. Hermes state.db `sessions.source` values
+# that are not human chat platforms (machine sessions observed on production
+# 2026-09-23: cron, subagent); local / mailbox / api sources resolve by rule in
+# principal.resolve_principal and never need an owner identity.
+PRINCIPAL_MACHINE_SESSION_SOURCES = frozenset({"cron", "subagent"})
+PRINCIPAL_BINDING_WINDOW_DAYS = 30
+
 # C2: the memory_projection_compaction lane is daily (due_interval_minutes
 # 1440 in cron_registry); two intervals of silence while the ledger kept
 # growing is a stopped lane, not an idle one.
@@ -195,6 +202,12 @@ MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
         "rotated_log_count",
     },
 }
+# C3 (plan Phase 1b): the legacy right brain's projection sources. Once its
+# archive lifecycle is retirement_pending / retired these requirements are
+# exempt -- reported as an explicit INFO, never satisfied by historical
+# records the retired producer left behind. Every name here must exist in a
+# 55C/55G table (pinned by a test), or the exemption guards nothing.
+RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES = frozenset({"wandering_mind_state", "wandering_mind_cadence"})
 MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "cognitive_loop_status": {
         "report_count",
@@ -421,6 +434,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "classification": "expected_clean_host",
         "reason": "clean-host can render right-brain prompts before a Hermes-delivered outcome exists",
         "production_behavior": "warn_if_production",
+    },
+    "principal_platform_unbound_with_non_owner_sessions": {
+        "classification": "expected_clean_host",
+        "reason": "a platform with more than one human user has no configured owner identity, so every non-owner turn there still drives the owner's foreground task and memory (compatibility mode); fix with deploy --owner-identity <platform>:<id> or by setting <PLATFORM>_HOME_CHANNEL in Hermes and redeploying",
+        "production_behavior": "fail_if_production",
     },
     "index_not_healthy": {
         "classification": "expected_clean_host",
@@ -1449,6 +1467,70 @@ def summarize_living_memory_promotion(
     return section
 
 
+def _legacy_right_brain_retired(snapshot: dict[str, Any]) -> bool:
+    archive = snapshot.get("legacy_right_brain_archive")
+    return isinstance(archive, dict) and archive.get("lifecycle") in {"retirement_pending", "retired"}
+
+
+def _classify_principal_binding(
+    raw: Any, warn: list[dict[str, Any]], info: list[dict[str, Any]]
+) -> None:
+    """P0-lite: an unconfigured platform with more than one human user.
+
+    An unconfigured platform resolves every turn to principal "unknown"
+    (compatibility), so a second human there drives the owner's foreground
+    task and memory. Without an owner list the monitor cannot say which user
+    is the owner, only that two distinct users cannot both be; that is the
+    graded case. Everything else is INFO; a missing census is no-sample.
+    """
+    from plugins.memory.memory_os.principal import (
+        API_SELF_DECLARED_SOURCES,
+        LOCAL_OWNER_SOURCES,
+        MAILBOX_SOURCE,
+    )
+
+    binding = raw if isinstance(raw, dict) else {}
+    if not binding:
+        return
+    if binding.get("status") != "ok":
+        info.append({
+            "code": "principal_binding_no_sample",
+            "value": {
+                "status": binding.get("status"),
+                "collection_error": binding.get("collection_error", ""),
+                "collection_error_detail": binding.get("collection_error_detail", ""),
+                "missing_columns": binding.get("missing_columns", []),
+            },
+        })
+        return
+    ruled_sources = (
+        PRINCIPAL_MACHINE_SESSION_SOURCES | LOCAL_OWNER_SOURCES | API_SELF_DECLARED_SOURCES | {MAILBOX_SOURCE}
+    )
+    platforms = binding.get("platforms") if isinstance(binding.get("platforms"), dict) else {}
+    for platform, entry in sorted(platforms.items()):
+        if platform in ruled_sources or not isinstance(entry, dict):
+            continue
+        summary = {
+            "platform": platform,
+            "session_count": int(entry.get("session_count") or 0),
+            "distinct_user_count": int(entry.get("distinct_user_count") or 0),
+            "unattributed_session_count": int(entry.get("unattributed_session_count") or 0),
+        }
+        if entry.get("configured"):
+            info.append({
+                "code": "principal_platform_bound",
+                "value": {
+                    **summary,
+                    "binding_source": entry.get("binding_source", ""),
+                    "non_owner_session_count": int(entry.get("non_owner_session_count") or 0),
+                },
+            })
+        elif summary["distinct_user_count"] >= 2:
+            warn.append({"code": "principal_platform_unbound_with_non_owner_sessions", "value": summary})
+        else:
+            info.append({"code": "principal_platform_unbound", "value": summary})
+
+
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
@@ -1456,11 +1538,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     info: list[dict[str, Any]] = []
     monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
     clean_host = monitor_profile == "clean_host"
-    legacy_retired = (
-        isinstance(snapshot.get("legacy_right_brain_archive"), dict)
-        and snapshot["legacy_right_brain_archive"].get("lifecycle")
-        in {"retirement_pending", "retired"}
-    )
+    legacy_retired = _legacy_right_brain_retired(snapshot)
     runtime_contract = (
         snapshot.get("full_monitor_runtime_contract")
         if isinstance(snapshot.get("full_monitor_runtime_contract"), dict)
@@ -1628,6 +1706,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "code": "llm_lane_failure_streak_ok",
                 "value": {"lane": lane_name, "streak": streak, "sample_count": sample_count},
             })
+
+    _classify_principal_binding(snapshot.get("principal_binding"), warn, info)
+
+    # G0 novelty: deliberately ungraded -- a lexical-disjointness proxy
+    # rewards irrelevant neighbours if optimised alone; it is a baseline for
+    # G1/G4, read next to the labelled eval set, not a gate.
+    raw_novelty = snapshot.get("graph_layer_novelty")
+    if isinstance(raw_novelty, dict) and raw_novelty:
+        novelty_status = str(raw_novelty.get("status") or "")
+        info.append({
+            "code": "graph_layer_novelty" if novelty_status == "ok" else "graph_layer_novelty_no_sample",
+            "value": raw_novelty,
+        })
 
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
@@ -2046,7 +2137,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "value": _gis_raw,
             })
 
-    _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
+    _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, info, clean_host=clean_host)
 
     memory_status_raw = snapshot.get("memory_status")
     memory_status = memory_status_raw if isinstance(memory_status_raw, dict) else {}
@@ -4258,11 +4349,13 @@ def _classify_left_brain_signal_weaving(
     passed: list[dict[str, Any]],
     warn: list[dict[str, Any]],
     fail: list[dict[str, Any]],
+    info: list[dict[str, Any]],
     *,
     clean_host: bool,
 ) -> None:
     if not _left_brain_signal_weaving_expected(snapshot):
         return
+    legacy_retired = _legacy_right_brain_retired(snapshot)
 
     host_probe = snapshot.get("host_capability_probe") if isinstance(snapshot.get("host_capability_probe"), dict) else {}
     if host_probe.get("schema_version") in {"memory-os.host_capability_probe.v0", "memory-os.host_capability_probe.v2"}:
@@ -4410,8 +4503,12 @@ def _classify_left_brain_signal_weaving(
             if isinstance(projection.get("source_payload_fields"), dict)
             else {}
         )
+        retired_sources_exempt: list[str] = []
         missing_payload_fields_55c: list[dict[str, Any]] = []
         for source_key, expected_fields in MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS.items():
+            if legacy_retired and source_key in RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES:
+                retired_sources_exempt.append(source_key)
+                continue
             observed_fields = set(payload_fields.get(source_key) or [])
             missing_fields = sorted(expected_fields - observed_fields)
             if missing_fields:
@@ -4496,6 +4593,9 @@ def _classify_left_brain_signal_weaving(
             )
         missing_payload_fields_55g: list[dict[str, Any]] = []
         for source_key, expected_fields in MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS.items():
+            if legacy_retired and source_key in RETIRED_RIGHT_BRAIN_PROJECTION_SOURCES:
+                retired_sources_exempt.append(source_key)
+                continue
             observed_fields = set(payload_fields.get(source_key) or [])
             missing_fields = sorted(expected_fields - observed_fields)
             if missing_fields:
@@ -4513,6 +4613,16 @@ def _classify_left_brain_signal_weaving(
                 {
                     "code": "memory_projection_55g_payload_field_coverage_ok",
                     "source_count": len(MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
+        if retired_sources_exempt:
+            info.append(
+                {
+                    "code": "memory_projection_retired_source_exempt",
+                    "value": {
+                        "sources": sorted(retired_sources_exempt),
+                        "legacy_right_brain_lifecycle": snapshot["legacy_right_brain_archive"].get("lifecycle"),
+                    },
                 }
             )
         projection_count = int(projection.get("projection_count") or 0)
@@ -6678,6 +6788,91 @@ def lane_input_freshness_summary():
         "schema_version": "memory-os.lane_input_freshness.v0",
         "lanes": lanes,
     }
+
+def principal_binding_summary(window_days=30):
+    # P0-lite: per-platform session census from Hermes state.db -- counts
+    # only, never an id. classify_snapshot() decides what is graded; the
+    # window default mirrors PRINCIPAL_BINDING_WINDOW_DAYS in the local module.
+    schema = "memory-os.principal_binding.v0"
+    try:
+        import sqlite3
+        import time as _time
+        from plugins.memory.memory_os.config import load_config
+        from plugins.memory.memory_os.principal import (
+            _normalize_source,
+            _owner_identities_for,
+            principal_binding_status,
+        )
+    except Exception as exc:
+        return {"schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__, "platforms": {}}
+    db_path = os.path.join(_hermes_home, "state.db")
+    if not os.path.exists(db_path):
+        return {"schema_version": schema, "status": "no_state_db", "platforms": {}}
+    # Schema verified read-only on hermes-media 2026-09-23 (both profiles):
+    # sessions.source TEXT, sessions.user_id TEXT (session-level author),
+    # sessions.started_at REAL (epoch). Other Hermes versions may lack
+    # user_id, so it is probed and its absence reported by name, never left
+    # to surface as a bare OperationalError.
+    try:
+        config = load_config(_hermes_home)
+        cutoff = _time.time() - float(window_days) * 86400.0
+        conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True, timeout=5)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if not {"source", "user_id", "started_at"} <= columns:
+                missing = sorted({"source", "user_id", "started_at"} - columns)
+                return {"schema_version": schema, "status": "state_db_without_user_id", "missing_columns": missing, "platforms": {}}
+            rows = conn.execute(
+                "SELECT source, user_id, COUNT(*) FROM sessions WHERE started_at >= ? GROUP BY source, user_id",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {
+            "schema_version": schema, "status": "collection_error", "collection_error": type(exc).__name__,
+            "collection_error_detail": str(exc)[:160], "platforms": {},
+        }
+    platforms = {}
+    for source, user_id, count in rows:
+        key = _normalize_source(source)
+        if not key:
+            continue
+        entry = platforms.setdefault(key, {
+            "session_count": 0, "distinct_user_count": 0, "unattributed_session_count": 0,
+            "non_owner_session_count": 0, "configured": False, "binding_source": "",
+        })
+        count = int(count or 0)
+        entry["session_count"] += count
+        uid = str(user_id or "").strip()
+        if not uid:
+            entry["unattributed_session_count"] += count
+            continue
+        entry["distinct_user_count"] += 1
+        owners = _owner_identities_for(config, key)
+        if owners and uid not in owners:
+            entry["non_owner_session_count"] += count
+    status = principal_binding_status(config, platforms=sorted(platforms))
+    for key, entry in platforms.items():
+        platform_status = status.get(key) or {}
+        entry["configured"] = bool(platform_status.get("bound"))
+        entry["binding_source"] = str(platform_status.get("binding_source") or "")
+    return {"schema_version": schema, "status": "ok", "window_days": window_days, "platforms": platforms}
+
+def graph_layer_novelty_summary(max_records=2000):
+    # G0: what injected graph neighbours add beyond the anchors + query, from
+    # the bounded tail of system/graph_layer_shadow.jsonl. Read-only.
+    try:
+        from plugins.memory.memory_os.prefetch import graph_layer_shadow_novelty_summary
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(_hermes_home, profile="default"))
+        summary = graph_layer_shadow_novelty_summary(store, max_records=max_records)
+    except Exception as exc:
+        return {"status": "collection_error", "collection_error": type(exc).__name__}
+    errors = summary.pop("error_records", []) or []
+    summary["error_record_count"] = len(errors)
+    return summary
 
 def append_only_ledger_size_summary():
     # W1-B: raw sizes only -- classify_snapshot() applies
@@ -9817,6 +10012,8 @@ print(json.dumps({
   "lane_input_freshness": lane_input_freshness_summary(),
   "append_only_ledger_size": append_only_ledger_size_summary(),
   "llm_lane_failure_streak": llm_lane_failure_streak_summary(),
+  "principal_binding": principal_binding_summary(),
+  "graph_layer_novelty": graph_layer_novelty_summary(),
   "disk_df": df,
   "disk_du": du,
 }, ensure_ascii=False, sort_keys=True))
