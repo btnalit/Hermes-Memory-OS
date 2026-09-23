@@ -366,6 +366,24 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # J2: optional structured-judge backend for llm_edge_proposer (owner
+    # ruling 2026-09-23, next-phase plan row J2). Same shape as
+    # fact_judge_judge_backend above: default "hermes_default" keeps the
+    # existing free-text relation-type judge byte-identical; "typesafe_jev"
+    # routes each pair's relation-type decision through jev_backend.py's
+    # native choice primitive instead (pick-one-of-five relation types with
+    # native confidence, falling back to hermes_default on any Jev failure).
+    # Always owner-gated (lane_switch, never auto-approvable -- see
+    # knob_override_auto_approvable's kind=="lane_switch" exclusion).
+    "llm_edge_proposer_judge_backend": {
+        "module": "llm_edge_proposer",
+        "default": "hermes_default",
+        "kind": "lane_switch",
+        "allowed": ["hermes_default", "typesafe_jev"],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── session_fact_extraction lane knobs (offline, INV-5-safe) ─────────
     "session_fact_extraction_max_sessions_per_tick": {
         "module": "session_fact_extraction",

@@ -1041,6 +1041,7 @@ class CognitiveLoopRunner:
             index_path,
             index=index,
             audit_path=audit_path,
+            roots=store.roots,
         )
         context["llm_edge_proposer_result"] = result
         return {
@@ -1077,6 +1078,14 @@ class CognitiveLoopRunner:
             "llm_transport": result.get("llm_transport", ""),
             "llm_usage_prompt_tokens": result.get("llm_usage_prompt_tokens", 0),
             "llm_usage_completion_tokens": result.get("llm_usage_completion_tokens", 0),
+            # J2: optional Jev judge-backend diagnostics -- must survive this
+            # whitelist too, or they silently vanish before the monitor's own
+            # _edge_fields whitelist ever sees them (same L1/D2b hazard noted
+            # above).
+            "judge_backend": result.get("judge_backend", "hermes_default"),
+            "judge_backend_fallback_count": result.get("judge_backend_fallback_count", 0),
+            "judge_backend_fallback_reasons": result.get("judge_backend_fallback_reasons", {}),
+            "judge_backend_fallback_detail_sample": result.get("judge_backend_fallback_detail_sample", ""),
             # W4-A / plan row L1: route-mismatch counters -- must survive
             # this whitelist too, same shape as the W2 transport diagnostics
             # note above (see CLAUDE.md's D2b/W2 "two-layer whitelist" hazard).

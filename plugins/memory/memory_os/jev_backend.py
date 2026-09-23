@@ -9,11 +9,12 @@ to 255 options), score (rate against 2-10 ordered levels) -- each carrying
 This module is the ONLY place in Memory-OS that knows Jev's wire format.
 
 Status: OPTIONAL, DEFAULT OFF (owner ruling 2026-09-23, next-phase plan
-row J1, ``docs/plans/2026-09-23-memory-os-next-phase-plan.md``). No lane
+rows J1/J2, ``docs/plans/2026-09-23-memory-os-next-phase-plan.md``). No lane
 calls this module unless it explicitly opts in via its own
 ``<lane>_judge_backend`` knob -- see ``plugins/modules/governance/fact_judge.py``
-for the first, and so far only, wired caller. Importing this module has
-zero side effects and makes zero network calls; nothing here runs unless a
+(J1, native noul) and ``plugins/memory/memory_os/llm_edge_proposer.py`` (J2,
+native choice) for the two wired callers. Importing this module has zero
+side effects and makes zero network calls; nothing here runs unless a
 caller invokes one of its functions.
 
 INV-5: like every LLM-shaped call in this codebase, this backend belongs in
@@ -36,9 +37,10 @@ the owner's instruction that the two never mix.
 
 Docs consulted 2026-09-23: https://docs.typesafe.ai/ , /api.md ,
 /introduction/quickstart.md , /concepts/state.md , /primitives.md ,
-/primitives/noul.md , /confidence.md , /models.md , /primitives/advanced.md ,
-/sdk/python/api/retries.md . Live-verified against the real endpoint with a
-handful of synthetic calls. One documented-vs-live discrepancy found: the
+/primitives/noul.md , /primitives/choice.md , /confidence.md , /models.md ,
+/primitives/advanced.md , /sdk/python/api/retries.md . Live-verified against
+the real endpoint with a handful of synthetic calls. One documented-vs-live
+discrepancy found: the
 docs claim a malformed question returns HTTP 422; live, it returned HTTP 400
 with the same ``{"detail": {"error_type": ..., "message": ...}}`` error
 envelope. Both fold into the generic 4xx bucket below, so this does not
@@ -86,6 +88,7 @@ JEV_CALL_FAILURE_REASONS = frozenset(
 # second, independent floor so this module is safe standing alone.
 _MAX_STATE_STRING_CHARS = 4000
 _MAX_STATE_ITEMS = 20
+_MAX_STATE_DEPTH = 4
 _MAX_INSTRUCTIONS_CHARS = 2000
 
 MAX_CHOICE_OPTIONS = 255
@@ -98,20 +101,25 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
-def _clip_state(state: Any) -> Any:
-    """Independent defensive bound on the ``state`` payload (INV-5)."""
+def _clip_state(state: Any, _depth: int = 0) -> Any:
+    """Independent defensive bound on the ``state`` payload (INV-5).
+
+    Recurses: J2 sends ``{"record_a": {"kind", "tags", "body"}, ...}``, and a
+    top-level-only clip let a nested body through untouched. Every string at
+    any depth is clipped and every collection truncated; containers nested
+    deeper than ``_MAX_STATE_DEPTH`` are dropped rather than sent unbounded.
+    """
     if isinstance(state, str):
         return _clip(state, _MAX_STATE_STRING_CHARS)
+    if isinstance(state, (dict, list, tuple)) and _depth >= _MAX_STATE_DEPTH:
+        return None
     if isinstance(state, dict):
         return {
-            str(key): (_clip(value, _MAX_STATE_STRING_CHARS) if isinstance(value, str) else value)
+            str(key): _clip_state(value, _depth + 1)
             for key, value in list(state.items())[:_MAX_STATE_ITEMS]
         }
-    if isinstance(state, list):
-        return [
-            (_clip(value, _MAX_STATE_STRING_CHARS) if isinstance(value, str) else value)
-            for value in state[:_MAX_STATE_ITEMS]
-        ]
+    if isinstance(state, (list, tuple)):
+        return [_clip_state(value, _depth + 1) for value in list(state)[:_MAX_STATE_ITEMS]]
     return state
 
 
@@ -462,6 +470,101 @@ def judge_noul(
         label=label,
         confidence=confidence,
         probability=probability,
+        failure_reason="",
+        model=result.model,
+        latency_ms=result.latency_ms,
+        usage=result.usage,
+    )
+
+
+# ── Convenience: single-choice-question judgment (J2) ────────────────────
+
+@dataclass(frozen=True)
+class JevChoiceResult:
+    """Unified judgement shape for a single native choice (pick-one) question.
+
+    ``choice`` is the selected option -- guaranteed to be one of *criteria*'s
+    keys on success (see the wire-contract check in :func:`judge_choice`) --
+    or ``""`` on failure. Callers must never treat an empty choice as a
+    valid selection.
+
+    ``confidence`` is NATIVE here (unlike :class:`JevJudgmentResult`'s
+    derived value for noul): per https://docs.typesafe.ai/primitives/choice.md
+    the choice primitive returns confidence directly, reflecting how
+    concentrated the returned probability distribution is over the offered
+    options ("a single peak on one option means high confidence").
+    """
+
+    choice: str = ""
+    confidence: float | None = None
+    probabilities: dict[str, float] | None = None
+    legend: dict[str, str] | None = None
+    failure_reason: str = ""
+    detail: str = ""
+    backend: str = JEV_BACKEND_NAME
+    model: str | None = None
+    latency_ms: float | None = None
+    usage: dict[str, int] | None = None
+
+
+def judge_choice(
+    *,
+    question_id: str,
+    instructions: str,
+    criteria: dict[str, str | None],
+    state: Any,
+    config: dict[str, Any] | None = None,
+) -> JevChoiceResult:
+    """Ask one native choice question and return the selected option.
+
+    Never raises. On any failure, ``failure_reason`` is set (drawn from
+    ``JEV_CALL_FAILURE_REASONS``) and ``choice``/``confidence`` stay at
+    their empty defaults -- callers must treat that as "fall back", never
+    as a valid selection.
+
+    Two wire-contract checks, mirroring the same-shaped guards in
+    :func:`judge_noul` for its own primitive: the declared answer ``type``
+    must be exactly ``"choice"`` (a stray ``choice`` field on an answer
+    declared some other type must not be read as a choice judgment), and
+    the returned ``choice`` must be one of *criteria*'s own keys -- Jev's
+    own closed option set for this question, not a caller-specific
+    vocabulary, so this check stays generic. Both violations are
+    ``llm_parse_failed``.
+    """
+    question = build_choice_question(instructions, criteria)
+    result = call_systemone(state=state, questions={question_id: question}, config=config)
+    if result.failure_reason:
+        return JevChoiceResult(
+            failure_reason=result.failure_reason,
+            detail=result.detail,
+            model=result.model,
+            latency_ms=result.latency_ms,
+            usage=result.usage,
+        )
+
+    answer = (result.answers or {}).get(question_id)
+    if answer is None or answer.type != "choice" or not answer.choice:
+        return JevChoiceResult(
+            failure_reason="llm_parse_failed",
+            detail=f"missing_or_non_choice_answer_for:{question_id}",
+            model=result.model,
+            latency_ms=result.latency_ms,
+            usage=result.usage,
+        )
+    if answer.choice not in question["criteria"]:
+        return JevChoiceResult(
+            failure_reason="llm_parse_failed",
+            detail=_clip(f"choice_outside_offered_options:{answer.choice}", 200),
+            model=result.model,
+            latency_ms=result.latency_ms,
+            usage=result.usage,
+        )
+
+    return JevChoiceResult(
+        choice=answer.choice,
+        confidence=answer.confidence,
+        probabilities=answer.probabilities,
+        legend=answer.legend,
         failure_reason="",
         model=result.model,
         latency_ms=result.latency_ms,

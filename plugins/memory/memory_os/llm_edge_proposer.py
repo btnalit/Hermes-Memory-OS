@@ -17,6 +17,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from . import jev_backend
 from .audit import append_audit
 from .low_clue_recall import (
     LlmCallResult,
@@ -210,6 +211,137 @@ def _call_llm(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, A
     }
 
 
+# ── J2: Jev native-choice mapping (owner ruling 2026-09-23) ─────────────
+# TypeSafe's own selection guidance: "Choice should be used when the answer
+# is one of a known set of options with no order between them... If two
+# types both seem to fit, prefer the one whose answer your code can act on
+# directly." (https://docs.typesafe.ai/primitives.md) -- this lane's
+# pick-one-of-five relation type is exactly that shape, and each answer
+# maps straight onto write_governed_edge's relation_type argument below.
+#
+# Options and their one-line descriptions are lifted VERBATIM from
+# _RELATION_PROMPT_TEMPLATE's bullet list above, kept as an independent
+# mapping rather than re-templating the free-text prompt from shared data
+# -- the same deliberate separation fact_judge.py's _JEV_NOUL_* constants
+# keep from _JUDGE_SYSTEM_PROMPT (owner explicitly rejected wrapping the
+# free-text prompt as a single low-fidelity question). If the prompt's
+# relation descriptions change, update this dict to match.
+_JEV_RELATION_CHOICE_INSTRUCTIONS = (
+    "You are analyzing crystallized memory records in a governance system. "
+    "Determine the relationship between Record A and Record B described in "
+    "the state below, choosing exactly one option."
+)
+_JEV_RELATION_CHOICE_CRITERIA: dict[str, str] = {
+    "refines": "Record A is a refinement/extension of Record B (or vice versa)",
+    "contradicts": "The records express contradictory positions on the same topic",
+    "depends_on": "One record logically depends on the other",
+    "co_occurs": "The records are related by context (same topic, same session) but not refinement/contradiction/dependency",
+    "none": "No meaningful relationship",
+}
+
+
+def _build_jev_choice_state(record_a: dict[str, Any], record_b: dict[str, Any]) -> dict[str, Any]:
+    """Structured record_a/record_b state for the Jev choice call -- same
+    clip bound (500 chars) _call_llm's free-text prompt uses for body text,
+    independent of jev_backend's own defensive _clip_state floor."""
+    return {
+        "record_a": {
+            "kind": str(record_a.get("kind", "")),
+            "tags": _format_tags(record_a.get("tags_json", [])),
+            "body": str(record_a.get("body", "") or "")[:500],
+        },
+        "record_b": {
+            "kind": str(record_b.get("kind", "")),
+            "tags": _format_tags(record_b.get("tags_json", [])),
+            "body": str(record_b.get("body", "") or "")[:500],
+        },
+    }
+
+
+def _format_jev_reasoning(choice: str, confidence: float | None, probabilities: dict[str, float] | None) -> str:
+    """Synthesize a reasoning string for parity with _call_llm's return
+    shape. See the "reasoning" field note on _call_jev below -- no consumer
+    reads this value beyond this module's own pair loop, so its exact
+    content is not load-bearing."""
+    prob = probabilities.get(choice) if isinstance(probabilities, dict) else None
+    prob_text = f"{prob:.2f}" if isinstance(prob, (int, float)) else "?"
+    conf_text = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
+    return f"jev_choice={choice}_probability={prob_text}_confidence={conf_text}"[:200]
+
+
+def _call_jev(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask Jev's native choice primitive for the relationship between two
+    records. Returns a dict shaped like _call_llm's return value
+    (relation_type, confidence, reasoning, outcome) on success, so
+    run_llm_proposer's pair loop can treat a Jev success identically to a
+    hermes_default success.
+
+    On ANY failure -- transport, wire-contract (non-"choice" answer type or
+    a choice outside the offered options, both rejected inside
+    jev_backend.judge_choice), or a caller-side closed-set mismatch -- this
+    returns ``outcome: "jev_failed"`` plus ``jev_failure_reason``/
+    ``jev_failure_detail`` so the caller can fall back to _call_llm and
+    count the fallback. Never raises, and never returns "none" as a
+    disguised failure -- "none" is only ever a legitimate Jev *answer*.
+
+    ``reasoning``: grepped project-wide (see module docstring at top of
+    this file for the search) -- _call_llm's own "reasoning" field has
+    exactly one consumer, this module's pair loop, which never reads it
+    either (only relation_type/confidence feed write_governed_edge). No
+    field a consumer reads is being dropped; the synthesized string below
+    exists only for shape parity with _call_llm's return value.
+    """
+    state = _build_jev_choice_state(record_a, record_b)
+    result = jev_backend.judge_choice(
+        question_id="relation_type",
+        instructions=_JEV_RELATION_CHOICE_INSTRUCTIONS,
+        criteria=_JEV_RELATION_CHOICE_CRITERIA,
+        state=state,
+        config=config if config is not None else _DEFAULT_LLM_CONFIG,
+    )
+    if result.failure_reason:
+        return {
+            "relation_type": "none", "confidence": 0.0, "reasoning": "",
+            "outcome": "jev_failed",
+            "jev_failure_reason": result.failure_reason,
+            "jev_failure_detail": result.detail,
+        }
+
+    # Defense in depth: jev_backend.judge_choice already rejects any choice
+    # outside the criteria keys it was sent (a generic wire-contract check),
+    # so this can only fire if that guard is ever loosened -- but the
+    # domain-level closed-set requirement belongs at this layer too (see
+    # CLAUDE.md's "a gate whose vocabulary drifts from its producer's
+    # checks nothing, silently").
+    rtype = result.choice
+    if rtype not in _JEV_RELATION_CHOICE_CRITERIA:
+        return {
+            "relation_type": "none", "confidence": 0.0, "reasoning": "",
+            "outcome": "jev_failed",
+            "jev_failure_reason": "llm_parse_failed",
+            "jev_failure_detail": _clip_detail(f"choice_outside_closed_set:{rtype}"),
+        }
+
+    return {
+        "relation_type": rtype,
+        "confidence": result.confidence if result.confidence is not None else 0.0,
+        "reasoning": _format_jev_reasoning(rtype, result.confidence, result.probabilities),
+        "outcome": "ok",
+        "judge_backend": jev_backend.JEV_BACKEND_NAME,
+        "jev_model": result.model,
+        "jev_latency_ms": result.latency_ms,
+    }
+
+
+def _clip_detail(text: str, limit: int = 160) -> str:
+    return text[:limit]
+
+
 # ── Helper ─────────────────────────────────────────────────────────────────
 
 
@@ -245,6 +377,7 @@ def run_llm_proposer(
     *,
     index: object | None = None,
     audit_path: str | None = None,
+    roots: Any | None = None,
 ) -> dict[str, Any]:
     """Run the LLM-class edge proposer across all crystallized record pairs.
 
@@ -255,6 +388,10 @@ def run_llm_proposer(
         index_path: Path to the index DB.
         index: MemoryOSIndex instance (needed for edge writing).
         audit_path: Optional audit path.
+        roots: MemoryOSRoots for knob resolution (``llm_edge_proposer_judge_backend``);
+            falls back to ``index.roots`` when omitted, and to the
+            "hermes_default" knob default when neither is available (same
+            fallback shape as ``run_vector_proposer``).
 
     Every eligible pair makes its own sequential LLM round-trip (up to
     _MAX_PAIRS=100, each bounded by _DEFAULT_LLM_CONFIG["timeout_ms"]).
@@ -271,6 +408,17 @@ def run_llm_proposer(
     run produced (no_eligible_pairs / llm_degraded / no_relationships_found
     / produced), so "the judge found nothing" is distinguishable from "the
     judge could not be reached" without re-running or reading source.
+
+    J2 (owner ruling 2026-09-23): when the ``llm_edge_proposer_judge_backend``
+    knob selects ``"typesafe_jev"`` (default stays ``"hermes_default"``,
+    resolved once per run below), each pair first asks Jev's native choice
+    primitive for the relation type; ANY Jev failure (transport or wire-
+    contract) falls back to the unchanged ``_call_llm`` path for that same
+    pair -- never straight to "none" -- and the fallback is typed and
+    counted (``judge_backend_fallback_count``/``_reasons``/
+    ``_detail_sample`` in the summary below), mirroring fact_judge.py's J1
+    contract. When the knob stays at its default, this changes nothing
+    below -- default-off is byte-identical.
     """
     start_time = datetime.now(timezone.utc)
 
@@ -351,6 +499,25 @@ def run_llm_proposer(
     from .structural_edge_proposer import _order_records_unedged_first
     records = _order_records_unedged_first(records, index_path, proposed_by="llm")
 
+    # J2: judge_backend knob resolved ONCE per run (same precedence/timing
+    # as fact_judge.run_fact_judge_lane resolving it once per tick, not per
+    # candidate) -- a cheap single-file read, not per-pair. Default
+    # "hermes_default" is untouched by this resolution when no override is
+    # registered, so the rest of the run behaves exactly as before J2.
+    from .knob_overrides import resolve_knob as _resolve_knob
+
+    _effective_roots = roots if roots is not None else getattr(index, "roots", None)
+    judge_backend = str(
+        _resolve_knob(
+            "llm_edge_proposer_judge_backend",
+            default="hermes_default",
+            roots=_effective_roots,
+        )
+        or "hermes_default"
+    )
+    if judge_backend not in ("hermes_default", jev_backend.JEV_BACKEND_NAME):
+        judge_backend = "hermes_default"
+
     # 3. Build pairs and call LLM
     pairs = 0
     proposed = 0
@@ -371,6 +538,10 @@ def run_llm_proposer(
     llm_transport_name = ""
     llm_usage_prompt_tokens = 0
     llm_usage_completion_tokens = 0
+    # J2: optional Jev backend diagnostics, aggregated across this run.
+    judge_backend_fallback_count = 0
+    judge_backend_fallback_reasons: dict[str, int] = {}
+    judge_backend_fallback_detail_sample = ""
     # W4-A / plan row L1: route-mismatch counters, plus a sample of the
     # expected/actual model names from the most recent mismatch this run
     # (see LlmCallResult's docstring for the definition and the
@@ -400,8 +571,28 @@ def run_llm_proposer(
             if existing_for_pair >= all_types:
                 continue
 
-            # Call LLM for this pair
-            llm_result = _call_llm(records[i], records[j])
+            # Call LLM for this pair. J2: when selected, try Jev's native
+            # choice primitive first; ANY Jev failure falls back to the
+            # unchanged _call_llm path below for this same pair (never
+            # straight to "none"), typed and counted. When judge_backend
+            # stays "hermes_default" (the default), this is exactly the
+            # pre-J2 single call -- default-off is byte-identical.
+            if judge_backend == jev_backend.JEV_BACKEND_NAME:
+                jev_result = _call_jev(records[i], records[j])
+                if jev_result.get("outcome") == "ok":
+                    llm_result = jev_result
+                else:
+                    judge_backend_fallback_count += 1
+                    jev_reason = str(jev_result.get("jev_failure_reason") or "")
+                    judge_backend_fallback_reasons[jev_reason] = (
+                        judge_backend_fallback_reasons.get(jev_reason, 0) + 1
+                    )
+                    judge_backend_fallback_detail_sample = _clip_detail(
+                        str(jev_result.get("jev_failure_detail") or "")
+                    )
+                    llm_result = _call_llm(records[i], records[j])
+            else:
+                llm_result = _call_llm(records[i], records[j])
             llm_call_count += 1
             call_outcome = str(llm_result.get("outcome", "ok"))
             if call_outcome == "ok":
@@ -513,6 +704,18 @@ def run_llm_proposer(
         "llm_transport": llm_transport_name,
         "llm_usage_prompt_tokens": llm_usage_prompt_tokens,
         "llm_usage_completion_tokens": llm_usage_completion_tokens,
+        # J2: optional Jev judge-backend diagnostics (ADD-only). judge_backend
+        # is the resolved backend for this run ("hermes_default" unless the
+        # llm_edge_proposer_judge_backend knob selects "typesafe_jev").
+        # judge_backend_fallback_count/reasons count pairs where Jev was
+        # selected but failed and this pair fell back to _call_llm --
+        # Completion Is Not Output: a clean envelope alone cannot distinguish
+        # "Jev worked" from "Jev failed and fell back silently" without this
+        # (same contract as fact_judge.py's J1 fields).
+        "judge_backend": judge_backend,
+        "judge_backend_fallback_count": judge_backend_fallback_count,
+        "judge_backend_fallback_reasons": judge_backend_fallback_reasons,
+        "judge_backend_fallback_detail_sample": judge_backend_fallback_detail_sample,
         # W4-A / plan row L1: route-mismatch counters (ADD-only).
         "llm_route_unexpected_count": llm_route_unexpected_count,
         "llm_route_unknown_count": llm_route_unknown_count,

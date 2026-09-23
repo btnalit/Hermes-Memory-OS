@@ -10240,6 +10240,123 @@ def test_llm_call_counters_survive_both_whitelists_end_to_end(tmp_path, monkeypa
     assert not any(item["code"].startswith("v2_graph") for item in graded["fail"])
 
 
+def test_j2_judge_backend_fields_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
+    """J2 census: llm_edge_proposer's four optional Jev judge-backend
+    diagnostics (``judge_backend`` / ``judge_backend_fallback_count`` /
+    ``_reasons`` / ``_detail_sample``) must reach the monitor reader through
+    BOTH the cognitive_loop wrapper's key whitelist and the monitor's own
+    _edge_fields whitelist -- same two-layer drift hazard as the L1
+    transport keys and the D2b outcome/llm_call_* counters above (see
+    CLAUDE.md's "a gate whose vocabulary drifts from its producer's checks
+    nothing, silently"). Drives the REAL producer (run_llm_proposer with
+    the judge_backend knob set to typesafe_jev, via the real
+    CognitiveLoopRunner._llm_edge_proposer wrapper) through a monkeypatched
+    jev_backend.judge_choice that always fails, so the fallback counters
+    are real, not hand-built."""
+    import json as _json
+
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    from plugins.memory.memory_os.jev_backend import JevChoiceResult
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os import llm_edge_proposer
+    from plugins.memory.memory_os.low_clue_recall import LlmCallResult
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    index = MemoryOSIndex(roots)
+
+    for rec_id, created_at in (
+        ("cry_j2_mon_a", "2026-06-01T10:00:00Z"),
+        ("cry_j2_mon_b", "2026-06-01T11:00:00Z"),
+    ):
+        store.append_crystallized_record(
+            "test_llm_edge_proposer_j2_monitor.md",
+            {
+                "schema_version": "memory-os.crystallized.v0",
+                "id": rec_id,
+                "kind": "test",
+                "created_at": created_at,
+                "approved_by": "owner",
+                "approved_at": created_at,
+                "approval_purpose": "test",
+                "approval_note": "test seed",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+                "bridge_state": "active",
+            },
+            "test crystallized record body",
+        )
+    index.rebuild_from_store(store)
+
+    override_dir = roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        _json.dumps({
+            "knob": "llm_edge_proposer_judge_backend",
+            "override_value": "typesafe_jev",
+            "state": "active",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        llm_edge_proposer, "_resolve_hermes_default_runtime",
+        lambda config: {"ok": True, "model": "test-model", "runtime": {"api_mode": "chat_completions"}},
+    )
+    monkeypatch.setattr(
+        llm_edge_proposer, "_call_hermes_runtime_model_result",
+        lambda prompt, config: LlmCallResult(
+            text=_json.dumps({"relation_type": "refines", "confidence": 0.6, "reasoning": "fallback"}),
+        ),
+    )
+    monkeypatch.setattr(
+        llm_edge_proposer.jev_backend, "judge_choice",
+        lambda **kwargs: JevChoiceResult(failure_reason="llm_timeout", detail="socket_timeout"),
+    )
+
+    runner = CognitiveLoopRunner(store)
+    wrapper_summary = runner._llm_edge_proposer({})
+    assert wrapper_summary["judge_backend"] == "typesafe_jev", "sanity: the producer routed to Jev"
+
+    report = {
+        "cycle_id": "cycle-j2-census",
+        "status": "ok",
+        "steps": [{
+            "step": "llm_edge_proposer",
+            "status": "ok",
+            "duration_ms": 1,
+            "result": wrapper_summary,
+        }],
+        "step_summary": {"step_count": 1, "omitted_step_count": 0, "tail_step_statuses": {}},
+    }
+    mod_dir = tmp_path / "system-modules" / "cognitive_loop"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "reports.jsonl").write_text(
+        _json.dumps(report) + "\n", encoding="utf-8",
+    )
+
+    namespace = _exec_graph_knob_probe_prefix(tmp_path)
+    evidence = namespace["cognitive_loop_step_evidence"]()
+    surfaced = evidence["edge_step_results"]["llm_edge_proposer"]
+
+    assert surfaced["judge_backend"] == "typesafe_jev"
+    assert surfaced["judge_backend_fallback_count"] == 1
+    assert surfaced["judge_backend_fallback_reasons"] == {"llm_timeout": 1}
+    assert surfaced["judge_backend_fallback_detail_sample"] == "socket_timeout"
+
+    # Census: every key the real wrapper publishes must reach the monitor --
+    # a hand-listed _edge_fields tuple stays green while a new key like
+    # these four is silently dropped at either whitelist layer.
+    not_carried = {"schema_version"}
+    missing = sorted(set(wrapper_summary) - not_carried - set(surfaced))
+    assert not missing, f"llm_edge_proposer J2 keys dropped by the monitor's _edge_fields: {missing}"
+
+
 def test_cursor_alignment_fields_survive_both_whitelists_end_to_end(tmp_path, monkeypatch):
     """Counterfactual: a ledger-cursor desync (future graph_layer_shadow.jsonl
     compaction — metadata_retention.py is dry-run only today, no executor
