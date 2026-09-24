@@ -5031,6 +5031,7 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `69b23d9`：J2 修复部署并开启（EB）——两 home production-safe 全阶段通过、网关重启；launcher 同形环境下 key 经 Hermes `.env` 解析成功，真实 J2 调用 `refines` 0.96；开启 `llm_edge_proposer_judge_backend=typesafe_jev` 后各跑一轮认知循环：main 100/100 经 Jev、回落 0，sannai 99/100（1 对 TypeSafe 529 按设计回落成功），两 home 零 `llm_missing_key`。
 - `ba4a55f..HEAD`：部署后收尾 + J2 凭证（EA）——sannai 6 条重复 projection 清理（带备份与 audit）、TypeSafe key 落位两 home `.env`、fact_judge 开启 Jev；`jev_backend` 在 environ 缺 key 时改经 Hermes 自己的 `hermes_cli.config.get_env_value` 读 `.env`（只调用不改 Hermes，共用抽出的 `_hermes_host_import_scope`），修复认知循环不加载 `.env` 致 J2 恒回落；+6 测试、两处反事实，全量 4292 passed。
 - `af8cf21`：规划全部合并并部署（DZ）——14 个串链 PR 按序合并（删基分支会关闭上层 PR，已恢复并改为先改指再删），两 profile production-safe 全阶段 pass、网关重启；L1 线上恢复（边提议 98–99% 成功、SFE 抽出主人事实），telegram 主人身份两 home 绑定；monitor 无本次引入的 FAIL。
 - `ace7434..HEAD`：J2（DY）——`llm_edge_proposer.py` 判定关系类型可选走 Jev 原生 `choice`（refines/contradicts/depends_on/co_occurs/none，
@@ -9208,3 +9209,42 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
 - **部署后待办**：① 按 launcher 同形（`env -i HERMES_HOME=… PYTHONPATH=…`）在两 home 验证 key 可解析，只打印
   `bool / failure_reason / detail`；② 由 owner 指令登记 `llm_edge_proposer_judge_backend=typesafe_jev`；③ 下一轮认知循环
   （05:04/11:04/17:04/23:04 CST）确认 `judge_backend_fallback_reasons` 为空。
+
+---
+
+## EB — J2 修复部署 3.200 并开启 J2 Jev（main + sannai，2026-09-24，`69b23d9`）
+
+- **合并**：PR #99 独立审查（Sonnet）APPROVE、无阻塞项（两处反事实由审查者独立复现），CI 两轮 `verify` 全绿后按 owner 指令
+  以 merge commit 合并为 `69b23d9`，远端分支删除。审查提的 SHOULD-FIX：J2 每对都解析一次 key，认知循环里即每对一次 import scope 往返。
+  **实测后不改**：主机上 launcher 同形环境每次重新 import `hermes_cli.config` 并读 `.env`，冷启动一次 286 ms、其后稳定 ~20 ms；
+  100 对 ≈ 2 s / 6h 一轮，对照同一轮 Jev HTTP 本身 ~70 s（≈3%）。加缓存要么引入换 key 后的陈旧值，要么重写 Hermes 的 home 解析，
+  两者都比这 2 s 贵。NIT（`_resolve_hermes_default_runtime` 仍保留自己那份 scope 逻辑）按其 docstring 的既定取舍不动。
+- **部署**：回滚包 `/root/_memoryos_predeploy_backup_20260924T0440Z.tgz`（两 home 的 runtime、config.json、registry 快照）；
+  回滚点 `/opt` `af8cf21`。`/opt` ff-only 到 `69b23d9`；两 home plan（MSYS 未改写远端路径）→ preflight → dry-run → apply（状态值是
+  `applied` 不是 `pass`）→ postcheck 全部通过，manifest 均盖 `69b23d9`。两个改动运行时文件（`jev_backend.py` /
+  `low_clue_recall.py`）的 sha256 两 home 与提交逐字节一致；两 home `config.json` 与备份逐字节相同（本次不触配置）；
+  `fact_judge_judge_backend` 覆盖仍在。两网关依次重启，active、`NRestarts=0`、无 traceback，Telegram 恢复。
+- **launcher 同形验证**（`env -i PATH=… HERMES_HOME=<home> PYTHONPATH=<home>/memory-os/runtime/python:<home>/plugins`，与
+  `memory_os_cognitive_loop.sh` 相同）：两 home `TYPESAFE_API_KEY in os.environ = False`，`_resolve_api_key` 仍解析成功
+  （`failure_reason=''`，经 Hermes `get_env_value` 读 `.env`），scope 退出后无 `hermes_cli` 模块残留；一次真实 J2 调用
+  （合成记录对，不含生产数据）→ `refines`、置信 0.96、`outcome=ok`。只打印布尔值与类型化原因，key 从未输出。
+- **开启 J2**：两 home 经部署运行时 `register_override` 登记 `llm_edge_proposer_judge_backend=typesafe_jev`（`approved_via=
+  owner_instruction_2026-09-24_after_j2_fix`，不过期），记录 `ko_20260924T045535950725Z_4e5c4ff90c`（main）/
+  `ko_20260924T045536005405Z_a719694cf7`（sannai）。
+- **生产流量验证（不等 4h 后的定时轮次，经 timer 所用的同一 systemd oneshot 单元各跑一轮，main 先、sannai 后，不并发）**：
+  - main（04:55→05:01 UTC，`result=success`）：`judge_backend=typesafe_jev`，100 对全部 Jev 判定、回落 0、
+    `judge_backend_fallback_reasons={}`，生边 6，`llm_call_failure_count=0`，步骤耗时 83 s。
+  - sannai（05:01→05:06 UTC，`result=success`）：100 对中 99 对 Jev 判定，1 对回落 `llm_overloaded`（TypeSafe 侧 HTTP 529
+    "system_overloaded / high traffic"），该对经 `_call_llm` 回落成功——`llm_call_failure_count=0`，生边 2，步骤耗时 162 s。
+  - 两 home 均**零** `llm_missing_key`：修复前认知循环里这会是 100/100。
+  - fact_judge（J1）同日 04:12 UTC main 首跑 8/8 经 Jev、回落 0、durable 4。
+- **monitor（每 profile 用自己的 `--hermes-home`、`--caller-timeout-seconds 900`、`--snapshot-out` 落盘后解析）**：main FAIL
+  只剩 `shell_alias_no_env_failed`（部署前即有）；sannai FAIL 为 `memory_projection_retention_compaction_missing`（等 00:05 CST
+  首次压缩，DZ 已记）+ `shell_alias_no_env_failed`。无本次引入的 FAIL，无 Jev 相关 WARN。sannai 的
+  `llm_lane_consecutive_failure_streak`（`session_fact_extraction`，streak 49，`llm_empty_content`）核实为部署前历史：最后一次
+  LLM 失败在 09-23 22:12 UTC（af8cf21 部署前），部署后唯一一轮 `llm_calls=0`（2 个会话无达标消息）——没有新调用，就没有成功
+  调用来清零，首个成功调用后自然归零。**教训**：monitor 的 `--output json` 结果在 `snapshot["classification"]`
+  （`status` / `fail[].code` / `warn[].code`），顶层没有 `status`；按顶层键解析会得到 `None`，那是解析错误，不是 monitor 结论。
+- **观察项**：TypeSafe 529 属对方容量问题，已按设计类型化计数并回落，不是缺陷；若 `llm_overloaded` 在后续轮次持续出现，再考虑
+  降低每轮对数或加退避。J1/J2 启用即数据外发（候选正文 / 每对两条记录正文截断 500 字 + kind + tags 发往 api.typesafe.ai），
+  owner 已知情并裁定开启。
