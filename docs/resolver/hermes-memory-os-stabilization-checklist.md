@@ -5031,6 +5031,7 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `af8cf21`：规划全部合并并部署（DZ）——14 个串链 PR 按序合并（删基分支会关闭上层 PR，已恢复并改为先改指再删），两 profile production-safe 全阶段 pass、网关重启；L1 线上恢复（边提议 98–99% 成功、SFE 抽出主人事实），telegram 主人身份两 home 绑定；monitor 无本次引入的 FAIL。
 - `ace7434..HEAD`：J2（DY）——`llm_edge_proposer.py` 判定关系类型可选走 Jev 原生 `choice`（refines/contradicts/depends_on/co_occurs/none，
   5 元闭集，带原生 confidence），共用 J1 的凭证约定与 `llm_birth_weight` 权重公式；knob 默认 `hermes_default`（省略/显式传 `roots` 解析
   一致，逐字节不变）、任何 Jev 失败回落到未改动的 `_call_llm` 并计数；续完前一 agent 因 harness 故障中断的 WIP（`f82118a`），补齐
@@ -9108,3 +9109,47 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   并由 owner 登记 `llm_edge_proposer_judge_backend=typesafe_jev` 覆盖；部署后可先跑
   `TYPESAFE_API_KEY=<真实key> python scripts/memory_os_jev_probe.py --mode choice` 做只读连通性验证（key 只经环境变量传入，输出
   恒不含 key）。
+
+---
+
+## DZ — 下一阶段规划全部合并并部署 3.200（main + sannai，2026-09-24，`af8cf21`）
+
+- **合并**：14 个串链 PR #84→#97 按序以 merge commit 合并（不 squash，否则上层 PR 冲突），远端只剩 `main`。**踩到一次坑并已恢复**：
+  #84 合并后用 refs API 删掉其分支，GitHub 没有把 #85 改指 main，而是**直接关闭了 #85**（只有它自己的"合并后删分支"流程才自动改指）。
+  恢复：按原 SHA 重建分支引用 → reopen #85 → 显式 `--base main`。其后每个 PR 都改为"先改指 main、再删上一个分支、再合并"。
+  合并前核实 merge commit 与 PR 头的树零差异，所以 main 每一步都等于一个已过 CI 的树；最终 `af8cf21` 与 #97 头 `8a24196`
+  树完全一致。另两个早已并入 main 的旧远端分支一并删除。
+- **部署前**：回滚包 `/root/_memoryos_predeploy_backup_20260923T2245Z.tgz`（两 home 的 runtime、config.json、manifest、
+  registry 快照）；回滚点 `/opt` `bea1737`、manifest `972165ac`（09-12）。本次同时带上此前合并未部署的 DJ（#82）。
+- **部署**：`/opt` ff-only 到 `af8cf21`；`deploy_memory_os.py --mode production-safe --profile upgrade --hindsight auto
+  --timeout 300` 两 home 逐阶段 plan → preflight（main 30 / sannai 29 全 pass）→ dry-run → apply → postcheck 全 pass，
+  manifest 两 home 均盖 `af8cf21`；`MSYS_NO_PATHCONV=1` 下 plan 的远端路径未被改写；`llm_judge_probe=not_requested`（DJ.8 ⑦）。
+  部署运行时 `owner_actions` / `low_clue_recall` / `principal` / `session_mirror` / `structural_edge_proposer` 五个文件的
+  sha256 两 home 与 `af8cf21` 逐字节一致。
+- **配置核对（安装器会整段替换部分预设子树）**：与备份逐段比对，只有预期变化——`low_clue_recall.llm_judge` 开→关（owner 裁定）、
+  `principal` 新写入、`session_mirror` 旧 `owner_review_*` 键迁移为新名且值不变；`memory_reranker`（6选5）与远程 embedding
+  端点原样保留。注册表快照两 home 的 tick_daily 均含 `memory_projection_compaction`，helper 脚本已就位。
+- **主人身份绑定**：telegram 两 home 均绑定同一主人 id（打码 `68******75`）——main 由"单一允许用户 + home channel"两个信号
+  一致得出，sannai 由 DM 形 home channel 得出；与 state.db 交叉核对，该 id 占 Telegram 私聊会话 417 条，远超其它。
+  telegram_group 未配置、wecom 的 home channel 非 DM 形，均按裁定不自动绑定。
+- **网关**：两个 user 单元依次重启，均 active、`NRestarts=0`，日志无 traceback，Telegram polling 重连。
+- **线上行为验证（不止看哈希）**：
+  - L1：经部署运行时直调 `_call_hermes_runtime_model_result`，两 profile 均拿到真实回复（此前一个月恒空回复），
+    `routed_provider=openai-codex` 与请求一致、`route_unexpected=False`。部署后第一个认知循环（11:04 CST）llm_edge_proposer
+    main 98/100、sannai 99/100 调用成功，分别生出 3 / 7 条边（此前 0/100）；sannai fact_judge 经 `hermes_call_llm` 判 2 条。
+  - SFE：main 改读 state.db（`input_source=state_db`），过滤 `other_human` 121 / `system` 28 个会话，抽出 2 条主人事实。
+  - P2：部署后新事件全部带 `principal` 与纪元标记（cron 会话 → `system`，SFE → `owner`），`event_principal_coverage_ok`。
+  - G1：结构回填首批扫 200 条最旧 co_occurs，升级 0、失败 0（`completed`），游标逐轮推进。
+- **monitor（每 profile 用自己的 `--hermes-home`、`--caller-timeout-seconds 900`，与各自历史比）**：
+  - main：FAIL 只剩 `shell_alias_no_env_failed`（部署前即有，20s CLI 探针在共存负载下超时的老问题）；新增 WARN 均为本规划新门
+    的设计内输出（C0 账本尺寸门报出 4 个大账本、C2 压缩首跑前的 stale、连续失败计数仍含部署前的空回复历史）。
+    `low_clue_llm_judge_unavailable` 随判官关闭而消失。
+  - sannai：此前 monitor 自 08-12 起静默（C1），本次恢复出产物；3 个 FAIL（`memory_projection_duplicate_records`、
+    `memory_projection_retention_compaction_missing`、`shell_alias_no_env_failed`）在 08-12 的产物里已存在，非本次引入；
+    当时的 `v2_exposure_schema_era_unhealthy` 与 `execution_gate_memory_os_cron_helper_completion_error` 已消失。
+  - `left_brain_advisor` 的 warning 在部署前的各轮认知循环里同样存在，非本次引入。
+- **时间型待观察项（不是部署缺陷）**：Hermes cron 按主机本地时间（CST）解释表达式，tick-daily 在 00:05 CST（16:05 UTC）
+  首跑 `memory_projection_compaction`，之后 main 的 stale WARN 与 sannai 的 compaction_missing FAIL 应消失；
+  fact_judge / llm_edge_proposer 连续失败计数随新成功调用累积自然归零；`superseded_by_newer` 按验收 7 天内出现；
+  DJ.8 ①–⑥ 需 48h 自然流量观察。sannai 的 6 条重复 projection 记录是 08 月以来的存量数据，清理需改写生产账本，留待 owner 决定。
+- **未开启**：Jev（J1/J2）默认关闭，未在主机写入任何 key。
