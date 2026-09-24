@@ -72,8 +72,9 @@ class TestApiKeyResolution:
         assert result.failure_reason == "llm_missing_key"
         assert not mock_urlopen.called, "missing key must never reach the network"
 
-    def test_env_var_name_set_but_not_in_environ_fails_without_network(self, monkeypatch):
+    def test_env_var_name_set_but_not_in_environ_fails_without_network(self, monkeypatch, hermes_env_root):
         monkeypatch.delenv("TOTALLY_UNSET_TYPESAFE_VAR", raising=False)
+        hermes_env_root(loader="absent")
         with patch("urllib.request.urlopen") as mock_urlopen:
             result = jev_backend.call_systemone(
                 state="x",
@@ -99,6 +100,97 @@ class TestApiKeyResolution:
                 config=_VALID_CONFIG,
             )
         assert mock_urlopen.called
+        assert result.failure_reason == ""
+
+
+def _hermes_modules() -> set[str]:
+    import sys
+
+    return {n for n in sys.modules if n == "hermes_cli" or n.startswith("hermes_cli.")}
+
+
+class TestHermesEnvFallback:
+    """J2 gap: the cognitive-loop launcher exports only HERMES_HOME and
+    PYTHONPATH, so a lane run there has no key in os.environ even though
+    Hermes' .env holds it. The key must then come from Hermes' own reader
+    (hermes_cli.config.get_env_value), called -- never re-implemented."""
+
+    _NOUL = {"q": {"type": "noul", "instructions": "?"}}
+
+    def test_key_only_in_hermes_dotenv_reaches_network_with_that_key(self, monkeypatch, hermes_env_root):
+        """Counterfactual: without the fallback this is llm_missing_key and
+        Jev is never called -- exactly what production's cognitive loop saw."""
+        import sys
+
+        monkeypatch.delenv("TEST_TYPESAFE_KEY", raising=False)
+        hermes_env_root("TEST_TYPESAFE_KEY=fake-dotenv-key-not-real\n")
+        path_before = list(sys.path)
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.9}}}).encode()
+            )
+            result = jev_backend.call_systemone(state="x", questions=self._NOUL, config=_VALID_CONFIG)
+
+        assert result.failure_reason == "", result.detail
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_header("Authorization") == "Bearer fake-dotenv-key-not-real"
+        assert "fake-dotenv-key-not-real" not in repr(result)
+        # The scope put the Hermes root on sys.path; it must take it back off.
+        assert sys.path == path_before
+        assert _hermes_modules() == set()
+
+    def test_key_absent_from_environ_and_dotenv_is_missing_key_without_network(self, monkeypatch, hermes_env_root):
+        monkeypatch.delenv("TEST_TYPESAFE_KEY", raising=False)
+        hermes_env_root("OTHER_KEY=unrelated\n")
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            result = jev_backend.call_systemone(state="x", questions=self._NOUL, config=_VALID_CONFIG)
+
+        assert result.failure_reason == "llm_missing_key"
+        assert result.detail == "not_in_environ_or_hermes_env"
+        assert not mock_urlopen.called
+
+    def test_loader_unavailable_is_distinguishable_and_restores_import_state(self, monkeypatch, hermes_env_root):
+        """"Key not configured" and "Hermes' reader could not be imported"
+        share llm_missing_key but must be told apart from the report alone."""
+        import sys
+
+        monkeypatch.delenv("TEST_TYPESAFE_KEY", raising=False)
+        hermes_env_root("TEST_TYPESAFE_KEY=fake-dotenv-key-not-real\n", loader="absent")
+        path_before = list(sys.path)
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            result = jev_backend.call_systemone(state="x", questions=self._NOUL, config=_VALID_CONFIG)
+
+        assert result.failure_reason == "llm_missing_key"
+        assert result.detail.startswith("hermes_env_loader_unavailable: ")
+        assert not mock_urlopen.called
+        assert sys.path == path_before
+        assert _hermes_modules() == set()
+
+    def test_loader_exception_detail_carries_type_name_only(self, monkeypatch, hermes_env_root):
+        monkeypatch.delenv("TEST_TYPESAFE_KEY", raising=False)
+        hermes_env_root(loader="raises")
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            result = jev_backend.call_systemone(state="x", questions=self._NOUL, config=_VALID_CONFIG)
+
+        assert result.failure_reason == "llm_missing_key"
+        assert result.detail == "hermes_env_loader_failed: RuntimeError"
+        assert "reader-message-must-not-leak" not in repr(result)
+        assert not mock_urlopen.called
+
+    def test_key_in_environ_never_imports_hermes(self, monkeypatch):
+        """Hermes cron children already carry the key: they must not pay the
+        hermes_cli import (the fixture's key is in os.environ)."""
+
+        def _must_not_run(env_var):
+            raise AssertionError("os.environ hit must not fall through to Hermes' reader")
+
+        monkeypatch.setattr(jev_backend, "_hermes_env_value", _must_not_run)
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _FakeResponse(
+                json.dumps({"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.5}}}).encode()
+            )
+            result = jev_backend.call_systemone(state="x", questions=self._NOUL, config=_VALID_CONFIG)
+
         assert result.failure_reason == ""
 
 

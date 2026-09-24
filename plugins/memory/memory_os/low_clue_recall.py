@@ -1604,8 +1604,13 @@ def _classify_call_llm_exception(exc: Exception) -> tuple[str, str]:
     return "llm_exception", detail
 
 
-@contextmanager
-def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
+def _import_hermes_call_llm() -> Any:
+    from agent.auxiliary_client import call_llm
+
+    return call_llm
+
+
+def _hermes_call_llm_scope():
     """Import ``agent.auxiliary_client.call_llm`` and keep the import state
     alive for the body of the ``with`` block, fail-closed on failure.
 
@@ -1615,7 +1620,25 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
     ``sys.path``. Restoring the import state before the call -- the original
     shape of this helper -- turns every call into an ImportError.
 
-    When ``call_llm`` already imports on the process's own ``sys.path`` (the
+    Yields (call_llm, "") on success, or (None, detail) on failure. Import
+    failure here is FAIL-CLOSED for the hermes_call_llm transport -- it is
+    never a signal to fall back to the legacy wire path (owner ruling
+    2026-09-10: no provider-specific adaptation lives in Memory-OS; the
+    legacy wire stays reachable only via the explicit ``llm_transport`` knob).
+    """
+    return _hermes_host_import_scope(_import_hermes_call_llm)
+
+
+@contextmanager
+def _hermes_host_import_scope(importer: Callable[[], Any]) -> Iterator[tuple[Any | None, str]]:
+    """Run ``importer`` (a function that imports one Hermes object and
+    returns it) and keep the import state alive for the body of the ``with``
+    block, fail-closed on failure. Shared by ``call_llm`` and by
+    ``jev_backend``'s read of Hermes' ``.env`` loader: both call into Hermes
+    code that does function-level imports at call time, so both must be used
+    inside the block.
+
+    When the import already succeeds on the process's own ``sys.path`` (the
     host has Hermes loaded), the scope changes nothing and restores nothing:
     those modules belong to the host, and deleting one it imported lazily
     would make its next import re-execute the module. Only when the scope
@@ -1623,14 +1646,10 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
     (evicting a phantom namespace ``agent`` package first, as
     :func:`_resolve_hermes_default_runtime` does) does it restore ``sys.path``
     on exit and drop the ``agent`` / ``hermes_cli`` / ``tools`` modules the
-    call pulled in from that root. Self-contained rather than shared with
+    body pulled in from that root. Self-contained rather than shared with
     that function, whose restore behaviour is independently tested.
 
-    Yields (call_llm, "") on success, or (None, detail) on failure. Import
-    failure here is FAIL-CLOSED for the hermes_call_llm transport -- it is
-    never a signal to fall back to the legacy wire path (owner ruling
-    2026-09-10: no provider-specific adaptation lives in Memory-OS; the
-    legacy wire stays reachable only via the explicit ``llm_transport`` knob).
+    Yields (object, "") on success, or (None, detail) on failure.
     """
     original_sys_path = list(sys.path)
     original_host_modules = {
@@ -1640,14 +1659,14 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
     }
     path_mutated = False
     try:
-        call_llm: Any | None = None
+        imported: Any | None = None
         detail = ""
         try:
-            from agent.auxiliary_client import call_llm
+            imported = importer()
         except Exception:
-            call_llm = None
+            imported = None
 
-        if call_llm is None:
+        if imported is None:
             path_mutated = True
             for _name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
                 _mod = sys.modules.get(_name)
@@ -1669,11 +1688,11 @@ def _hermes_call_llm_scope() -> Iterator[tuple[Any | None, str]]:
                 if explicit_root:
                     break
             try:
-                from agent.auxiliary_client import call_llm
+                imported = importer()
             except Exception as exc:
-                call_llm = None
+                imported = None
                 detail = f"{type(exc).__name__}: {exc}"[:160]
-        yield call_llm, detail
+        yield imported, detail
     finally:
         if path_mutated:
             sys.path[:] = original_sys_path
