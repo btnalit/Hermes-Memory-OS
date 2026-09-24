@@ -25,7 +25,9 @@ Credential handling follows the Hindsight substrate convention (see
 ``substrates/hindsight.py`` / ``adapters/hindsight.py``): config carries
 only the environment-variable NAME (``api_key_env_var``, default
 ``"TYPESAFE_API_KEY"``); the value itself lives in Hermes' ``~/.hermes/.env``
-on a host and is read from ``os.environ`` at call time. This module never
+on a host and is read at call time from ``os.environ``, falling back to
+Hermes' own reader ``hermes_cli.config.get_env_value`` for processes whose
+environment was not built from ``.env`` (see ``_hermes_env_value``). This module never
 accepts a raw key string in config, never logs it, and never includes it in
 any returned/report field.
 
@@ -57,7 +59,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .low_clue_recall import LLM_CALL_FAILURE_REASONS
+from .low_clue_recall import LLM_CALL_FAILURE_REASONS, _hermes_host_import_scope
 
 # ── Wire constants ───────────────────────────────────────────────────────
 JEV_API_URL_DEFAULT = "https://api.typesafe.ai/v1/systemone"
@@ -235,17 +237,61 @@ def _parse_answer(raw: Any) -> JevAnswer:
 
 # ── Credentials + limits ─────────────────────────────────────────────────
 
-def _resolve_api_key(config: dict[str, Any]) -> tuple[str, str]:
-    """Returns ``(api_key, failure_reason)``; ``failure_reason`` is ``""`` on
-    success. Makes NO network call -- a missing key must be a typed
-    ``llm_missing_key`` with zero HTTP activity."""
+def _import_hermes_get_env_value() -> Any:
+    from hermes_cli.config import get_env_value
+
+    return get_env_value
+
+
+def _hermes_env_value(env_var: str) -> tuple[str, str]:
+    """Read ``env_var`` through Hermes' own credential reader,
+    ``hermes_cli.config.get_env_value`` (``os.environ``, then
+    ``<HERMES_HOME>/.env``) -- the same call Hermes' ``web_search_provider``
+    uses for third-party keys. Called, never modified: Memory-OS owns no
+    ``.env`` parser of its own.
+
+    Needed because not every process that runs a Jev lane has ``.env`` in
+    its environment: Hermes cron children do (the scheduler builds their env
+    from it), but the cognitive-loop systemd launcher only exports
+    ``HERMES_HOME``/``PYTHONPATH``, so ``llm_edge_proposer`` saw no key there.
+
+    Returns ``(value, detail)``. ``detail`` names why no value came back and
+    never contains the value itself.
+    """
+    with _hermes_host_import_scope(_import_hermes_get_env_value) as (get_env_value, import_detail):
+        if get_env_value is None:
+            return "", _clip(f"hermes_env_loader_unavailable: {import_detail}", 160)
+        try:
+            value = str(get_env_value(env_var) or "").strip()
+        except Exception as exc:
+            # Type name only: a message from a credential reader is not
+            # something to copy into a report.
+            return "", f"hermes_env_loader_failed: {type(exc).__name__}"
+    if not value:
+        return "", "not_in_environ_or_hermes_env"
+    return value, ""
+
+
+def _resolve_api_key(config: dict[str, Any]) -> tuple[str, str, str]:
+    """Returns ``(api_key, failure_reason, detail)``; ``failure_reason`` is
+    ``""`` on success. Makes NO network call -- a missing key must be a typed
+    ``llm_missing_key`` with zero HTTP activity. ``detail`` separates "the
+    key is not configured" from "Hermes' reader could not be loaded" without
+    ever carrying the key.
+
+    ``os.environ`` is checked first so a process that already has the key
+    (Hermes cron children) never imports ``hermes_cli``; only a miss falls
+    through to :func:`_hermes_env_value`."""
     env_var = str(config.get("api_key_env_var") or JEV_API_KEY_ENV_VAR_DEFAULT).strip()
     if not env_var:
-        return "", "llm_missing_key"
+        return "", "llm_missing_key", "api_key_env_var not configured"
     key = str(os.environ.get(env_var) or "").strip()
+    if key:
+        return key, "", ""
+    key, detail = _hermes_env_value(env_var)
     if not key:
-        return "", "llm_missing_key"
-    return key, ""
+        return "", "llm_missing_key", detail
+    return key, "", ""
 
 
 def _call_limits(config: dict[str, Any]) -> float | None:
@@ -296,9 +342,9 @@ def call_systemone(
     """
     effective = config or {}
 
-    api_key, key_failure = _resolve_api_key(effective)
+    api_key, key_failure, key_detail = _resolve_api_key(effective)
     if key_failure:
-        return JevCallResult(failure_reason=key_failure, detail="api_key_env_var not set or empty")
+        return JevCallResult(failure_reason=key_failure, detail=key_detail)
 
     timeout_s = _call_limits(effective)
     if timeout_s is None:

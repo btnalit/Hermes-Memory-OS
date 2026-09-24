@@ -5031,6 +5031,7 @@ sannai-community 仓库 README。）
 
 ## 一句话
 
+- `ba4a55f..HEAD`：部署后收尾 + J2 凭证（EA）——sannai 6 条重复 projection 清理（带备份与 audit）、TypeSafe key 落位两 home `.env`、fact_judge 开启 Jev；`jev_backend` 在 environ 缺 key 时改经 Hermes 自己的 `hermes_cli.config.get_env_value` 读 `.env`（只调用不改 Hermes，共用抽出的 `_hermes_host_import_scope`），修复认知循环不加载 `.env` 致 J2 恒回落；+6 测试、两处反事实，全量 4292 passed。
 - `af8cf21`：规划全部合并并部署（DZ）——14 个串链 PR 按序合并（删基分支会关闭上层 PR，已恢复并改为先改指再删），两 profile production-safe 全阶段 pass、网关重启；L1 线上恢复（边提议 98–99% 成功、SFE 抽出主人事实），telegram 主人身份两 home 绑定；monitor 无本次引入的 FAIL。
 - `ace7434..HEAD`：J2（DY）——`llm_edge_proposer.py` 判定关系类型可选走 Jev 原生 `choice`（refines/contradicts/depends_on/co_occurs/none，
   5 元闭集，带原生 confidence），共用 J1 的凭证约定与 `llm_birth_weight` 权重公式；knob 默认 `hermes_default`（省略/显式传 `roots` 解析
@@ -9153,3 +9154,57 @@ E 对 peer 轮同时挡 lingering 与 candidate；整轮长度界作为"`is_bot`
   fact_judge / llm_edge_proposer 连续失败计数随新成功调用累积自然归零；`superseded_by_newer` 按验收 7 天内出现；
   DJ.8 ①–⑥ 需 48h 自然流量观察。sannai 的 6 条重复 projection 记录是 08 月以来的存量数据，清理需改写生产账本，留待 owner 决定。
 - **未开启**：Jev（J1/J2）默认关闭，未在主机写入任何 key。
+
+---
+
+## EA — 部署后运维收尾 + J2 凭证改经 Hermes 自己的 `.env` 读取器（2026-09-24）
+
+- **sannai 重复 projection 清理（owner 授权）**：两次并发 collect（07-28/29，projection 锁引入前）各写了 6 条同 `dedup_key` 的
+  projection。每个 `dedup_key` 保留首次出现，丢弃第 3181/3198/3200/3205/3207/3262 行（6566 → 6560）；在生产者自己的 sidecar
+  flock 内改写，`os.replace` 原子落盘，保留行逐字节拷贝，丢弃数不等于 6 即中止不动文件。备份
+  `/root/_memoryos_sannai_projection_dedup_backup_20260924T034422Z.jsonl`（sha256 前缀 `f8033002c40e4c78`），audit
+  `memory_projection_duplicate_repair`。`memory_projection_status` 重复计数归零，sannai monitor 的
+  `memory_projection_duplicate_records` FAIL 消失（剩余 FAIL：`memory_projection_retention_compaction_missing` 待 00:05 CST
+  首次压缩、`shell_alias_no_env_failed` 为部署前老问题）。
+- **本地 worktree 清理**：`agent-a36690…` 只剩一个未跟踪的 `pr_checklist.md`（旧清单副本，逐行核对在 main 均已存在），worktree
+  与分支删除。
+- **TypeSafe key 落位（owner 裁定：放 Hermes 的 `.env`，不改 Hermes 源码）**：两 home 的 `.env` 各追加一行（改前备份
+  `*.bak-before-typesafe-<TS>`，权限 600，各恰 1 行），两网关依次重启，均 active、`NRestarts=0`、Telegram 重连。按进程核实 key
+  是否可达：网关由 `hermes_cli.env_loader.load_hermes_dotenv` 注入；Hermes cron 子进程的 env 由
+  `tools/environments/local.py::build_subprocess_env` 构造，两 profile 实测保留该变量；**认知循环的 systemd launcher 只 export
+  `HERMES_HOME`/`PYTHONPATH`，不加载 `.env`**——J2 所在的 `llm_edge_proposer` 在那里拿不到 key，每对都会 `llm_missing_key`
+  回落（`/proc/<pid>/environ` 只反映 exec 时刻的环境，不能用来证明或否定这一点）。
+- **fact_judge 开启 Jev（J1）**：owner 选定"先开 fact_judge，J2 修完再开"。两 home 经部署运行时的 `register_override` 登记
+  `fact_judge_judge_backend=typesafe_jev`（`approved_via=owner_instruction_2026-09-24`，不过期），记录
+  `ko_20260924T035520883341Z_cb32c537e9`（main）/ `ko_20260924T035520937668Z_3017e13334`（sannai），`resolve_knob` 回读为
+  `typesafe_jev`。注意 `lane_last_run/fact_judge.json` 没有 `judge_backend` 键，核验要看 `verdicts.jsonl` 或 monitor 的
+  `lane_backend_transport_summary`；fact_judge 每 4h 一跑且只判新候选，"开了但没有 Jev 判决"可能只是没有新候选。
+- **J2 修复（纯插件侧）**：
+  - **方案**：`jev_backend._resolve_api_key` 先查 `os.environ`（cron 子进程命中，永不 import `hermes_cli`）；未命中再调 Hermes
+    自己的凭证读取器 `hermes_cli.config.get_env_value`（先按 profile scope 读 environ，再读 `<HERMES_HOME>/.env`）——Hermes 的
+    `agent/web_search_provider.py` 读第三方 key 用的正是这一调用。只调用、不修改，Memory-OS 不自写 `.env` 解析器。
+  - **import scope**：`get_env_value` 在**调用时**惰性 import `agent.secret_scope`，因此必须在 Hermes 根仍在 `sys.path` 上时调用
+    （与 `call_llm` 同一陷阱）。把 `low_clue_recall._hermes_call_llm_scope` 的 sys.path 插入 / 幻影 `agent` 包驱逐 / 退出恢复逻辑
+    抽成通用 `_hermes_host_import_scope(importer)`，`_hermes_call_llm_scope` 变为薄封装，行为不变（其既有测试原样通过），没有造
+    第三份拷贝。
+  - **失败语义**：仍是闭集内的 `llm_missing_key`，`detail` 区分四种——`not_in_environ_or_hermes_env` /
+    `hermes_env_loader_unavailable: <import 错误>` / `hermes_env_loader_failed: <异常类型名>`（只记类型名，读取器的报错信息不进报告）
+    / `api_key_env_var not configured`。旧 detail 串 `api_key_env_var not set or empty` 退役。key 不进任何 detail / repr（测试断言）。
+  - **测试**：`tests/conftest.py` 新增 opt-in fixture `hermes_env_root`——假 Hermes 根，其 `get_env_value` 在调用时惰性 import 分词器，
+    复刻真实 `load_env` 的调用期 import；`loader="absent"` 用**已存在的空目录**（不存在的路径会被 `continue` 跳过，落到
+    `/usr/local/lib/hermes-agent`）。`test_memory_os_jev_backend.py` +5：key 只在 `.env` 时以正确 Bearer 联网，且 `sys.path` /
+    `sys.modules` 复原；environ 和 `.env` 都没有 → `not_in_environ_or_hermes_env`，零联网；读取器不可 import 时可区分，且 import
+    状态复原；读取器抛错只记类型名；environ 命中不走 Hermes。`test_memory_os_llm_edge_proposer.py` +1：端到端，key 只在 `.env`，
+    `run_llm_proposer` 走真 Jev 路径成功，`_call_llm` 未被调用、回落 0——即生产缺口本身的反事实。三处既有缺 key 测试
+    （jev_backend / llm_edge_proposer / fact_judge）改为 hermetic，不再依赖"测试机上恰好没装 Hermes"（在 3.200 上跑会读到真 `.env`
+    而翻转），并断言 detail。
+  - **反事实**（cp 备份实测，未用 `git checkout --`/`git stash`）：A 去掉 `.env` 回退 → 4 FAIL；B 把 `get_env_value` 调用挪到 import
+    scope 之外（先恢复 sys.path 再调用）→ 5 FAIL（`ModuleNotFoundError`，正是真实 Hermes 调用期 import 会撞上的形状）。恢复后全过。
+  - **同型排查（W 规则 5）**：`cli.py::_hindsight_http_client_from_config`、`__init__.py::_hindsight_http_client`、
+    `retrievers/hindsight.py::_hindsight_http_client` 同为只查 environ 读 `HINDSIGHT_API_KEY`；核实两 home `.env` 都没有该变量
+    （Hindsight 在本机无鉴权运行），无线上影响，本次不改，记为已知同型——哪天 Hindsight 加鉴权，认知循环里的调用会撞上同一缺口。
+  - **全量 / 五门**：4292 passed / 13 skipped / 0 failed（+6）；import-cycle 0 环 / write-surface `unclassified_count=0` /
+    static-hygiene `pass` / public-checkout `--strict` `PASS` / `git diff --check` 无输出。
+- **部署后待办**：① 按 launcher 同形（`env -i HERMES_HOME=… PYTHONPATH=…`）在两 home 验证 key 可解析，只打印
+  `bool / failure_reason / detail`；② 由 owner 指令登记 `llm_edge_proposer_judge_backend=typesafe_jev`；③ 下一轮认知循环
+  （05:04/11:04/17:04/23:04 CST）确认 `judge_backend_fallback_reasons` 为空。

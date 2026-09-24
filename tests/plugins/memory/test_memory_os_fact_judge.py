@@ -1947,13 +1947,15 @@ class TestJ1JevFallback:
         # hermes_default ultimately produced this verdict, not Jev
         assert "judge_backend" not in verdicts["cand_fallback"]
 
-    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path):
+    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path, hermes_env_root):
         """Counterfactual for jev_backend._resolve_api_key, exercised through
-        the real (unmocked) jev_backend.judge_noul with no TYPESAFE_API_KEY."""
+        the real (unmocked) jev_backend.judge_noul with no TYPESAFE_API_KEY
+        in os.environ nor in (fake) Hermes' .env."""
         store = _store(tmp_path)
         candidate = _candidate(candidate_id="cand_missing_key", body="I prefer dark mode")
         _write_candidate(store, candidate)
         _write_knob_override(store, "fact_judge_judge_backend", "typesafe_jev")
+        hermes_env_root("OTHER_KEY=unrelated\n")
 
         import os
         from plugins.modules.governance.fact_judge import run_fact_judge_lane
@@ -1971,6 +1973,7 @@ class TestJ1JevFallback:
         assert not mock_urlopen.called, "missing key must never reach the network"
         assert result["judge_backend_fallback_count"] == 1
         assert result["judge_backend_fallback_reasons"] == {"llm_missing_key": 1}
+        assert result["judge_backend_fallback_detail_sample"] == "not_in_environ_or_hermes_env"
 
     def test_total_failure_falls_through_to_heuristic_with_fallback_recorded(self, tmp_path):
         """Jev fails AND hermes_default exhausts retries -> heuristic

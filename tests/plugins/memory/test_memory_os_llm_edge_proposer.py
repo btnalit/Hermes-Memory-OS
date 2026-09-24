@@ -615,9 +615,10 @@ class TestJ2JevFallback:
         assert result["judge_backend_fallback_detail_sample"] == "socket_timeout"
         assert result["proposed_count"] == 1, "the fallback call_llm result must still produce the edge"
 
-    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path, monkeypatch):
+    def test_missing_key_never_calls_network_and_still_falls_back(self, tmp_path, monkeypatch, hermes_env_root):
         """Counterfactual for jev_backend._resolve_api_key, exercised through
-        the real (unmocked) jev_backend.judge_choice with no TYPESAFE_API_KEY."""
+        the real (unmocked) jev_backend.judge_choice with no TYPESAFE_API_KEY
+        in os.environ nor in (fake) Hermes' .env."""
         store, index = _store(tmp_path)
         _seed_canonical_crystallized(store, [
             {"id": "cry_j2_key_a", "created_at": "2026-06-01T10:00:00Z", "body": "A"},
@@ -625,6 +626,7 @@ class TestJ2JevFallback:
         ])
         index.rebuild_from_store(store)
         _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+        hermes_env_root("OTHER_KEY=unrelated\n")
 
         import os
         old_key = os.environ.pop("TYPESAFE_API_KEY", None)
@@ -640,6 +642,48 @@ class TestJ2JevFallback:
         assert not mock_urlopen.called, "missing key must never reach the network"
         assert result["judge_backend_fallback_count"] == 1
         assert result["judge_backend_fallback_reasons"] == {"llm_missing_key": 1}
+        assert result["judge_backend_fallback_detail_sample"] == "not_in_environ_or_hermes_env"
+
+    def test_key_only_in_hermes_dotenv_reaches_jev_without_fallback(self, tmp_path, monkeypatch, hermes_env_root):
+        """Counterfactual for the J2 production gap: the cognitive-loop
+        launcher does not load Hermes' .env into os.environ, so every pair fell
+        back with llm_missing_key. With the key only in .env, Jev must answer
+        and _call_llm must not run."""
+        store, index = _store(tmp_path)
+        _seed_canonical_crystallized(store, [
+            {"id": "cry_j2_env_a", "created_at": "2026-06-01T10:00:00Z", "body": "Record A body."},
+            {"id": "cry_j2_env_b", "created_at": "2026-06-01T11:00:00Z", "body": "Record B body."},
+        ])
+        index.rebuild_from_store(store)
+        _write_knob_override(store, "llm_edge_proposer_judge_backend", "typesafe_jev")
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        hermes_env_root("TYPESAFE_API_KEY=fake-dotenv-key-not-real\n")
+
+        answer = {"type": "choice", "choice": "refines", "confidence": 0.9, "probabilities": {"refines": 0.9}}
+        response_body = json.dumps({"model": "jev-1.13.0", "answers": {"relation_type": answer}}).encode()
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def read(self):
+                return response_body
+
+        monkeypatch.setattr(llm_edge_proposer, "_resolve_hermes_default_runtime", _ok_runtime)
+        with patch("urllib.request.urlopen", return_value=_Response()) as mock_urlopen, patch.object(
+            llm_edge_proposer, "_call_hermes_runtime_model_result",
+        ) as mock_hermes:
+            result = run_llm_proposer(str(index.roots.index_path), index=index, roots=store.roots)
+
+        assert mock_urlopen.called
+        assert mock_urlopen.call_args[0][0].get_header("Authorization") == "Bearer fake-dotenv-key-not-real"
+        assert not mock_hermes.called, "Jev success must not fall through to _call_llm"
+        assert result["judge_backend"] == "typesafe_jev"
+        assert result["judge_backend_fallback_count"] == 0
+        assert result["proposed_count"] == 1
 
     def test_fallback_counts_aggregate_across_pairs(self, tmp_path, monkeypatch):
         store, index = _store(tmp_path)

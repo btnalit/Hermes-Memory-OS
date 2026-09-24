@@ -98,3 +98,74 @@ def isolate_candidate_aggregation_from_real_graph_gate(request, monkeypatch):
             "error_records": [],
         },
     )
+
+
+_FAKE_HERMES_CONFIG = '''import os
+from pathlib import Path
+
+
+def get_env_value(key):
+    # Shape of the real hermes_cli.config.get_env_value: os.environ first,
+    # then <HERMES_HOME>/.env through a tokenizer imported lazily at CALL
+    # time (the real load_env imports agent.secret_scope inside the call), so
+    # a caller that restores sys.path before calling breaks here too.
+    if os.environ.get(key) is not None:
+        return os.environ[key]
+    from hermes_cli.dotenv_reader import read_env
+    return read_env(Path(os.environ["HERMES_HOME"]) / ".env").get(key)
+'''
+
+_FAKE_HERMES_DOTENV_READER = '''def read_env(path):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    values = {}
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key and not key.startswith("#"):
+            values[key.strip()] = value.strip()
+    return values
+'''
+
+
+@pytest.fixture
+def hermes_env_root(tmp_path, monkeypatch):
+    """Point Memory-OS' Hermes import scope at a fake Hermes checkout.
+
+    Returns ``install(dotenv=None, *, loader="ok")``. ``dotenv`` is the text of
+    ``<HERMES_HOME>/.env`` (``None`` = no file). ``loader`` is ``"ok"`` (a fake
+    ``hermes_cli.config.get_env_value``), ``"absent"`` (``HERMES_AGENT_ROOT``
+    is an existing empty directory -- a *nonexistent* path would be skipped and
+    fall through to ``/usr/local/lib/hermes-agent``), or ``"raises"``.
+
+    Any test that exercises a missing Jev key must request this: without it
+    the key lookup falls back to whatever Hermes install the test host has.
+    """
+    import sys
+
+    def install(dotenv=None, *, loader="ok"):
+        home = tmp_path / "fake-hermes-home"
+        home.mkdir(exist_ok=True)
+        if dotenv is not None:
+            (home / ".env").write_text(dotenv, encoding="utf-8")
+        root = tmp_path / f"fake-hermes-agent-{loader}"
+        root.mkdir(exist_ok=True)
+        if loader != "absent":
+            (root / "hermes_cli").mkdir(exist_ok=True)
+            (root / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "hermes_cli" / "dotenv_reader.py").write_text(_FAKE_HERMES_DOTENV_READER, encoding="utf-8")
+            config = _FAKE_HERMES_CONFIG
+            if loader == "raises":
+                config = (
+                    "def get_env_value(key):\n"
+                    "    raise RuntimeError('reader-message-must-not-leak')\n"
+                )
+            (root / "hermes_cli" / "config.py").write_text(config, encoding="utf-8")
+        for name in [n for n in list(sys.modules) if n == "hermes_cli" or n.startswith("hermes_cli.")]:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_AGENT_ROOT", str(root))
+        return home
+
+    return install
