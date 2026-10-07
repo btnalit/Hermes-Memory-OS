@@ -217,6 +217,9 @@ def save_golden_set(path: Path, gs: GoldenSet) -> None:
 def golden_set_path(roots: Any, *, profile: str = "default") -> Path:
     """Return the path to the golden set file for a profile."""
     from .roots import MemoryOSRoots
+    from .store import _reject_path_name
+    # Security fix: validate profile to prevent path traversal (F-001)
+    _reject_path_name(profile, field_name="golden_profile")
     root: Path = roots.memory_os_root if hasattr(roots, "memory_os_root") else Path(str(roots))
     return root / "recall_golden" / f"{profile}.golden.json"
 

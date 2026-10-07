@@ -152,6 +152,10 @@ def import_shadow_bundle(
     dry_run: bool = True,
 ) -> dict[str, Any]:
     bundle = Path(bundle_path)
+    # Security fix: validate bundle name to prevent directory escape via ".." (F-003)
+    # Path("/tmp/..").name == ".." -- without this check, import_root escapes imports_root
+    from .store import _reject_path_name
+    _reject_path_name(bundle.name, field_name="bundle_name")
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     import_root = roots.imports_root / bundle.name
     report_path = import_root / "import_report.json"
