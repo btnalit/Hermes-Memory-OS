@@ -1819,6 +1819,10 @@ def read_session_transcript(
       cut is data, not something to eyeball.
     """
     normalized_id = str(session_id or "").strip()
+    # Security fix: validate session_id to prevent path traversal (F-002, LLM-reachable)
+    if normalized_id:
+        from .store import _reject_path_name
+        _reject_path_name(normalized_id, field_name="session_id")
     clamped_messages = max(1, min(int(max_messages or 1), SESSION_TRANSCRIPT_MAX_MESSAGES))
     clamped_chars = max(80, min(int(max_chars_per_message or 1), SESSION_TRANSCRIPT_MAX_CHARS_PER_MESSAGE))
     safe_offset = max(0, int(offset or 0))
